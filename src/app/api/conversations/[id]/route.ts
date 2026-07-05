@@ -1,0 +1,98 @@
+import { NextRequest } from "next/server";
+import { and, asc, eq } from "drizzle-orm";
+import { db, schema } from "@/lib/server/db";
+import { requireSession } from "@/lib/server/auth";
+
+async function ownedConversation(id: string, userId: string) {
+  const [c] = await db
+    .select()
+    .from(schema.conversations)
+    .where(
+      and(eq(schema.conversations.id, id), eq(schema.conversations.ownerId, userId))
+    );
+  return c ?? null;
+}
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const session = await requireSession().catch(() => null);
+  if (!session) return Response.json({ error: "unauthorized" }, { status: 401 });
+  const { id } = await params;
+  const c = await ownedConversation(id, session.user.id);
+  if (!c) return Response.json({ error: "not found" }, { status: 404 });
+
+  const msgs = await db
+    .select()
+    .from(schema.messages)
+    .where(eq(schema.messages.conversationId, id))
+    .orderBy(asc(schema.messages.createdAt));
+
+  return Response.json({
+    conversation: {
+      id: c.id,
+      title: c.title,
+      projectId: c.projectId ?? undefined,
+      modelId: c.modelId,
+      styleId: c.styleId ?? undefined,
+      pinned: c.pinned,
+      archived: c.archived,
+      currentLeafId: c.currentLeafId ?? undefined,
+      createdAt: c.createdAt.toISOString(),
+      updatedAt: c.updatedAt.toISOString(),
+    },
+    messages: msgs.map((m) => ({
+      id: m.id,
+      conversationId: m.conversationId,
+      parentId: m.parentId,
+      role: m.role,
+      parts: m.parts,
+      modelId: m.modelId ?? undefined,
+      quotedText: m.quotedText ?? undefined,
+      feedback: m.feedback ?? undefined,
+      usage: m.usage ?? undefined,
+      status: m.status,
+      createdAt: m.createdAt.toISOString(),
+    })),
+  });
+}
+
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const session = await requireSession().catch(() => null);
+  if (!session) return Response.json({ error: "unauthorized" }, { status: 401 });
+  const { id } = await params;
+  const c = await ownedConversation(id, session.user.id);
+  if (!c) return Response.json({ error: "not found" }, { status: 404 });
+
+  const patch = (await req.json()) as Partial<{
+    title: string;
+    pinned: boolean;
+    archived: boolean;
+    projectId: string | null;
+    currentLeafId: string;
+    modelId: string;
+  }>;
+
+  await db
+    .update(schema.conversations)
+    .set({ ...patch, updatedAt: new Date() })
+    .where(eq(schema.conversations.id, id));
+  return Response.json({ ok: true });
+}
+
+export async function DELETE(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const session = await requireSession().catch(() => null);
+  if (!session) return Response.json({ error: "unauthorized" }, { status: 401 });
+  const { id } = await params;
+  const c = await ownedConversation(id, session.user.id);
+  if (!c) return Response.json({ error: "not found" }, { status: 404 });
+  await db.delete(schema.conversations).where(eq(schema.conversations.id, id));
+  return Response.json({ ok: true });
+}

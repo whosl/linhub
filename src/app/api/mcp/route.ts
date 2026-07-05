@@ -1,0 +1,132 @@
+import { NextRequest } from "next/server";
+import { and, desc, eq } from "drizzle-orm";
+import { db, schema } from "@/lib/server/db";
+import { requireSession } from "@/lib/server/auth";
+import { decryptSecret, encryptSecret } from "@/lib/server/crypto";
+import type { McpServer } from "@/lib/types";
+
+const uid = () => crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+
+function mcpToUi(s: typeof schema.mcpServers.$inferSelect): McpServer {
+  let headersMasked: Record<string, string> | undefined;
+  if (s.headersEncrypted) {
+    try {
+      const headers = JSON.parse(decryptSecret(s.headersEncrypted)) as Record<string, string>;
+      headersMasked = Object.fromEntries(
+        Object.entries(headers).map(([k, v]) => [k, v.length > 8 ? `${v.slice(0, 4)}…${v.slice(-4)}` : "****"])
+      );
+    } catch {
+      headersMasked = undefined;
+    }
+  }
+  return {
+    id: s.id,
+    scope: s.scope,
+    ownerId: s.ownerId ?? undefined,
+    name: s.name,
+    url: s.url,
+    transport: s.transport,
+    headersMasked,
+    enabled: s.enabled,
+    status: s.status,
+    tools: s.tools,
+  };
+}
+
+export async function GET(req: NextRequest) {
+  let session;
+  try {
+    session = await requireSession();
+  } catch {
+    return Response.json({ error: "请先登录" }, { status: 401 });
+  }
+  const scope = req.nextUrl.searchParams.get("scope") === "global" ? "global" : "user";
+  const rows =
+    scope === "global"
+      ? await db
+          .select()
+          .from(schema.mcpServers)
+          .where(eq(schema.mcpServers.scope, "global"))
+          .orderBy(desc(schema.mcpServers.createdAt))
+      : await db
+          .select()
+          .from(schema.mcpServers)
+          .where(
+            and(
+              eq(schema.mcpServers.scope, "user"),
+              eq(schema.mcpServers.ownerId, session.user.id)
+            )
+          )
+          .orderBy(desc(schema.mcpServers.createdAt));
+  return Response.json(rows.map(mcpToUi));
+}
+
+/** 创建/更新 MCP server（global 仅管理员） */
+export async function POST(req: NextRequest) {
+  let session;
+  try {
+    session = await requireSession();
+  } catch {
+    return Response.json({ error: "请先登录" }, { status: 401 });
+  }
+  const body = (await req.json()) as Partial<McpServer> & {
+    name: string;
+    url: string;
+    headers?: Record<string, string>;
+  };
+  const scope = body.scope === "global" ? "global" : "user";
+  if (scope === "global" && session.user.role !== "admin") {
+    return Response.json({ error: "无权限" }, { status: 403 });
+  }
+  if (!body.name?.trim() || !body.url?.trim()) {
+    return Response.json({ error: "名称与 URL 不能为空" }, { status: 400 });
+  }
+
+  const headersEncrypted =
+    body.headers && Object.keys(body.headers).length > 0
+      ? encryptSecret(JSON.stringify(body.headers))
+      : undefined;
+
+  if (body.id) {
+    const [existing] = await db
+      .select()
+      .from(schema.mcpServers)
+      .where(eq(schema.mcpServers.id, body.id));
+    if (!existing) return Response.json({ error: "不存在" }, { status: 404 });
+    if (existing.scope === "user" && existing.ownerId !== session.user.id) {
+      return Response.json({ error: "无权限" }, { status: 403 });
+    }
+    if (existing.scope === "global" && session.user.role !== "admin") {
+      return Response.json({ error: "无权限" }, { status: 403 });
+    }
+    await db
+      .update(schema.mcpServers)
+      .set({
+        name: body.name,
+        url: body.url,
+        transport: body.transport ?? existing.transport,
+        enabled: body.enabled ?? existing.enabled,
+        ...(headersEncrypted !== undefined ? { headersEncrypted } : {}),
+      })
+      .where(eq(schema.mcpServers.id, body.id));
+    const [row] = await db
+      .select()
+      .from(schema.mcpServers)
+      .where(eq(schema.mcpServers.id, body.id));
+    return Response.json(mcpToUi(row));
+  }
+
+  const id = `mcp-${uid()}`;
+  await db.insert(schema.mcpServers).values({
+    id,
+    scope,
+    ownerId: scope === "user" ? session.user.id : null,
+    name: body.name,
+    url: body.url,
+    transport: body.transport ?? "streamable-http",
+    headersEncrypted,
+    enabled: body.enabled ?? true,
+  });
+  const [row] = await db.select().from(schema.mcpServers).where(eq(schema.mcpServers.id, id));
+  return Response.json(mcpToUi(row));
+}

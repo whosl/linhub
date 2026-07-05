@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="500" viewBox="0 0 800 500">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0f0524"/>
+      <stop offset="60%" stop-color="#2a0a4a"/>
+      <stop offset="100%" stop-color="#4a1259"/>
+    </linearGradient>
+    <linearGradient id="wet" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1a0b2e"/>
+      <stop offset="100%" stop-color="#0a0518"/>
+    </linearGradient>
+  </defs>
+  <rect width="800" height="340" fill="url(#sky)"/>
+  <rect y="340" width="800" height="160" fill="url(#wet)"/>
+  <g opacity="0.9">
+    <rect x="40" y="120" width="90" height="220" fill="#120826"/>
+    <rect x="150" y="60" width="110" height="280" fill="#160a30"/>
+    <rect x="290" y="100" width="80" height="240" fill="#120826"/>
+    <rect x="400" y="40" width="130" height="300" fill="#180b34"/>
+    <rect x="560" y="90" width="100" height="250" fill="#140928"/>
+    <rect x="690" y="130" width="80" height="210" fill="#10071f"/>
+  </g>
+  <g>
+    <rect x="165" y="90" width="80" height="14" rx="3" fill="#ff2e88" opacity="0.95"/>
+    <rect x="418" y="70" width="94" height="16" rx="3" fill="#00e5ff" opacity="0.95"/>
+    <rect x="575" y="120" width="70" height="12" rx="3" fill="#ffb300" opacity="0.9"/>
+    <rect x="55" y="150" width="60" height="10" rx="2" fill="#00ffa3" opacity="0.85"/>
+    <rect x="305" y="130" width="50" height="10" rx="2" fill="#ff2e88" opacity="0.8"/>
+  </g>
+  <g opacity="0.5">
+    <rect x="165" y="380" width="80" height="8" rx="3" fill="#ff2e88"/>
+    <rect x="418" y="395" width="94" height="9" rx="3" fill="#00e5ff"/>
+    <rect x="575" y="410" width="70" height="7" rx="3" fill="#ffb300"/>
+  </g>
+  <g stroke="#8be9fd" stroke-width="1" opacity="0.25">
+    <line x1="80" y1="0" x2="60" y2="500"/>
+    <line x1="240" y1="0" x2="255" y2="500"/>
+    <line x1="500" y1="0" x2="480" y2="500"/>
+    <line x1="700" y1="0" x2="720" y2="500"/>
+  </g>
+  <text x="400" y="470" text-anchor="middle" font-family="monospace" font-size="13" fill="#8be9fd" opacity="0.6">mock image · gpt-image-2 ( P4 ¥e</text>
+</svg>

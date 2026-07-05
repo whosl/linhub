@@ -1,0 +1,70 @@
+"use client";
+
+import * as React from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { AuthShell } from "@/components/auth/auth-shell";
+import { signUp } from "@/lib/auth-client";
+import { toast } from "sonner";
+
+export default function RegisterPage() {
+  const router = useRouter();
+  const [name, setName] = React.useState("");
+  const [email, setEmail] = React.useState("");
+  const [password, setPassword] = React.useState("");
+  const [loading, setLoading] = React.useState(false);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    const { error } = await signUp.email({ email, password, name });
+    setLoading(false);
+    if (error) {
+      toast.error(error.message ?? "注册失败");
+      return;
+    }
+    toast.success("注册成功！");
+    router.push("/");
+    router.refresh();
+  };
+
+  return (
+    <AuthShell title="创建账户" subtitle="第一个注册的用户将自动成为管理员">
+      <form onSubmit={submit} className="space-y-3">
+        <Input
+          placeholder="昵称"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          required
+          autoFocus
+        />
+        <Input
+          type="email"
+          placeholder="邮箱"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          required
+        />
+        <Input
+          type="password"
+          placeholder="密码（至少 8 位）"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          minLength={8}
+          required
+        />
+        <Button className="w-full" size="lg" disabled={loading}>
+          {loading ? "注册中…" : "注册"}
+        </Button>
+      </form>
+      <p className="mt-4 text-center text-sm text-muted-foreground">
+        已有账户？{" "}
+        <Link href="/login" className="font-medium text-primary hover:underline">
+          登录
+        </Link>
+      </p>
+    </AuthShell>
+  );
+}

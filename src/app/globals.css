@@ -1,26 +1,230 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ---------- LinHub 设计系统：Claude 风格暖色调 ---------- */
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* 基底：奶油暖白 */
+  --background: #faf9f5;
+  --foreground: #3d3929;
+  --card: #ffffff;
+  --card-foreground: #3d3929;
+  --popover: #ffffff;
+  --popover-foreground: #3d3929;
+
+  /* 主色：陶土橙（Claude 品牌色系） */
+  --primary: #c96442;
+  --primary-foreground: #ffffff;
+
+  --secondary: #f0eee6;
+  --secondary-foreground: #535146;
+  --muted: #f0eee6;
+  --muted-foreground: #83827d;
+  --accent: #ebe9e0;
+  --accent-foreground: #3d3929;
+
+  --destructive: #c2410c;
+  --destructive-foreground: #ffffff;
+
+  --border: #e3e1d9;
+  --input: #e3e1d9;
+  --ring: #c96442;
+
+  /* 侧栏 */
+  --sidebar: #f5f4ee;
+  --sidebar-foreground: #535146;
+  --sidebar-accent: #e9e7dd;
+  --sidebar-border: #e3e1d9;
+
+  /* 聊天气泡 */
+  --bubble-user: #eee9df;
+  --bubble-user-foreground: #3d3929;
+
+  --success: #2f9e6e;
+  --warning: #d97706;
+
+  --radius: 0.75rem;
+}
+
+.dark {
+  --background: #262624;
+  --foreground: #eceae2;
+  --card: #30302e;
+  --card-foreground: #eceae2;
+  --popover: #30302e;
+  --popover-foreground: #eceae2;
+
+  --primary: #d97757;
+  --primary-foreground: #ffffff;
+
+  --secondary: #3a3a37;
+  --secondary-foreground: #c2c0b6;
+  --muted: #33332f;
+  --muted-foreground: #9c9a90;
+  --accent: #3e3e3a;
+  --accent-foreground: #eceae2;
+
+  --destructive: #e5674a;
+  --destructive-foreground: #ffffff;
+
+  --border: #3e3d38;
+  --input: #4a4945;
+  --ring: #d97757;
+
+  --sidebar: #1f1e1d;
+  --sidebar-foreground: #c2c0b6;
+  --sidebar-accent: #33322f;
+  --sidebar-border: #33322f;
+
+  --bubble-user: #3a3a35;
+  --bubble-user-foreground: #eceae2;
+
+  --success: #4ade80;
+  --warning: #fbbf24;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-bubble-user: var(--bubble-user);
+  --color-bubble-user-foreground: var(--bubble-user-foreground);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 10px);
+
+  --font-sans: var(--font-geist-sans), "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", sans-serif;
+  --font-serif: "Georgia", "Songti SC", serif;
+  --font-mono: var(--font-geist-mono), "SF Mono", "Menlo", monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* {
+  border-color: var(--border);
+}
+
+html {
+  height: 100%;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans);
+  height: 100%;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ---------- 细滚动条 ---------- */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted-foreground) 25%, transparent);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--muted-foreground) 45%, transparent);
+}
+
+/* ---------- 文本选区 ---------- */
+::selection {
+  background: color-mix(in srgb, var(--primary) 22%, transparent);
+}
+
+/* ---------- 动效 ---------- */
+
+@keyframes lh-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes lh-pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@keyframes lh-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.animate-fade-up {
+  animation: lh-fade-up 0.35s cubic-bezier(0.21, 1.02, 0.73, 1) both;
+}
+
+/* 思考中的呼吸文字 */
+.animate-thinking {
+  background: linear-gradient(
+    90deg,
+    var(--muted-foreground) 40%,
+    var(--foreground) 50%,
+    var(--muted-foreground) 60%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: lh-shimmer 2.2s linear infinite;
+}
+
+/* 流式输出末尾光标 */
+.streaming-cursor::after {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 15px;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  border-radius: 2px;
+  background: var(--primary);
+  animation: lh-pulse-soft 1s ease-in-out infinite;
 }
