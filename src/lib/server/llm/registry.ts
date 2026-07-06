@@ -11,6 +11,8 @@ export interface ResolvedModel {
   model: LanguageModel;
   record: typeof schema.models.$inferSelect;
   provider: typeof schema.providers.$inferSelect;
+  /** 该供应商是否启用 Responses API store 持久化（中转网关常需关闭） */
+  storeEnabled: boolean;
 }
 
 const DEFAULT_BASE_URLS: Record<string, string | undefined> = {
@@ -41,6 +43,8 @@ export async function resolveModel(modelId: string): Promise<ResolvedModel> {
 
   const apiKey = decryptSecret(provider.apiKeyEncrypted);
   const baseURL = provider.baseUrl || DEFAULT_BASE_URLS[provider.kind];
+  // storeEnabled 仅对走 Responses API 的 openai 协议有意义；其余协议恒为 true
+  const storeEnabled = provider.storeEnabled ?? true;
 
   switch (provider.kind) {
     case "openai":
@@ -48,24 +52,28 @@ export async function resolveModel(modelId: string): Promise<ResolvedModel> {
         model: createOpenAI({ apiKey, baseURL })(record.slug),
         record,
         provider,
+        storeEnabled,
       };
     case "anthropic":
       return {
         model: createAnthropic({ apiKey, baseURL })(record.slug),
         record,
         provider,
+        storeEnabled,
       };
     case "google":
       return {
         model: createGoogleGenerativeAI({ apiKey, baseURL })(record.slug),
         record,
         provider,
+        storeEnabled,
       };
     case "deepseek":
       return {
         model: createDeepSeek({ apiKey, baseURL })(record.slug),
         record,
         provider,
+        storeEnabled,
       };
     // 智谱与小米走 OpenAI 兼容协议（chat completions）
     case "zhipu":
@@ -74,6 +82,7 @@ export async function resolveModel(modelId: string): Promise<ResolvedModel> {
         model: createOpenAI({ apiKey, baseURL }).chat(record.slug),
         record,
         provider,
+        storeEnabled,
       };
     default:
       throw new Error(`未知供应商: ${provider.kind}`);

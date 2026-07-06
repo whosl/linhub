@@ -17,6 +17,7 @@ function toUi(p: typeof schema.providers.$inferSelect) {
       ? maskSecret(decryptSecret(p.apiKeyEncrypted))
       : undefined,
     enabled: p.enabled,
+    storeEnabled: p.storeEnabled,
   };
 }
 
@@ -28,6 +29,7 @@ const ProviderUpsertSchema = z.object({
   baseUrl: z.string().optional(),
   apiKey: z.string().optional(),
   enabled: z.boolean().optional(),
+  storeEnabled: z.boolean().optional(),
 });
 
 export async function GET() {
@@ -55,6 +57,7 @@ export async function POST(req: NextRequest) {
     };
     if (body.apiKey) patch.apiKeyEncrypted = encryptSecret(body.apiKey);
     if (body.enabled !== undefined) patch.enabled = body.enabled;
+    if (body.storeEnabled !== undefined) patch.storeEnabled = body.storeEnabled;
     await db
       .update(schema.providers)
       .set(patch)
@@ -74,6 +77,7 @@ export async function POST(req: NextRequest) {
     baseUrl: body.baseUrl,
     apiKeyEncrypted: body.apiKey ? encryptSecret(body.apiKey) : null,
     enabled: body.enabled ?? true,
+    storeEnabled: body.storeEnabled ?? true,
   });
   const [row] = await db
     .select()

@@ -66,12 +66,12 @@ export const mockUsers: User[] = [
 // ---------- 供应商与模型 ----------
 
 export const mockProviders: Provider[] = [
-  { id: "pv-openai", kind: "openai", name: "OpenAI", apiKeyMasked: "sk-...k3Fa", enabled: true },
-  { id: "pv-anthropic", kind: "anthropic", name: "Anthropic", apiKeyMasked: "sk-ant-...9xQ2", enabled: true },
-  { id: "pv-google", kind: "google", name: "Google Gemini", apiKeyMasked: "AIza...pL8w", enabled: true },
-  { id: "pv-zhipu", kind: "zhipu", name: "智谱 GLM", apiKeyMasked: "e5f2...a1b9", enabled: true },
-  { id: "pv-deepseek", kind: "deepseek", name: "DeepSeek", apiKeyMasked: "sk-...m2Nc", enabled: true },
-  { id: "pv-xiaomi", kind: "xiaomi", name: "Xiaomi MiMo", apiKeyMasked: "mm-...t7Rd", enabled: true },
+  { id: "pv-openai", kind: "openai", name: "OpenAI", apiKeyMasked: "sk-...k3Fa", enabled: true, storeEnabled: true },
+  { id: "pv-anthropic", kind: "anthropic", name: "Anthropic", apiKeyMasked: "sk-ant-...9xQ2", enabled: true, storeEnabled: true },
+  { id: "pv-google", kind: "google", name: "Google Gemini", apiKeyMasked: "AIza...pL8w", enabled: true, storeEnabled: true },
+  { id: "pv-zhipu", kind: "zhipu", name: "智谱 GLM", apiKeyMasked: "e5f2...a1b9", enabled: true, storeEnabled: true },
+  { id: "pv-deepseek", kind: "deepseek", name: "DeepSeek", apiKeyMasked: "sk-...m2Nc", enabled: true, storeEnabled: true },
+  { id: "pv-xiaomi", kind: "xiaomi", name: "Xiaomi MiMo", apiKeyMasked: "mm-...t7Rd", enabled: true, storeEnabled: true },
 ];
 
 export const mockModels: Model[] = [

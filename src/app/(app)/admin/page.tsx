@@ -111,6 +111,7 @@ function ProvidersTab() {
     name: "",
     baseUrl: "",
     apiKey: "",
+    storeEnabled: true,
   });
 
   const { data: providers = [] } = useQuery({
@@ -125,6 +126,7 @@ function ProvidersTab() {
       name: p?.name ?? "",
       baseUrl: p?.baseUrl ?? "",
       apiKey: "",
+      storeEnabled: p?.storeEnabled ?? true,
     });
     setEditorOpen(true);
   };
@@ -136,6 +138,7 @@ function ProvidersTab() {
       name: form.name.trim(),
       baseUrl: form.baseUrl.trim() || undefined,
       apiKey: form.apiKey.trim() || undefined,
+      storeEnabled: form.storeEnabled,
     });
     queryClient.invalidateQueries({ queryKey: ["admin-providers"] });
     setEditorOpen(false);
@@ -216,6 +219,20 @@ function ProvidersTab() {
               value={form.baseUrl}
               onChange={(e) => setForm({ ...form, baseUrl: e.target.value })}
             />
+            {form.kind === "openai" && (
+              <label className="flex items-center justify-between gap-3 rounded-md border px-3 py-2.5">
+                <span className="text-sm">
+                  Responses API 持久化
+                  <span className="ml-1 text-xs text-muted-foreground">
+                    （中转网关需关闭，否则 reasoning 模型多步工具会 404）
+                  </span>
+                </span>
+                <Switch
+                  checked={form.storeEnabled}
+                  onCheckedChange={(v) => setForm({ ...form, storeEnabled: v })}
+                />
+              </label>
+            )}
           </div>
           <DialogFooter>
             <Button variant="ghost" onClick={() => setEditorOpen(false)}>

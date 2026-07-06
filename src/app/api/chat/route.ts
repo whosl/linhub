@@ -498,7 +498,7 @@ async function streamAssistant(opts: {
   let streamResult: ReturnType<typeof streamText> | undefined;
 
   try {
-    const { model, record } = await resolveModel(modelId);
+    const { model, record, provider, storeEnabled } = await resolveModel(modelId);
     // Pro 模型需订阅（C8）；余额/额度预检防透支（C2）
     await assertModelAccess(userId, record);
     await assertCanSpend(userId);
@@ -512,6 +512,11 @@ async function streamAssistant(opts: {
       ...(record.maxOutputTokens ? { maxOutputTokens: record.maxOutputTokens } : {}),
       ...(hasTools && supportsTools
         ? { tools, stopWhen: stepCountIs(8) }
+        : {}),
+      // 走中转网关的 OpenAI Responses API 常不持久化 reasoning item，
+      // 关闭 store 后多步工具循环不会再以 item_reference 引用上一轮的 rs_xxx
+      ...(!storeEnabled && provider.kind === "openai"
+        ? { providerOptions: { openai: { store: false } } }
         : {}),
     });
     streamResult = result;

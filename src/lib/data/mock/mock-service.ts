@@ -98,6 +98,7 @@ class MockAdminService implements AdminService {
       baseUrl: p.baseUrl,
       apiKeyMasked: p.apiKey ? maskKey(p.apiKey) : undefined,
       enabled: p.enabled ?? true,
+      storeEnabled: p.storeEnabled ?? true,
     };
     this.s.providers.push(created);
     return { ...created };

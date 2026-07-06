@@ -77,6 +77,12 @@ export const providers = pgTable("providers", {
   /** AES-GCM 加密后的 API key */
   apiKeyEncrypted: text("api_key_encrypted"),
   enabled: boolean("enabled").notNull().default(true),
+  /**
+   * 是否启用 OpenAI Responses API 的服务端 store 持久化（默认开启）。
+   * 直连官方 OpenAI 保持开启即可；走第三方中转网关（不持久化 reasoning item）
+   * 时需关闭，否则 reasoning 模型多步工具循环会因引用上一轮的 rs_xxx 而 404。
+   */
+  storeEnabled: boolean("store_enabled").notNull().default(true),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 

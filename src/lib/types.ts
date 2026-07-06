@@ -36,6 +36,8 @@ export interface Provider {
   /** 管理端展示时只回传掩码 */
   apiKeyMasked?: string;
   enabled: boolean;
+  /** 是否启用 OpenAI Responses API store 持久化（中转网关需关闭） */
+  storeEnabled: boolean;
 }
 
 export type ModelCapability =
