@@ -472,8 +472,9 @@ export async function buildMcpTools(
       // 单服务器 10s 超时，防止慢/挂的 MCP 拖死整个聊天请求
       const client = await timeout(
         createMCPClient({
+          // I6: 按 server.transport 选择传输（'streamable-http' → 'http'）
           transport: {
-            type: "sse",
+            type: server.transport === "streamable-http" ? "http" : "sse",
             url: server.url,
             headers,
           },

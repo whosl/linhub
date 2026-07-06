@@ -34,8 +34,14 @@ export async function POST(
     const headers = server.headersEncrypted
       ? (JSON.parse(decryptSecret(server.headersEncrypted)) as Record<string, string>)
       : undefined;
+    // I6: 按存储的 transport 列选择传输方式（DB 枚举 'streamable-http' → 客户端 'http'），
+    // 之前两处都硬编码 'sse'，导致该列实际失效。
     const client = await createMCPClient({
-      transport: { type: "sse", url: server.url, headers },
+      transport: {
+        type: server.transport === "streamable-http" ? "http" : "sse",
+        url: server.url,
+        headers,
+      },
     });
     const toolSet = await client.tools();
     const tools = Object.entries(toolSet).map(([name, t]) => ({

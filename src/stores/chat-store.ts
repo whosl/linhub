@@ -239,6 +239,12 @@ export const useChatStore = create<ChatState>((set, get) => {
     },
 
     send: async (input) => {
+      // I8: 并发守卫——同一会话已有流式进行时，拒绝新的 send/regenerate，
+      // 防止两条流写同一 messageId 的 text-delta 造成竞态 corrupt。
+      if (input.conversationId) {
+        const s = get().sessions[input.conversationId];
+        if (s?.status === "streaming") return;
+      }
       let conversationId = input.conversationId;
       for await (const event of getDataService().sendMessage(input)) {
         if (event.type === "conversation-created") {
@@ -264,6 +270,9 @@ export const useChatStore = create<ChatState>((set, get) => {
     },
 
     regenerate: async (conversationId, assistantMessageId, modelId) => {
+      // I8: 并发守卫——同 send
+      const s = get().sessions[conversationId];
+      if (s?.status === "streaming") return;
       for await (const event of getDataService().regenerate(
         conversationId,
         assistantMessageId,

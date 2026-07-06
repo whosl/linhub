@@ -49,6 +49,15 @@ async function* streamNdjson(
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  // I12: 容错的行解析——代理可能在 JSON 行中间重新分块，
+  // 此时 JSON.parse 会抛错。这里跳过无法解析的行而非中断整条流。
+  const safeParse = (line: string): StreamEvent | null => {
+    try {
+      return JSON.parse(line) as StreamEvent;
+    } catch {
+      return null;
+    }
+  };
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -57,10 +66,16 @@ async function* streamNdjson(
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
       for (const line of lines) {
-        if (line.trim()) yield JSON.parse(line) as StreamEvent;
+        if (line.trim()) {
+          const evt = safeParse(line);
+          if (evt) yield evt;
+        }
       }
     }
-    if (buffer.trim()) yield JSON.parse(buffer) as StreamEvent;
+    if (buffer.trim()) {
+      const evt = safeParse(buffer);
+      if (evt) yield evt;
+    }
   } finally {
     if (signal?.aborted) reader.cancel().catch(() => {});
   }

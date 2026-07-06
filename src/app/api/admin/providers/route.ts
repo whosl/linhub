@@ -1,9 +1,11 @@
 import { NextRequest } from "next/server";
 import { asc, eq } from "drizzle-orm";
+import { z } from "zod";
 import { db, schema } from "@/lib/server/db";
 import { requireAdmin } from "@/lib/server/auth";
 import { encryptSecret, decryptSecret, maskSecret } from "@/lib/server/crypto";
 import { ensureSeeded } from "@/lib/server/seed";
+import { parseBody } from "@/lib/server/validate";
 
 function toUi(p: typeof schema.providers.$inferSelect) {
   return {
@@ -17,6 +19,16 @@ function toUi(p: typeof schema.providers.$inferSelect) {
     enabled: p.enabled,
   };
 }
+
+// I1: 运行时校验 kind 枚举，避免非法值导致 Postgres 报 500
+const ProviderUpsertSchema = z.object({
+  id: z.string().optional(),
+  kind: z.enum(["openai", "anthropic", "google", "zhipu", "deepseek", "xiaomi"]),
+  name: z.string().min(1),
+  baseUrl: z.string().optional(),
+  apiKey: z.string().optional(),
+  enabled: z.boolean().optional(),
+});
 
 export async function GET() {
   await ensureSeeded();
@@ -33,14 +45,8 @@ export async function POST(req: NextRequest) {
   const ok = await requireAdmin().catch(() => null);
   if (!ok) return Response.json({ error: "forbidden" }, { status: 403 });
 
-  const body = (await req.json()) as {
-    id?: string;
-    kind: typeof schema.providers.$inferSelect.kind;
-    name: string;
-    baseUrl?: string;
-    apiKey?: string;
-    enabled?: boolean;
-  };
+  const body = await parseBody(req, ProviderUpsertSchema);
+  if (body instanceof Response) return body; // 400 校验失败
 
   if (body.id) {
     const patch: Partial<typeof schema.providers.$inferInsert> = {

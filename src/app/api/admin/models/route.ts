@@ -1,8 +1,10 @@
 import { NextRequest } from "next/server";
 import { asc, eq } from "drizzle-orm";
+import { z } from "zod";
 import { db, schema } from "@/lib/server/db";
 import { requireAdmin } from "@/lib/server/auth";
 import { ensureSeeded } from "@/lib/server/seed";
+import { parseBody } from "@/lib/server/validate";
 
 function toUi(m: typeof schema.models.$inferSelect, providerKind: string) {
   return {
@@ -24,6 +26,24 @@ function toUi(m: typeof schema.models.$inferSelect, providerKind: string) {
   };
 }
 
+// I1: 严格白名单 schema，替代原先的 as 转型 + 任意列写入（曾可写 tier/sortOrder/id 等）
+const ModelUpsertSchema = z.object({
+  id: z.string().optional(),
+  providerId: z.string().min(1),
+  slug: z.string().min(1),
+  displayName: z.string().min(1),
+  description: z.string().optional(),
+  capabilities: z.array(z.string()).default([]),
+  enabled: z.boolean().default(true),
+  inputPricePerM: z.number().int().nonnegative().default(0),
+  outputPricePerM: z.number().int().nonnegative().default(0),
+  pricePerImage: z.number().int().nonnegative().optional(),
+  contextWindow: z.number().int().positive().default(128000),
+  maxOutputTokens: z.number().int().positive().optional(),
+  tier: z.enum(["free", "pro"]).default("free"),
+  sortOrder: z.number().int().default(0),
+});
+
 export async function GET() {
   await ensureSeeded();
   const ok = await requireAdmin().catch(() => null);
@@ -40,9 +60,8 @@ export async function POST(req: NextRequest) {
   const ok = await requireAdmin().catch(() => null);
   if (!ok) return Response.json({ error: "forbidden" }, { status: 403 });
 
-  const body = (await req.json()) as Partial<
-    typeof schema.models.$inferInsert
-  > & { id?: string };
+  const body = await parseBody(req, ModelUpsertSchema);
+  if (body instanceof Response) return body; // 400 校验失败
 
   if (body.id) {
     const { id, ...patch } = body;
@@ -56,10 +75,7 @@ export async function POST(req: NextRequest) {
   }
 
   const id = `m-${crypto.randomUUID().slice(0, 8)}`;
-  await db.insert(schema.models).values({
-    ...(body as typeof schema.models.$inferInsert),
-    id,
-  });
+  await db.insert(schema.models).values({ ...body, id });
   const [row] = await db
     .select({ model: schema.models, kind: schema.providers.kind })
     .from(schema.models)

@@ -20,6 +20,9 @@ export function MermaidBlock({ code }: { code: string }) {
           startOnLoad: false,
           theme: resolvedTheme === "dark" ? "dark" : "neutral",
           fontFamily: "inherit",
+          // I15: 显式指定最高安全级别，禁止 mermaid 图中的 click 回调与 HTML 标签，
+          // 防止 AI 生成的恶意图表经 dangerouslySetInnerHTML 触发 XSS
+          securityLevel: "strict",
         });
         const id = `mermaid-${++mermaidIdCounter}`;
         const { svg } = await mermaid.render(id, code);
