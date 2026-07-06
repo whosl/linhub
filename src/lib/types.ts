@@ -26,7 +26,8 @@ export type ProviderKind =
   | "google"
   | "zhipu"
   | "deepseek"
-  | "xiaomi";
+  | "xiaomi"
+  | "xiaomi-token-plan";
 
 export interface Provider {
   id: string;

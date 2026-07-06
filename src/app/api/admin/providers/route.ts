@@ -24,7 +24,15 @@ function toUi(p: typeof schema.providers.$inferSelect) {
 // I1: 运行时校验 kind 枚举，避免非法值导致 Postgres 报 500
 const ProviderUpsertSchema = z.object({
   id: z.string().optional(),
-  kind: z.enum(["openai", "anthropic", "google", "zhipu", "deepseek", "xiaomi"]),
+  kind: z.enum([
+    "openai",
+    "anthropic",
+    "google",
+    "zhipu",
+    "deepseek",
+    "xiaomi",
+    "xiaomi-token-plan",
+  ]),
   name: z.string().min(1),
   baseUrl: z.string().optional(),
   apiKey: z.string().optional(),

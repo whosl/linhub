@@ -22,7 +22,12 @@ const DEFAULT_BASE_URLS: Record<string, string | undefined> = {
   deepseek: undefined,
   zhipu: "https://open.bigmodel.cn/api/paas/v4",
   xiaomi: "https://api.mimo.xiaomi.com/v1",
+  "xiaomi-token-plan": "https://token-plan-cn.xiaomimimo.com/v1",
 };
+
+export function getProviderBaseURL(provider: typeof schema.providers.$inferSelect) {
+  return provider.baseUrl || DEFAULT_BASE_URLS[provider.kind];
+}
 
 /** 根据 modelId 从数据库解析出可调用的 AI SDK 模型实例 */
 export async function resolveModel(modelId: string): Promise<ResolvedModel> {
@@ -42,7 +47,7 @@ export async function resolveModel(modelId: string): Promise<ResolvedModel> {
   if (!provider.apiKeyEncrypted) throw new Error(`供应商 ${provider.name} 未配置 API Key`);
 
   const apiKey = decryptSecret(provider.apiKeyEncrypted);
-  const baseURL = provider.baseUrl || DEFAULT_BASE_URLS[provider.kind];
+  const baseURL = getProviderBaseURL(provider);
   // storeEnabled 仅对走 Responses API 的 openai 协议有意义；其余协议恒为 true
   const storeEnabled = provider.storeEnabled ?? true;
 
@@ -75,9 +80,10 @@ export async function resolveModel(modelId: string): Promise<ResolvedModel> {
         provider,
         storeEnabled,
       };
-    // 智谱与小米走 OpenAI 兼容协议（chat completions）
+    // 智谱与小米（含 token plan）走 OpenAI 兼容协议（chat completions）
     case "zhipu":
     case "xiaomi":
+    case "xiaomi-token-plan":
       return {
         model: createOpenAI({ apiKey, baseURL }).chat(record.slug),
         record,

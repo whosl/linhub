@@ -70,7 +70,15 @@ export const verifications = pgTable("verifications", {
 export const providers = pgTable("providers", {
   id: text("id").primaryKey(),
   kind: text("kind", {
-    enum: ["openai", "anthropic", "google", "zhipu", "deepseek", "xiaomi"],
+    enum: [
+      "openai",
+      "anthropic",
+      "google",
+      "zhipu",
+      "deepseek",
+      "xiaomi",
+      "xiaomi-token-plan",
+    ],
   }).notNull(),
   name: text("name").notNull(),
   baseUrl: text("base_url"),
