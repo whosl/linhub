@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 import { requireAdmin } from "@/lib/server/auth";
 import { decryptSecret } from "@/lib/server/crypto";
+import { formatUpstreamError } from "@/lib/server/upstream-error";
 import type { RemoteModel } from "@/lib/types";
 
 export const maxDuration = 60;
@@ -16,6 +17,7 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
   deepseek: "https://api.deepseek.com",
   zhipu: "https://open.bigmodel.cn/api/paas/v4",
   xiaomi: "https://api.mimo.xiaomi.com/v1",
+  "xiaomi-token-plan": "https://token-plan-cn.xiaomimimo.com/v1",
 };
 
 async function getProvider(id: string) {
@@ -41,8 +43,9 @@ async function fetchRemoteModels(
   if (kind === "anthropic") {
     const res = await fetch(`${baseURL}/v1/models?limit=100`, {
       headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+      signal: AbortSignal.timeout(15_000),
     });
-    if (!res.ok) throw new Error(`拉取失败（${res.status}）`);
+    if (!res.ok) throw new Error(await formatUpstreamError(res, "拉取远端模型失败"));
     const data = (await res.json()) as {
       data: { id: string; display_name?: string }[];
     };
@@ -50,8 +53,10 @@ async function fetchRemoteModels(
   }
 
   if (kind === "google") {
-    const res = await fetch(`${baseURL}/v1beta/models?pageSize=200&key=${apiKey}`);
-    if (!res.ok) throw new Error(`拉取失败（${res.status}）`);
+    const res = await fetch(`${baseURL}/v1beta/models?pageSize=200&key=${apiKey}`, {
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) throw new Error(await formatUpstreamError(res, "拉取远端模型失败"));
     const data = (await res.json()) as {
       models?: { name: string; displayName?: string; supportedGenerationMethods?: string[] }[];
     };
@@ -66,8 +71,9 @@ async function fetchRemoteModels(
   // OpenAI 兼容：openai / zhipu / deepseek / xiaomi
   const res = await fetch(`${baseURL}/models`, {
     headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(15_000),
   });
-  if (!res.ok) throw new Error(`拉取失败（${res.status}）`);
+  if (!res.ok) throw new Error(await formatUpstreamError(res, "拉取远端模型失败"));
   const data = (await res.json()) as { data?: { id: string }[] };
   return (data.data ?? []).map((m) => ({ slug: m.id }));
 }
@@ -95,10 +101,21 @@ export async function GET(
     return Response.json(list);
   } catch (e) {
     return Response.json(
-      { error: e instanceof Error ? e.message : "拉取模型失败" },
+      { error: formatProviderModelError(e) },
       { status: 502 }
     );
   }
+}
+
+function formatProviderModelError(e: unknown) {
+  if (!(e instanceof Error)) return "拉取模型失败";
+  if (e.name === "TimeoutError") {
+    return "连接供应商超时，请检查 Base URL 或网络";
+  }
+  if (/fetch failed|ECONNREFUSED|ENOTFOUND|ECONNRESET|network/i.test(e.message)) {
+    return "无法连接供应商模型接口，请检查 Base URL 或网络";
+  }
+  return e.message || "拉取模型失败";
 }
 
 /** 根据 slug 猜测能力与默认参数，管理员之后可在「模型与计价」中修改 */

@@ -4,6 +4,7 @@ import * as React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   BotIcon,
+  CheckCircleIcon,
   CheckIcon,
   CoinsIcon,
   DownloadIcon,
@@ -16,6 +17,7 @@ import {
   Trash2Icon,
   UsersIcon,
   XIcon,
+  ZapIcon,
 } from "lucide-react";
 import { getDataService } from "@/lib/data";
 import type {
@@ -58,6 +60,7 @@ const PROVIDER_KINDS: { value: ProviderKind; label: string }[] = [
   { value: "zhipu", label: "智谱 GLM" },
   { value: "deepseek", label: "DeepSeek" },
   { value: "xiaomi", label: "Xiaomi MiMo" },
+  { value: "xiaomi-token-plan", label: "Xiaomi MiMo (Token Plan)" },
 ];
 
 export default function AdminPage() {
@@ -106,6 +109,7 @@ function ProvidersTab() {
   const [editorOpen, setEditorOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<Provider | null>(null);
   const [fetchingFor, setFetchingFor] = React.useState<Provider | null>(null);
+  const [testingProvider, setTestingProvider] = React.useState<string | null>(null);
   const [form, setForm] = React.useState({
     kind: "openai" as ProviderKind,
     name: "",
@@ -150,6 +154,24 @@ function ProvidersTab() {
     queryClient.invalidateQueries({ queryKey: ["admin-providers"] });
   };
 
+  // 测试连接：调拉取模型接口，成功说明 endpoint + key 都通
+  const testConnection = async (p: Provider) => {
+    setTestingProvider(p.id);
+    try {
+      const res = await fetch(`/api/admin/providers/${p.id}/models`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        throw new Error(err?.error ?? `请求失败（${res.status}）`);
+      }
+      const models = (await res.json()) as RemoteModel[];
+      toast.success(`连接正常，发现 ${models.length} 个模型`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "测试失败");
+    } finally {
+      setTestingProvider(null);
+    }
+  };
+
   return (
     <div className="space-y-3">
       <div className="flex justify-end">
@@ -172,6 +194,19 @@ function ProvidersTab() {
               {p.baseUrl && ` · ${p.baseUrl}`}
             </p>
           </div>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!p.apiKeyMasked || testingProvider === p.id}
+            onClick={() => testConnection(p)}
+          >
+            {testingProvider === p.id ? (
+              <Loader2Icon className="animate-spin" />
+            ) : (
+              <CheckCircleIcon />
+            )}
+            测试
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -269,8 +304,10 @@ function FetchModelsDialog({
   });
 
   React.useEffect(() => {
-    setSelected(new Set());
-    setFilter("");
+    Promise.resolve().then(() => {
+      setSelected(new Set());
+      setFilter("");
+    });
   }, [provider?.id]);
 
   if (!provider) return null;
@@ -416,11 +453,27 @@ function FetchModelsDialog({
 function ModelsTab() {
   const queryClient = useQueryClient();
   const [editing, setEditing] = React.useState<Model | null>(null);
+  const [testingModel, setTestingModel] = React.useState<string | null>(null);
 
   const { data: models = [] } = useQuery({
     queryKey: ["admin-models"],
     queryFn: () => getDataService().admin.listAllModels(),
   });
+
+  // 测试单个模型是否可调用（发极简 ping）
+  const testModel = async (m: Model) => {
+    setTestingModel(m.id);
+    try {
+      const res = await fetch(`/api/admin/models/${m.id}/test`, { method: "POST" });
+      const data = (await res.json()) as { ok: boolean; message?: string; error?: string };
+      if (data.ok) toast.success(data.message ?? "测试成功");
+      else toast.error(data.error ?? "测试失败");
+    } catch {
+      toast.error("网络错误");
+    } finally {
+      setTestingModel(null);
+    }
+  };
 
   const toggle = async (m: Model) => {
     await getDataService().admin.saveModel({ id: m.id, enabled: !m.enabled });
@@ -494,9 +547,24 @@ function ModelsTab() {
                   <Switch checked={m.enabled} onCheckedChange={() => toggle(m)} />
                 </td>
                 <td className="px-3 py-2.5">
-                  <Button variant="ghost" size="icon-sm" onClick={() => setEditing(m)}>
-                    <PencilIcon />
-                  </Button>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      disabled={testingModel === m.id}
+                      onClick={() => testModel(m)}
+                      title="测试模型可用性"
+                    >
+                      {testingModel === m.id ? (
+                        <Loader2Icon className="size-4 animate-spin" />
+                      ) : (
+                        <ZapIcon />
+                      )}
+                    </Button>
+                    <Button variant="ghost" size="icon-sm" onClick={() => setEditing(m)}>
+                      <PencilIcon />
+                    </Button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -572,17 +640,19 @@ function ModelEditorDialog({
 
   React.useEffect(() => {
     if (model) {
-      setForm({
-        displayName: model.displayName,
-        description: model.description ?? "",
-        capabilities: [...model.capabilities],
-        contextWindow: model.contextWindow,
-        maxOutputTokens: model.maxOutputTokens?.toString() ?? "",
-        inputPricePerM: model.inputPricePerM,
-        outputPricePerM: model.outputPricePerM,
-        pricePerImage: model.pricePerImage?.toString() ?? "",
-        tier: model.tier,
-        sortOrder: model.sortOrder ?? 0,
+      Promise.resolve().then(() => {
+        setForm({
+          displayName: model.displayName,
+          description: model.description ?? "",
+          capabilities: [...model.capabilities],
+          contextWindow: model.contextWindow,
+          maxOutputTokens: model.maxOutputTokens?.toString() ?? "",
+          inputPricePerM: model.inputPricePerM,
+          outputPricePerM: model.outputPricePerM,
+          pricePerImage: model.pricePerImage?.toString() ?? "",
+          tier: model.tier,
+          sortOrder: model.sortOrder ?? 0,
+        });
       });
     }
   }, [model]);
