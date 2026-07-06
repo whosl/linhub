@@ -49,13 +49,11 @@ async function* streamNdjson(
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  // I12: 容错的行解析——代理可能在 JSON 行中间重新分块，
-  // 此时 JSON.parse 会抛错。这里跳过无法解析的行而非中断整条流。
-  const safeParse = (line: string): StreamEvent | null => {
+  const parseLine = (line: string): StreamEvent => {
     try {
       return JSON.parse(line) as StreamEvent;
     } catch {
-      return null;
+      return { type: "error", message: "流式响应解析失败，请重试" };
     }
   };
   try {
@@ -67,14 +65,14 @@ async function* streamNdjson(
       buffer = lines.pop() ?? "";
       for (const line of lines) {
         if (line.trim()) {
-          const evt = safeParse(line);
-          if (evt) yield evt;
+          const evt = parseLine(line);
+          yield evt;
+          if (evt.type === "error") return;
         }
       }
     }
     if (buffer.trim()) {
-      const evt = safeParse(buffer);
-      if (evt) yield evt;
+      yield parseLine(buffer);
     }
   } finally {
     if (signal?.aborted) reader.cancel().catch(() => {});
@@ -94,7 +92,11 @@ export class ApiDataService implements DataService {
   async getCurrentUser(): Promise<User | null> {
     return fetchJson<User | null>("/api/me");
   }
-  async updateProfile(patch: { name?: string; avatarUrl?: string }) {
+  async updateProfile(patch: {
+    name?: string;
+    avatarUrl?: string;
+    defaultModelId?: string | null;
+  }) {
     return fetchJson<User>("/api/me", {
       method: "PATCH",
       body: JSON.stringify(patch),
@@ -103,7 +105,12 @@ export class ApiDataService implements DataService {
 
   // ---- 模型与风格 ----
   listModels() {
-    return fetchJson<Model[]>("/api/models");
+    return fetchJson<{ models: Model[]; defaultModelId?: string }>("/api/models").then(
+      (r) => r.models
+    );
+  }
+  listModelsWithDefault() {
+    return fetchJson<{ models: Model[]; defaultModelId?: string }>("/api/models");
   }
   listStyles() {
     return fetchJson<ChatStyle[]>("/api/styles");
@@ -163,6 +170,7 @@ export class ApiDataService implements DataService {
     // abort controller，使 stop 按钮在拿到 conversation-created 前也能生效。
     const isNew = !input.conversationId;
     const sentinel = "__new_conversation__";
+    let activeKey = input.conversationId ?? sentinel;
     if (input.conversationId) {
       this.abortControllers.set(input.conversationId, controller);
     } else {
@@ -180,6 +188,7 @@ export class ApiDataService implements DataService {
           // I11: 拿到真实 id 后，把哨兵键换成真实 id（替换而非复制）
           if (isNew) this.abortControllers.delete(sentinel);
           this.abortControllers.set(event.conversation.id, controller);
+          activeKey = event.conversation.id;
         }
         yield event;
       }
@@ -191,7 +200,7 @@ export class ApiDataService implements DataService {
         };
       }
     } finally {
-      // 兜底清理：流结束后若哨兵仍在（异常退出未触发 conversation-created）
+      this.abortControllers.delete(activeKey);
       if (isNew) this.abortControllers.delete(sentinel);
     }
   }
@@ -230,6 +239,8 @@ export class ApiDataService implements DataService {
           message: e instanceof Error ? e.message : "连接中断",
         };
       }
+    } finally {
+      this.abortControllers.delete(conversationId);
     }
   }
 
@@ -237,6 +248,12 @@ export class ApiDataService implements DataService {
     await fetchJson(`/api/messages/${messageId}/feedback`, {
       method: "POST",
       body: JSON.stringify({ feedback }),
+    });
+  }
+  async replaceMessageImage(messageId: string, oldUrl: string, newUrl: string) {
+    await fetchJson(`/api/messages/${messageId}/image`, {
+      method: "PATCH",
+      body: JSON.stringify({ oldUrl, newUrl }),
     });
   }
 
@@ -379,7 +396,13 @@ export class ApiDataService implements DataService {
   // ---- 语音（MiMo，已接真） ----
   async transcribeAudio(audio: Blob): Promise<{ text: string }> {
     const form = new FormData();
-    form.append("audio", audio, "recording.webm");
+    const filename =
+      audio.type === "audio/wav" || audio.type === "audio/x-wav"
+        ? "recording.wav"
+        : audio.type === "audio/mpeg" || audio.type === "audio/mp3"
+          ? "recording.mp3"
+          : "recording.webm";
+    form.append("audio", audio, filename);
     const res = await fetch("/api/voice/transcribe", {
       method: "POST",
       body: form,

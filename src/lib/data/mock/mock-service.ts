@@ -258,7 +258,11 @@ export class MockDataService implements DataService {
     await sleep(80);
     return { ...this.s.user };
   }
-  async updateProfile(patch: { name?: string; avatarUrl?: string }) {
+  async updateProfile(patch: {
+    name?: string;
+    avatarUrl?: string;
+    defaultModelId?: string | null;
+  }) {
     await sleep(200);
     Object.assign(this.s.user, patch);
     return { ...this.s.user };
@@ -268,6 +272,11 @@ export class MockDataService implements DataService {
   async listModels() {
     await sleep(100);
     return this.s.models.filter((m) => m.enabled);
+  }
+  async listModelsWithDefault() {
+    await sleep(100);
+    const models = this.s.models.filter((m) => m.enabled);
+    return { models, defaultModelId: models[0]?.id };
   }
   async listStyles() {
     await sleep(80);
@@ -515,6 +524,18 @@ export class MockDataService implements DataService {
     for (const msgs of Object.values(this.s.messages)) {
       const m = msgs.find((x) => x.id === messageId);
       if (m) m.feedback = feedback ?? undefined;
+    }
+  }
+  async replaceMessageImage(messageId: string, oldUrl: string, newUrl: string) {
+    await sleep(100);
+    for (const msgs of Object.values(this.s.messages)) {
+      const m = msgs.find((x) => x.id === messageId);
+      if (!m) continue;
+      m.parts = m.parts.map((p) =>
+        p.type === "image" && p.url === oldUrl
+          ? { ...p, url: newUrl, alt: "编辑后的图片" }
+          : p
+      );
     }
   }
 

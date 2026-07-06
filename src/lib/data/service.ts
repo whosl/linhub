@@ -29,10 +29,16 @@ import type {
 export interface DataService {
   // ---- 当前用户 ----
   getCurrentUser(): Promise<User | null>;
-  updateProfile(patch: { name?: string; avatarUrl?: string }): Promise<User>;
+  updateProfile(patch: {
+    name?: string;
+    avatarUrl?: string;
+    defaultModelId?: string | null;
+  }): Promise<User>;
 
   // ---- 模型与风格 ----
   listModels(): Promise<Model[]>;
+  /** 模型列表 + 当前用户/全局的默认模型 id（聊天页用） */
+  listModelsWithDefault(): Promise<{ models: Model[]; defaultModelId?: string }>;
   listStyles(): Promise<ChatStyle[]>;
   saveStyle(style: Partial<ChatStyle> & { name: string }): Promise<ChatStyle>;
   deleteStyle(id: string): Promise<void>;
@@ -57,6 +63,7 @@ export interface DataService {
     modelId?: string
   ): AsyncIterable<StreamEvent>;
   setFeedback(messageId: string, feedback: "up" | "down" | null): Promise<void>;
+  replaceMessageImage(messageId: string, oldUrl: string, newUrl: string): Promise<void>;
 
   // ---- Artifacts ----
   listArtifacts(conversationId: string): Promise<Artifact[]>;
