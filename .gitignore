@@ -17,6 +17,10 @@
 /.next/
 /out/
 
+# runtime media
+/public/generated/
+/public/uploads/
+
 # production
 /build
 
