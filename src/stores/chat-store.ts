@@ -9,6 +9,9 @@ import type {
   StreamEvent,
 } from "@/lib/types";
 
+// I10: ensureSession 并发去重，按 conversationId 复用 in-flight promise
+const ensureSessionInflight = new Map<string, Promise<void>>();
+
 export interface ChatSession {
   conversationId: string;
   messages: Message[];
@@ -223,19 +226,31 @@ export const useChatStore = create<ChatState>((set, get) => {
     ensureSession: async (conversationId) => {
       const existing = get().sessions[conversationId];
       if (existing?.loaded) return;
-      const [conversation, messages] = await Promise.all([
-        getDataService().getConversation(conversationId),
-        getDataService().listMessages(conversationId),
-      ]);
-      updateSession(conversationId, (s) => ({
-        ...s,
-        messages,
-        loaded: true,
-        currentLeafId:
-          s.currentLeafId ??
-          conversation?.currentLeafId ??
-          messages[messages.length - 1]?.id,
-      }));
+      // I10: 去重——并发调用复用同一个 in-flight promise，
+      // 避免 StrictMode 双调用或快速导航发两份并行请求。
+      const inflight = ensureSessionInflight.get(conversationId);
+      if (inflight) return inflight;
+      const p = (async () => {
+        try {
+          const [conversation, messages] = await Promise.all([
+            getDataService().getConversation(conversationId),
+            getDataService().listMessages(conversationId),
+          ]);
+          updateSession(conversationId, (s) => ({
+            ...s,
+            messages,
+            loaded: true,
+            currentLeafId:
+              s.currentLeafId ??
+              conversation?.currentLeafId ??
+              messages[messages.length - 1]?.id,
+          }));
+        } finally {
+          ensureSessionInflight.delete(conversationId);
+        }
+      })();
+      ensureSessionInflight.set(conversationId, p);
+      return p;
     },
 
     send: async (input) => {
@@ -290,13 +305,27 @@ export const useChatStore = create<ChatState>((set, get) => {
     },
 
     setFeedback: async (conversationId, messageId, feedback) => {
+      // I9: 记录原值以便服务端失败时回滚乐观更新
+      const prev = get().sessions[conversationId]?.messages.find(
+        (m) => m.id === messageId
+      )?.feedback;
       updateSession(conversationId, (s) => ({
         ...s,
         messages: s.messages.map((m) =>
           m.id === messageId ? { ...m, feedback: feedback ?? undefined } : m
         ),
       }));
-      await getDataService().setFeedback(messageId, feedback);
+      try {
+        await getDataService().setFeedback(messageId, feedback);
+      } catch {
+        // 回滚到原值，避免 UI 与服务端不一致
+        updateSession(conversationId, (s) => ({
+          ...s,
+          messages: s.messages.map((m) =>
+            m.id === messageId ? { ...m, feedback: prev } : m
+          ),
+        }));
+      }
     },
   };
 });

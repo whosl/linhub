@@ -163,14 +163,16 @@ export function buildImageTools(userId: string, onImage: (url: string) => void):
         if (item.b64_json) {
           url = await saveGeneratedImage(userId, item.b64_json);
         }
+        // I7: 仅在确实拿到图片 URL 时才回调与计费，避免空结果也扣费
+        if (!url) throw new Error("生图失败：上游未返回图片 URL");
         onImage(url);
-        // 生图计费：记录用量并扣订阅额度/余额（C4）
+        // 生图计费：记录用量并扣订阅额度/余额（C4）；costCents 夹下界防 pricePerImage 为负
         const { recordUsage } = await import("@/lib/server/billing");
         await recordUsage(userId, record, null, {
           inputTokens: 0,
           outputTokens: 0,
           imageCount: 1,
-          costCents: record.pricePerImage ?? 0,
+          costCents: Math.max(0, record.pricePerImage ?? 0),
         });
         return { images: [url], text: "图片已生成并展示给用户" };
       },

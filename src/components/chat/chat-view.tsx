@@ -7,7 +7,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowDownIcon } from "lucide-react";
 import { getDataService } from "@/lib/data";
 import { suggestedPrompts } from "@/lib/data/mock/fixtures";
-import type { FilePart, ImagePart } from "@/lib/types";
+import type { Conversation, FilePart, ImagePart } from "@/lib/types";
 import {
   deepestLeaf,
   useChatStore,
@@ -83,15 +83,17 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
     if (conversationId) void ensureSession(conversationId);
   }, [conversationId, ensureSession]);
 
-  // 会话模型跟随会话设置
+  // 会话模型跟随会话设置（I14: 从已缓存的会话列表读 modelId，不再单独发请求）
   React.useEffect(() => {
     if (!conversationId) return;
-    getDataService()
-      .getConversation(conversationId)
-      .then((c) => {
-        if (c) setComposer((prev) => ({ ...prev, modelId: c.modelId }));
-      });
-  }, [conversationId]);
+    // 用 microtask 读取缓存以匹配现有 useQuery 数据时机；setState 在异步回调中，
+    // 既不新增网络请求，也符合 react-hooks/set-state-in-effect 规则。
+    Promise.resolve().then(() => {
+      const cached = queryClient.getQueryData<Conversation[]>(["conversations"]);
+      const c = cached?.find((x) => x.id === conversationId);
+      if (c) setComposer((prev) => ({ ...prev, modelId: c.modelId }));
+    });
+  }, [conversationId, queryClient]);
 
   // 新会话创建后跳转
   React.useEffect(() => {

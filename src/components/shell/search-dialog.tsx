@@ -13,18 +13,27 @@ export function SearchDialog() {
   const router = useRouter();
   const { searchOpen, setSearchOpen } = useUiStore();
   const [query, setQuery] = React.useState("");
+  // I19: 防抖——输入值与查询值分离，避免每次按键都发 /api/conversations 请求
+  const [debouncedQuery, setDebouncedQuery] = React.useState("");
+  React.useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(query), 250);
+    return () => clearTimeout(t);
+  }, [query]);
 
   const { data: results = [] } = useQuery({
-    queryKey: ["conversation-search", query],
+    queryKey: ["conversation-search", debouncedQuery],
     queryFn: () =>
-      query.trim()
-        ? getDataService().searchConversations(query.trim())
+      debouncedQuery.trim()
+        ? getDataService().searchConversations(debouncedQuery.trim())
         : getDataService().listConversations(),
     enabled: searchOpen,
   });
 
   React.useEffect(() => {
-    if (!searchOpen) setQuery("");
+    if (!searchOpen) {
+      setQuery("");
+      setDebouncedQuery("");
+    }
   }, [searchOpen]);
 
   return (
