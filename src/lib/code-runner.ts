@@ -11,15 +11,36 @@ function getPyodideWorker(): Worker {
   const workerCode = `
     importScripts("${PYODIDE_CDN}/pyodide.js");
     let pyodideReady = loadPyodide({ indexURL: "${PYODIDE_CDN}/" });
+    const PACKAGE_IMPORTS = [
+      { name: "matplotlib", re: /(^|\\n)\\s*(?:import\\s+(?:matplotlib|pylab)\\b|from\\s+matplotlib\\b)/ },
+      { name: "numpy", re: /(^|\\n)\\s*(?:import\\s+numpy\\b|from\\s+numpy\\b)/ },
+      { name: "pandas", re: /(^|\\n)\\s*(?:import\\s+pandas\\b|from\\s+pandas\\b)/ },
+      { name: "scipy", re: /(^|\\n)\\s*(?:import\\s+scipy\\b|from\\s+scipy\\b)/ },
+    ];
+    function packagesFor(code) {
+      return PACKAGE_IMPORTS.filter((p) => p.re.test(code)).map((p) => p.name);
+    }
     self.onmessage = async (e) => {
       const { id, code } = e.data;
       try {
         const pyodide = await pyodideReady;
+        const packages = packagesFor(code);
+        if (packages.length) await pyodide.loadPackage(packages);
+        const usesMatplotlib = packages.includes("matplotlib");
+        if (usesMatplotlib) {
+          pyodide.runPython('import matplotlib\\nmatplotlib.use("Agg")');
+        }
         let stdout = "";
         pyodide.setStdout({ batched: (s) => { stdout += s + "\\n"; } });
         pyodide.setStderr({ batched: (s) => { stdout += s + "\\n"; } });
         const result = await pyodide.runPythonAsync(code);
         if (result !== undefined && result !== null) stdout += String(result) + "\\n";
+        if (usesMatplotlib && !stdout.trim()) {
+          const figureCount = pyodide.runPython('import matplotlib.pyplot as plt\\nlen(plt.get_fignums())');
+          if (figureCount > 0) {
+            stdout = "已生成 Matplotlib 图表（当前运行器暂不展示图片预览）。\\n";
+          }
+        }
         self.postMessage({ id, output: stdout || "（无输出）" });
       } catch (err) {
         self.postMessage({ id, error: String(err) });
@@ -31,7 +52,7 @@ function getPyodideWorker(): Worker {
   return pyodideWorker;
 }
 
-export function runPython(code: string, timeoutMs = 60_000): Promise<string> {
+export function runPython(code: string, timeoutMs = 120_000): Promise<string> {
   return new Promise((resolve, reject) => {
     const worker = getPyodideWorker();
     const id = Math.random().toString(36).slice(2);
@@ -40,7 +61,7 @@ export function runPython(code: string, timeoutMs = 60_000): Promise<string> {
       // 超时后终止 worker，避免死循环占用
       pyodideWorker?.terminate();
       pyodideWorker = null;
-      reject(new Error("运行超时（60 秒）"));
+      reject(new Error(`运行超时（${Math.round(timeoutMs / 1000)} 秒）`));
     }, timeoutMs);
     const onMessage = (e: MessageEvent) => {
       if (e.data.id !== id) return;

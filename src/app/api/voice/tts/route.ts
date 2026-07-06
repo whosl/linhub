@@ -2,10 +2,16 @@ import { NextRequest } from "next/server";
 import { requireSession } from "@/lib/server/auth";
 import { rateLimit } from "@/lib/server/rate-limit";
 import { getMimoConfig } from "@/lib/server/voice";
+import { formatUpstreamError } from "@/lib/server/upstream-error";
 
 export const maxDuration = 120;
 
-/** MiMo TTS：文本合成语音，直接透传音频流（OpenAI 兼容 /audio/speech） */
+/**
+ * MiMo TTS（mimo-v2.5-tts）。
+ * 小米 TTS 走 /chat/completions 端点（非 OpenAI 标准 /audio/speech），
+ * 认证用 api-key 头（非 Bearer），文本放 assistant 消息，风格指令放 user 消息。
+ * 返回 JSON 含 choices[0].message.audio.data（base64），这里解出来透传二进制流。
+ */
 export async function POST(req: NextRequest) {
   let session;
   try {
@@ -14,7 +20,6 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: "请先登录" }, { status: 401 });
   }
 
-  // I3: 限频——TTS 代理付费上游，10 次/分/用户
   const limited = rateLimit(`voice-tts:${session.user.id}`, 10, 60_000);
   if (limited) return limited;
 
@@ -25,28 +30,50 @@ export async function POST(req: NextRequest) {
 
   try {
     const { apiKey, baseURL, voice } = await getMimoConfig();
-    const res = await fetch(`${baseURL}/audio/speech`, {
+    const res = await fetch(`${baseURL}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+        "api-key": apiKey,
       },
       body: JSON.stringify({
-        model: "mimo-audio-tts",
-        input: text.slice(0, 4000),
-        voice,
-        response_format: "mp3",
+        model: "mimo-v2.5-tts",
+        messages: [
+          // user 消息：风格控制（留空 = 默认风格）
+          { role: "user", content: "" },
+          // assistant 消息：要合成的文本（必须放这里）
+          { role: "assistant", content: text.slice(0, 4000) },
+        ],
+        audio: {
+          format: "mp3",
+          voice: voice || "冰糖",
+        },
       }),
     });
+
     if (!res.ok) {
-      const err = await res.text();
       return Response.json(
-        { error: `TTS 失败（${res.status}）: ${err.slice(0, 200)}` },
+        { error: await formatUpstreamError(res, "TTS 服务不可用") },
         { status: 502 }
       );
     }
-    return new Response(res.body, {
-      headers: { "Content-Type": "audio/mpeg" },
+
+    // 响应是 JSON，音频在 choices[0].message.audio.data（base64）
+    const data = (await res.json()) as {
+      choices?: { message?: { audio?: { data?: string } } }[];
+    };
+    const audioB64 = data.choices?.[0]?.message?.audio?.data;
+    if (!audioB64) {
+      return Response.json({ error: "TTS 未返回音频数据" }, { status: 502 });
+    }
+
+    // 解 base64 返回二进制流
+    const audioBytes = Buffer.from(audioB64, "base64");
+    return new Response(audioBytes, {
+      headers: {
+        "Content-Type": "audio/mpeg",
+        "Content-Length": String(audioBytes.length),
+      },
     });
   } catch (e) {
     return Response.json(

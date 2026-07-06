@@ -1,4 +1,4 @@
-import { eq, sql } from "drizzle-orm";
+import { and, eq, gte, sql } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 
 const uid = () => crypto.randomUUID().replace(/-/g, "").slice(0, 16);
@@ -36,15 +36,24 @@ export async function assertModelAccess(
   }
 }
 
-/** 开销前预检：有可用订阅额度或余额为正才放行（C2：防透支） */
-export async function assertCanSpend(userId: string) {
+/** 当前可用于消费的额度（订阅剩余额度 + 余额）。 */
+export async function getAvailableSpendCents(userId: string) {
   const sub = await getActiveSubscription(userId);
-  if (sub && sub.plan.monthlyQuotaCents - sub.subscription.usedQuotaCents > 0) return;
+  const quotaLeft = sub
+    ? Math.max(0, sub.plan.monthlyQuotaCents - sub.subscription.usedQuotaCents)
+    : 0;
   const [user] = await db
     .select({ balance: schema.users.balanceCents })
     .from(schema.users)
     .where(eq(schema.users.id, userId));
-  if ((user?.balance ?? 0) <= 0) {
+  return quotaLeft + Math.max(0, user?.balance ?? 0);
+}
+
+/** 开销前预检：可传入预计最低消费，避免低余额用户拿到高成本流式输出后扣费失败。 */
+export async function assertCanSpend(userId: string, minimumCents = 1) {
+  if (minimumCents <= 0) return;
+  const available = await getAvailableSpendCents(userId);
+  if (available < minimumCents) {
     throw new BillingError("余额不足，请先充值或订阅套餐");
   }
 }
@@ -103,13 +112,16 @@ export async function recordUsage(
     }
 
     // 2) 剩余部分原子扣余额并记账
-    // C2: 用 GREATEST(..., 0) 夹紧下界，防止并发或单次超额把余额扣成负数。
+    // C2: 余额必须足额才扣；否则回滚 usageRecords，避免免费透支或账本金额失真。
     if (remaining > 0) {
       const [updated] = await tx
         .update(schema.users)
-        .set({ balanceCents: sql`GREATEST(${schema.users.balanceCents} - ${remaining}, 0)` })
-        .where(eq(schema.users.id, userId))
+        .set({ balanceCents: sql`${schema.users.balanceCents} - ${remaining}` })
+        .where(
+          and(eq(schema.users.id, userId), gte(schema.users.balanceCents, remaining))
+        )
         .returning({ balance: schema.users.balanceCents });
+      if (!updated) throw new BillingError("余额不足，请先充值或订阅套餐");
       await tx.insert(schema.ledger).values({
         id: `lg-${uid()}`,
         userId,
@@ -119,5 +131,5 @@ export async function recordUsage(
         description: `${record.displayName} ${usage.imageCount ? "生图" : "对话"}消费`,
       });
     }
-  });
+  }, { isolationLevel: "serializable" });
 }
