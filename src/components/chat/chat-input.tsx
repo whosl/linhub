@@ -68,6 +68,16 @@ export function ChatInput({
   const [recording, setRecording] = React.useState(false);
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  // C4: 追踪本地创建的 blob URL（服务端返回的 url 不应 revoke），卸载时统一释放。
+  const localBlobUrls = React.useRef<Set<string>>(new Set());
+  const revokeUrl = React.useCallback((url?: string) => {
+    if (url && localBlobUrls.current.delete(url)) URL.revokeObjectURL(url);
+  }, []);
+  const revokeAllUrls = React.useCallback(() => {
+    localBlobUrls.current.forEach((u) => URL.revokeObjectURL(u));
+    localBlobUrls.current.clear();
+  }, []);
+  React.useEffect(() => () => revokeAllUrls(), [revokeAllUrls]);
 
   const chatModels = models.filter((m) => !m.capabilities.includes("image-generation"));
   const currentModel = chatModels.find((m) => m.id === composer.modelId) ?? chatModels[0];
@@ -88,6 +98,8 @@ export function ChatInput({
     if (!canSend) return;
     onSend(text.trim(), images, files);
     setText("");
+    // C4: 发送后释放本地 blob URL（服务端 url 不在此集合内，不受影响）
+    revokeAllUrls();
     setImages([]);
     setFiles([]);
   };
@@ -119,7 +131,13 @@ export function ChatInput({
         }
       }
       if (isImage) {
-        const url = uploaded?.url ?? URL.createObjectURL(file);
+        let url: string;
+        if (uploaded?.url) {
+          url = uploaded.url;
+        } else {
+          url = URL.createObjectURL(file);
+          localBlobUrls.current.add(url); // C4: 标记为本地创建，需手动 revoke
+        }
         setImages((prev) => [...prev, { type: "image", url, alt: file.name }]);
       } else {
         if (useRealApi && !uploaded?.hasText) {
@@ -218,7 +236,10 @@ export function ChatInput({
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={img.url} alt={img.alt ?? ""} className="size-16 rounded-xl border object-cover" />
                 <button
-                  onClick={() => setImages((prev) => prev.filter((_, j) => j !== i))}
+                  onClick={() => {
+                    revokeUrl(img.url); // C4
+                    setImages((prev) => prev.filter((_, j) => j !== i));
+                  }}
                   className="absolute -right-1.5 -top-1.5 rounded-full bg-foreground p-0.5 text-background opacity-0 transition-opacity group-hover/att:opacity-100"
                 >
                   <XIcon className="size-3" />

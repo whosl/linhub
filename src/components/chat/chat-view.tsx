@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { motion } from "motion/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowDownIcon } from "lucide-react";
@@ -37,6 +37,19 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
   const queryClient = useQueryClient();
   const [composer, setComposer] = React.useState<ComposerState>(DEFAULT_COMPOSER);
   const [quotedText, setQuotedText] = React.useState<string | undefined>();
+
+  // C3: 从 URL 读取技能/项目预选，发首条消息时带上，之后清除 query。
+  // 用 state 暂存是为了避免每次 send 重复读，且发送后立即从 URL 抹掉。
+  const searchParams = useSearchParams();
+  const [pendingContext] = React.useState(() => ({
+    skillId: searchParams.get("skill") ?? undefined,
+    projectId: searchParams.get("project") ?? undefined,
+  }));
+  React.useEffect(() => {
+    if (pendingContext.skillId || pendingContext.projectId) {
+      router.replace("/");
+    }
+  }, [pendingContext.skillId, pendingContext.projectId, router]);
 
   const { data: models = [] } = useQuery({
     queryKey: ["models"],
@@ -135,6 +148,8 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
       styleId: composer.styleId,
       extendedThinking: composer.extendedThinking,
       tools: composer.tools,
+      // C3: 仅新对话首条消息携带技能/项目预选
+      ...(conversationId ? {} : pendingContext),
     });
     setQuotedText(undefined);
     if (conversationId) {

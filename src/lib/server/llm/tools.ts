@@ -198,6 +198,9 @@ export function buildVisionTool(): ToolSet {
         question: z.string().optional().describe("关于图片想了解什么"),
       }),
       execute: async ({ imageUrl, question }) => {
+        // C1: 校验图片 URL，防止被 prompt 注入用于拉取内网/云元数据（SSRF）
+        const { assertSafeUrl } = await import("@/lib/server/net-guard");
+        await assertSafeUrl(imageUrl);
         const [s] = await db
           .select({ helper: schema.settings.visionHelperModelId })
           .from(schema.settings)

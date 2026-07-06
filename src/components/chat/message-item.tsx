@@ -363,10 +363,16 @@ export function MessageItem({
 function SpeakButton({ message }: { message: Message }) {
   const [state, setState] = React.useState<"idle" | "loading" | "playing">("idle");
   const audioRef = React.useRef<HTMLAudioElement | null>(null);
+  // C4: 记录当前播放音频的 blob URL 以便释放（synthesizeSpeech 返回的是 blob URL）
+  const audioUrlRef = React.useRef<string | null>(null);
 
   const stop = () => {
     audioRef.current?.pause();
     audioRef.current = null;
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current);
+      audioUrlRef.current = null;
+    }
     setState("idle");
   };
 
@@ -388,6 +394,7 @@ function SpeakButton({ message }: { message: Message }) {
     try {
       const { getDataService } = await import("@/lib/data");
       const { audioUrl } = await getDataService().synthesizeSpeech(text.slice(0, 2000));
+      audioUrlRef.current = audioUrl; // C4
       const audio = new Audio(audioUrl);
       audioRef.current = audio;
       audio.onended = stop;
@@ -396,7 +403,7 @@ function SpeakButton({ message }: { message: Message }) {
       setState("playing");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "朗读失败");
-      setState("idle");
+      stop();
     }
   };
 

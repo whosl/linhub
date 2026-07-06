@@ -103,10 +103,11 @@ export async function recordUsage(
     }
 
     // 2) 剩余部分原子扣余额并记账
+    // C2: 用 GREATEST(..., 0) 夹紧下界，防止并发或单次超额把余额扣成负数。
     if (remaining > 0) {
       const [updated] = await tx
         .update(schema.users)
-        .set({ balanceCents: sql`${schema.users.balanceCents} - ${remaining}` })
+        .set({ balanceCents: sql`GREATEST(${schema.users.balanceCents} - ${remaining}, 0)` })
         .where(eq(schema.users.id, userId))
         .returning({ balance: schema.users.balanceCents });
       await tx.insert(schema.ledger).values({
