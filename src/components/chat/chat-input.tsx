@@ -12,13 +12,16 @@ import {
   MicIcon,
   PaletteIcon,
   PaperclipIcon,
+  PencilIcon,
   SlidersHorizontalIcon,
   SquareIcon,
+  StarIcon,
   TerminalIcon,
   XIcon,
 } from "lucide-react";
 import { cn, formatBytes } from "@/lib/utils";
 import type { ChatStyle, ChatToolToggles, FilePart, ImagePart, Model } from "@/lib/types";
+import { ImageMaskEditor } from "./image-mask-editor";
 import { Tooltip } from "@/components/ui/tooltip";
 import { Switch } from "@/components/ui/misc";
 import {
@@ -39,6 +42,17 @@ export interface ComposerState {
   tools: ChatToolToggles;
 }
 
+/** 模型选择器里的供应商分组标签 */
+const PROVIDER_LABELS: Record<string, string> = {
+  openai: "OpenAI",
+  anthropic: "Anthropic",
+  google: "Google",
+  zhipu: "智谱",
+  deepseek: "DeepSeek",
+  xiaomi: "小米",
+  "xiaomi-token-plan": "小米 (Token Plan)",
+};
+
 export function ChatInput({
   models,
   styles,
@@ -50,6 +64,8 @@ export function ChatInput({
   onSend,
   onStop,
   autoFocus,
+  defaultModelId,
+  onSetDefaultModel,
 }: {
   models: Model[];
   styles: ChatStyle[];
@@ -61,11 +77,17 @@ export function ChatInput({
   onSend: (text: string, images: ImagePart[], files: FilePart[]) => void;
   onStop: () => void;
   autoFocus?: boolean;
+  /** 当前用户的默认模型 id（用于在选择器里标记 + 设为默认） */
+  defaultModelId?: string;
+  /** 把指定模型设为用户默认 */
+  onSetDefaultModel?: (modelId: string) => void;
 }) {
   const [text, setText] = React.useState("");
   const [images, setImages] = React.useState<ImagePart[]>([]);
   const [files, setFiles] = React.useState<FilePart[]>([]);
   const [recording, setRecording] = React.useState(false);
+  // 图片编辑器：editingIndex 指向 images 数组里要编辑的图
+  const [editingImage, setEditingImage] = React.useState<string | null>(null);
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   // C4: 追踪本地创建的 blob URL（服务端返回的 url 不应 revoke），卸载时统一释放。
@@ -96,10 +118,14 @@ export function ChatInput({
 
   const doSend = () => {
     if (!canSend) return;
+    const sentLocalUrls = images
+      .map((img) => img.url)
+      .filter((url) => localBlobUrls.current.has(url));
     onSend(text.trim(), images, files);
     setText("");
-    // C4: 发送后释放本地 blob URL（服务端 url 不在此集合内，不受影响）
-    revokeAllUrls();
+    // mock/offline 模式下，已发送消息仍引用本地 blob URL，不能立刻 revoke。
+    // 从待清理集合移交给消息历史；未发送/被移除的预览仍由 revokeUrl/卸载清理。
+    sentLocalUrls.forEach((url) => localBlobUrls.current.delete(url));
     setImages([]);
     setFiles([]);
   };
@@ -157,31 +183,85 @@ export function ChatInput({
     }
   };
 
-  const mediaRecorderRef = React.useRef<MediaRecorder | null>(null);
-  const audioChunksRef = React.useRef<Blob[]>([]);
+  // WAV 录音：AudioContext + ScriptProcessor 录 PCM16，编码成 WAV（MiMo ASR 只支持 wav/mp3）
+  const audioCtxRef = React.useRef<AudioContext | null>(null);
+  const processorRef = React.useRef<ScriptProcessorNode | null>(null);
+  const pcmChunksRef = React.useRef<Float32Array[]>([]);
+  const audioStreamRef = React.useRef<MediaStream | null>(null);
+  const cancelRecordingRef = React.useRef(false);
+
+  const stopAudioStream = React.useCallback(() => {
+    audioStreamRef.current?.getTracks().forEach((t) => t.stop());
+    audioStreamRef.current = null;
+  }, []);
+
+  React.useEffect(
+    () => () => {
+      cancelRecordingRef.current = true;
+      // 清理 WAV 录音资源
+      if (processorRef.current) processorRef.current.disconnect();
+      if (audioCtxRef.current && audioCtxRef.current.state !== "closed") {
+        audioCtxRef.current.close();
+      }
+      stopAudioStream();
+    },
+    [stopAudioStream]
+  );
 
   const toggleRecording = async () => {
     if (recording) {
+      cancelRecordingRef.current = false;
       setRecording(false);
-      mediaRecorderRef.current?.stop();
+      // 停止录音：断开 processor，触发 oncomplete 编码 WAV
+      if (processorRef.current) {
+        processorRef.current.disconnect();
+      }
+      if (audioCtxRef.current && audioCtxRef.current.state !== "closed") {
+        audioCtxRef.current.suspend();
+      }
       return;
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = recorder;
-      audioChunksRef.current = [];
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      audioStreamRef.current = stream;
+      cancelRecordingRef.current = false;
+      pcmChunksRef.current = [];
+
+      // 用 Web Audio API 录 PCM（MiMo ASR 只支持 wav/mp3，不支持浏览器默认的 webm）
+      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const ctx = new AudioCtx();
+      audioCtxRef.current = ctx;
+      const source = ctx.createMediaStreamSource(stream);
+      // 4096 buffer, 单声道, 16kHz（MiMo 推荐采样率）
+      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      processorRef.current = processor;
+      processor.onaudioprocess = (e) => {
+        const input = e.inputBuffer.getChannelData(0);
+        // 拷贝一份（buffer 会被复用）
+        pcmChunksRef.current.push(new Float32Array(input));
       };
-      recorder.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop());
-        const blob = new Blob(audioChunksRef.current, { type: recorder.mimeType });
-        if (blob.size === 0) return;
+      source.connect(processor);
+      processor.connect(ctx.destination);
+
+      // 录音停止后的处理：PCM → WAV → 转写
+      const finishRecording = async () => {
+        stopAudioStream();
+        if (audioCtxRef.current) {
+          audioCtxRef.current.close();
+          audioCtxRef.current = null;
+        }
+        processorRef.current = null;
+        if (cancelRecordingRef.current) return;
+
+        // PCM chunks → WAV Blob
+        const pcm = mergeFloat32(pcmChunksRef.current);
+        const wavBlob = encodeWav(pcm, ctx.sampleRate);
+        if (wavBlob.size === 0) return;
+
         const toastId = toast.loading("正在转写…");
         try {
           const { getDataService } = await import("@/lib/data");
-          const { text: transcript } = await getDataService().transcribeAudio(blob);
+          const { text: transcript } = await getDataService().transcribeAudio(wavBlob);
           if (transcript) {
             setText((t) => t + (t ? " " : "") + transcript);
             toast.success("转写完成", { id: toastId });
@@ -192,7 +272,14 @@ export function ChatInput({
           toast.error(e instanceof Error ? e.message : "转写失败", { id: toastId });
         }
       };
-      recorder.start();
+
+      // processor disconnect 后延迟一帧让最后的数据进来，再编码
+      const origDisconnect = processor.disconnect.bind(processor);
+      processor.disconnect = () => {
+        origDisconnect();
+        setTimeout(() => void finishRecording(), 100);
+      };
+
       setRecording(true);
     } catch {
       toast.error("无法访问麦克风，请检查浏览器权限");
@@ -236,6 +323,14 @@ export function ChatInput({
               <div key={i} className="group/att relative">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={img.url} alt={img.alt ?? ""} className="size-16 rounded-xl border object-cover" />
+                {/* 编辑 mask 按钮 */}
+                <button
+                  onClick={() => setEditingImage(img.url)}
+                  aria-label="编辑图片"
+                  className="absolute -left-1.5 -top-1.5 rounded-full bg-primary p-0.5 text-primary-foreground opacity-0 transition-opacity group-hover/att:opacity-100"
+                >
+                  <PencilIcon className="size-3" />
+                </button>
                 <button
                   onClick={() => {
                     revokeUrl(img.url); // C4
@@ -407,29 +502,65 @@ export function ChatInput({
                 <ChevronDownIcon className="size-3 text-muted-foreground" />
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-64">
+            <DropdownMenuContent align="end" className="w-72">
               <DropdownMenuLabel>选择模型</DropdownMenuLabel>
-              {chatModels.map((m) => (
-                <DropdownMenuItem
-                  key={m.id}
-                  onClick={() => onComposerChange({ modelId: m.id })}
-                >
-                  <span className="flex-1">
-                    <span className="flex items-center gap-1.5 text-sm">
-                      {m.displayName}
-                      {m.capabilities.includes("vision") && (
-                        <ImageIcon className="size-3 text-muted-foreground" />
+              {/* 按 providerKind 分组展示 */}
+              {Object.entries(
+                chatModels.reduce<Record<string, typeof chatModels>>((acc, m) => {
+                  const key = m.providerKind;
+                  (acc[key] ??= []).push(m);
+                  return acc;
+                }, {})
+              ).map(([kind, group]) => (
+                <React.Fragment key={kind}>
+                  <DropdownMenuLabel className="text-xs text-muted-foreground">
+                    {PROVIDER_LABELS[kind] ?? kind}
+                  </DropdownMenuLabel>
+                  {group.map((m) => (
+                    <DropdownMenuItem
+                      key={m.id}
+                      onClick={() => onComposerChange({ modelId: m.id })}
+                    >
+                      <span className="flex-1">
+                        <span className="flex items-center gap-1.5 text-sm">
+                          {m.displayName}
+                          {m.capabilities.includes("vision") && (
+                            <ImageIcon className="size-3 text-muted-foreground" />
+                          )}
+                          {m.capabilities.includes("reasoning") && (
+                            <BrainIcon className="size-3 text-muted-foreground" />
+                          )}
+                          {m.capabilities.includes("web-search-native") && (
+                            <GlobeIcon className="size-3 text-muted-foreground" />
+                          )}
+                        </span>
+                        {m.description && (
+                          <span className="block text-xs text-muted-foreground">
+                            {m.description}
+                          </span>
+                        )}
+                      </span>
+                      {/* 设为默认 */}
+                      {onSetDefaultModel && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onSetDefaultModel(m.id);
+                          }}
+                          className={cn(
+                            "rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
+                            defaultModelId === m.id && "text-amber-500"
+                          )}
+                          aria-label={defaultModelId === m.id ? "默认模型" : "设为默认"}
+                          title={defaultModelId === m.id ? "默认模型" : "设为默认"}
+                        >
+                          <StarIcon className="size-3.5" />
+                        </button>
                       )}
-                      {m.capabilities.includes("web-search-native") && (
-                        <GlobeIcon className="size-3 text-muted-foreground" />
-                      )}
-                    </span>
-                    <span className="block text-xs text-muted-foreground">
-                      {m.description}
-                    </span>
-                  </span>
-                  {composer.modelId === m.id && <CheckIcon className="size-4" />}
-                </DropdownMenuItem>
+                      {composer.modelId === m.id && <CheckIcon className="size-4" />}
+                    </DropdownMenuItem>
+                  ))}
+                </React.Fragment>
               ))}
               <DropdownMenuSeparator />
               <DropdownMenuLabel className="font-normal">
@@ -485,6 +616,20 @@ export function ChatInput({
       <p className="pt-2 text-center text-[11px] text-muted-foreground">
         LinHub 可能会出错，请核查重要信息。
       </p>
+
+      {/* 图片编辑器（mask 涂抹 → /images/edits） */}
+      <ImageMaskEditor
+        imageUrl={editingImage ?? ""}
+        open={!!editingImage}
+        onOpenChange={(o) => !o && setEditingImage(null)}
+        onEdited={(newUrl) => {
+          if (editingImage) {
+            setImages((prev) =>
+              prev.map((img) => (img.url === editingImage ? { ...img, url: newUrl, alt: "编辑后的图片" } : img))
+            );
+          }
+        }}
+      />
     </div>
   );
 }
@@ -507,4 +652,53 @@ function ToolToggleRow({
       <Switch checked={checked} onCheckedChange={onChange} />
     </label>
   );
+}
+
+// ---------- WAV 录音辅助函数（MiMo ASR 需要 wav/mp3，不支持 webm）----------
+
+function mergeFloat32(chunks: Float32Array[]): Float32Array {
+  let length = 0;
+  for (const c of chunks) length += c.length;
+  const result = new Float32Array(length);
+  let offset = 0;
+  for (const c of chunks) {
+    result.set(c, offset);
+    offset += c.length;
+  }
+  return result;
+}
+
+/** 把 Float32 PCM 编码成 16-bit WAV Blob */
+function encodeWav(samples: Float32Array, sampleRate: number): Blob {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+
+  const writeString = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+
+  // WAV header
+  writeString(0, "RIFF");
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeString(8, "WAVE");
+  writeString(12, "fmt ");
+  view.setUint32(16, 16, true); // fmt chunk size
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); // byte rate
+  view.setUint16(32, 2, true); // block align
+  view.setUint16(34, 16, true); // bits per sample
+  writeString(36, "data");
+  view.setUint32(40, samples.length * 2, true);
+
+  // PCM samples (float32 → int16)
+  let offset = 44;
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    offset += 2;
+  }
+
+  return new Blob([buffer], { type: "audio/wav" });
 }

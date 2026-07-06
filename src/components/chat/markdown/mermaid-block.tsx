@@ -6,12 +6,15 @@ import { Loader2Icon } from "lucide-react";
 
 let mermaidIdCounter = 0;
 
-export function MermaidBlock({ code }: { code: string }) {
+export function MermaidBlock({ code, isStreaming }: { code: string; isStreaming?: boolean }) {
   const { resolvedTheme } = useTheme();
   const [svg, setSvg] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
+    // 流式期间 code 每个字都在变，此时跑 mermaid.render 会被反复取消重建，
+    // 既慢又卡。等流式结束、code 稳定后再渲染。
+    if (isStreaming) return;
     let cancelled = false;
     (async () => {
       try {
@@ -37,7 +40,7 @@ export function MermaidBlock({ code }: { code: string }) {
     return () => {
       cancelled = true;
     };
-  }, [code, resolvedTheme]);
+  }, [code, resolvedTheme, isStreaming]);
 
   if (error) {
     return (
@@ -47,11 +50,12 @@ export function MermaidBlock({ code }: { code: string }) {
     );
   }
 
-  if (!svg) {
+  // 流式期间不渲染图表，只显示占位（code 还在变，render 了也会被反复取消）
+  if (isStreaming || !svg) {
     return (
       <div className="my-3 flex items-center justify-center gap-2 rounded-xl border bg-muted/40 py-10 text-xs text-muted-foreground">
         <Loader2Icon className="size-3.5 animate-spin" />
-        图表渲染中…
+        {isStreaming ? "等待生成完成…" : "图表渲染中…"}
       </div>
     );
   }

@@ -42,6 +42,13 @@ interface ChatState {
     messageId: string,
     feedback: "up" | "down" | null
   ) => Promise<void>;
+  /** 乐观替换消息里的图片 URL（lightbox 编辑后用，并持久化到后端） */
+  replaceMessageImage: (
+    conversationId: string,
+    messageId: string,
+    oldUrl: string,
+    newUrl: string
+  ) => Promise<void>;
   clearRedirect: () => void;
 }
 
@@ -89,13 +96,18 @@ export const useChatStore = create<ChatState>((set, get) => {
   const MAX_SESSIONS = 20;
 
   /** 把 sessions 裁剪到 MAX_SESSIONS 以内，优先丢弃非流式的已加载会话 */
-  const pruneSessions = (sessions: Record<string, ChatSession>) => {
+  const pruneSessions = (
+    sessions: Record<string, ChatSession>,
+    keepId?: string
+  ) => {
     const ids = Object.keys(sessions);
     if (ids.length <= MAX_SESSIONS) return sessions;
     // 保留所有 streaming 中的；其余按 loaded 程度（已加载的更可丢弃）排序后淘汰
-    const survivors = ids.filter((id) => sessions[id].status === "streaming");
+    const survivors = ids.filter(
+      (id) => id === keepId || sessions[id].status === "streaming"
+    );
     const candidates = ids
-      .filter((id) => sessions[id].status !== "streaming")
+      .filter((id) => id !== keepId && sessions[id].status !== "streaming")
       .sort((a, b) => Number(sessions[b].loaded) - Number(sessions[a].loaded));
     while (survivors.length < MAX_SESSIONS && candidates.length) {
       survivors.push(candidates.pop()!);
@@ -115,7 +127,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         sessions: pruneSessions({
           ...state.sessions,
           [conversationId]: updater(session),
-        }),
+        }, conversationId),
       };
     });
   };
@@ -175,11 +187,24 @@ export const useChatStore = create<ChatState>((set, get) => {
       case "tool-call-start": {
         updateSession(conversationId, (s) => ({
           ...s,
-          messages: s.messages.map((m) =>
-            m.id === event.messageId
-              ? { ...m, parts: [...m.parts, event.part] }
-              : m
-          ),
+          messages: s.messages.map((m) => {
+            if (m.id !== event.messageId) return m;
+            const has = m.parts.some(
+              (p) =>
+                p.type === "tool-call" && p.toolCallId === event.part.toolCallId
+            );
+            return {
+              ...m,
+              parts: has
+                ? m.parts.map((p) =>
+                    p.type === "tool-call" &&
+                    p.toolCallId === event.part.toolCallId
+                      ? event.part
+                      : p
+                  )
+                : [...m.parts, event.part],
+            };
+          }),
         }));
         break;
       }
@@ -239,6 +264,11 @@ export const useChatStore = create<ChatState>((set, get) => {
               : m
           ),
         }));
+        break;
+      }
+      case "artifact": {
+        // Artifact 本体由 React Query 列表维护；这里无需把完整代码塞入消息，
+        // 事件到达后 ChatView 会根据成功的工具调用刷新 artifacts 查询。
         break;
       }
       case "done": {
@@ -376,6 +406,43 @@ export const useChatStore = create<ChatState>((set, get) => {
       void getDataService().updateConversation(conversationId, {
         currentLeafId: leafId,
       });
+    },
+
+    replaceMessageImage: async (conversationId, messageId, oldUrl, newUrl) => {
+      updateSession(conversationId, (s) => ({
+        ...s,
+        messages: s.messages.map((m) =>
+          m.id === messageId
+            ? {
+                ...m,
+                parts: m.parts.map((p) =>
+                  p.type === "image" && p.url === oldUrl
+                    ? { ...p, url: newUrl }
+                    : p
+                ),
+              }
+            : m
+        ),
+      }));
+      try {
+        await getDataService().replaceMessageImage(messageId, oldUrl, newUrl);
+      } catch {
+        updateSession(conversationId, (s) => ({
+          ...s,
+          messages: s.messages.map((m) =>
+            m.id === messageId
+              ? {
+                  ...m,
+                  parts: m.parts.map((p) =>
+                    p.type === "image" && p.url === newUrl
+                      ? { ...p, url: oldUrl }
+                      : p
+                  ),
+                }
+              : m
+          ),
+        }));
+      }
     },
 
     setFeedback: async (conversationId, messageId, feedback) => {

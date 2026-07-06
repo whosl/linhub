@@ -4,7 +4,9 @@ import { z } from "zod";
 import { and, eq } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 import { decryptSecret } from "@/lib/server/crypto";
-import { resolveModel } from "./registry";
+import { resolveImageSource } from "./image-source";
+import { getProviderBaseURL, resolveModel } from "./registry";
+import { formatUpstreamError } from "@/lib/server/upstream-error";
 import type { WebSource } from "@/lib/types";
 
 // ---------- Tavily ----------
@@ -21,14 +23,30 @@ async function tavilyRequest<T>(path: string, body: Record<string, unknown>): Pr
   const key = await getTavilyKey();
   if (!key) throw new Error("管理员尚未配置 Tavily API Key");
   const base = process.env.TAVILY_BASE_URL ?? "https://api.tavily.com";
-  const res = await fetch(`${base}${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${key}`,
-    },
-    body: JSON.stringify(body),
-  });
+  // 网络抖动时 fetch 会直接抛 "fetch failed"（TCP/DNS 层），模型只能靠运气重试。
+  // 这里加 15s 超时 + 1 次自动重试，消除大部分偶发失败。
+  const doFetch = () =>
+    fetch(`${base}${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${key}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
+    });
+  let res: Response;
+  try {
+    res = await doFetch();
+  } catch {
+    // 4xx 业务错误（如 key 失效/限流）不会进 catch（res.ok 在下方判断），
+    // 只有网络层失败才重试一次
+    res = await doFetch().catch((secondErr) => {
+      throw new Error(
+        `Tavily 网络请求失败（已重试）：${secondErr instanceof Error ? secondErr.message : String(secondErr)}`
+      );
+    });
+  }
   if (!res.ok) throw new Error(`Tavily 请求失败（${res.status}）`);
   return res.json() as Promise<T>;
 }
@@ -103,9 +121,83 @@ export function buildWebTools(): ToolSet {
   };
 }
 
+// ---------- 代码运行 ----------
+
+const CODE_MAX_LENGTH = 8_000;
+const CODE_OUTPUT_MAX_LENGTH = 4_000;
+
+function formatCodeValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "undefined") return "";
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function assertSafeJavaScriptSnippet(code: string) {
+  if (code.length > CODE_MAX_LENGTH) {
+    throw new Error(`代码过长，最多 ${CODE_MAX_LENGTH} 个字符`);
+  }
+  const blocked = /\b(?:process|require|module|exports|import|eval|Function|constructor|globalThis|global|fetch|XMLHttpRequest|WebSocket|Worker|Deno|Bun|this|new|class|while|for|async|await)\b/;
+  if (blocked.test(code)) {
+    throw new Error("代码包含受限 API；只能运行短小、无网络、无文件访问的 JavaScript 片段");
+  }
+}
+
+function evaluateArithmeticExpression(expression: string): unknown {
+  const expr = expression.trim();
+  if (!expr) return "";
+  if (!/^[\d\s+\-*/%().,]+$/.test(expr)) {
+    throw new Error("当前代码工具仅支持数字、括号与基础四则运算表达式");
+  }
+  // 前面已禁止所有标识符和字符串，Function 只用于计算纯算术表达式。
+  return Function(`"use strict"; return (${expr});`)();
+}
+
+async function runJavaScriptSnippet(code: string): Promise<string> {
+  assertSafeJavaScriptSnippet(code);
+  const logs: string[] = [];
+  const statements = code
+    .split(/[\n;]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  for (const statement of statements) {
+    const consoleCall = statement.match(
+      /^console\.(?:log|info|warn|error)\(([\s\S]*)\)$/
+    );
+    const expr = consoleCall?.[1] ?? statement.replace(/^return\s+/, "");
+    const resultText = formatCodeValue(evaluateArithmeticExpression(expr));
+    if (resultText) logs.push(resultText);
+  }
+  const output = logs.join("\n") || "（无输出）";
+  return output.slice(0, CODE_OUTPUT_MAX_LENGTH);
+}
+
+export function buildCodeTools(): ToolSet {
+  return {
+    run_code: tool({
+      description:
+        "安全计算一小段 JavaScript 风格的算术表达式，支持 console.log(7*6) 这类数字计算；不支持网络、文件、变量、循环或外部依赖。适用于用户要求验证简单代码/计算结果时；不要用联网搜索代替代码运行。",
+      inputSchema: z.object({
+        language: z
+          .enum(["javascript", "js"])
+          .describe("代码语言；当前仅支持 JavaScript"),
+        code: z.string().describe("要执行的短 JavaScript 代码"),
+      }),
+      execute: async ({ code }) => {
+        const output = await runJavaScriptSnippet(code);
+        return { text: output };
+      },
+    }),
+  };
+}
+
 // ---------- 图像生成 / 编辑（gpt-image-2） ----------
 
-async function getImageModelConfig() {
+export async function getImageModelConfig() {
   const rows = await db
     .select({ model: schema.models, provider: schema.providers })
     .from(schema.models)
@@ -120,7 +212,7 @@ async function getImageModelConfig() {
   return {
     record: found.model,
     apiKey: decryptSecret(found.provider.apiKeyEncrypted),
-    baseURL: found.provider.baseUrl || "https://api.openai.com/v1",
+    baseURL: getProviderBaseURL(found.provider) ?? "https://api.openai.com/v1",
   };
 }
 
@@ -128,36 +220,56 @@ export function buildImageTools(userId: string, onImage: (url: string) => void):
   return {
     generate_image: tool({
       description:
-        "根据文字描述生成图片。把用户的需求扩写为详细的英文 prompt 效果更好。",
+        "生成图片。当用户要求画图、生成图片、设计图、画 XX 时，直接调用此工具，不要只给文字描述或 prompt。调用前自行把用户的中文需求扩写为详细的英文 prompt 作为参数传入。",
       inputSchema: z.object({
-        prompt: z.string().describe("详细的图片描述（英文效果更佳）"),
+        prompt: z.string().describe("详细的英文图片描述（由你根据用户需求扩写）"),
         size: z.enum(["1024x1024", "1536x1024", "1024x1536"]).optional(),
       }),
       execute: async ({ prompt, size }) => {
         const { record, apiKey, baseURL } = await getImageModelConfig();
         // 生图前预检余额/额度（C4）
         const { assertCanSpend } = await import("@/lib/server/billing");
-        await assertCanSpend(userId);
-        const res = await fetch(`${baseURL}/images/generations`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify({
-            model: record.slug,
-            prompt,
-            size: size ?? "1024x1024",
-            n: 1,
-          }),
-        });
-        if (!res.ok) {
-          const err = await res.text();
-          throw new Error(`生图失败（${res.status}）: ${err.slice(0, 200)}`);
-        }
-        const data = (await res.json()) as {
-          data: { b64_json?: string; url?: string }[];
+        await assertCanSpend(userId, Math.max(0, record.pricePerImage ?? 0));
+
+        // 网关偶发返回空 200，封装请求 + 重试
+        const doGenerate = async () => {
+          const res = await fetch(`${baseURL}/images/generations`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify({
+              model: record.slug,
+              prompt,
+              size: size ?? "1024x1024",
+              n: 1,
+            }),
+          });
+          if (!res.ok) {
+            throw new Error(await formatUpstreamError(res, "生图失败"));
+          }
+          // 网关偶发返回 200 但空响应体（application/octet-stream, 0 bytes）
+          const text = await res.text();
+          if (!text.trim()) {
+            throw new Error("生图上游返回空响应（网关异常），请稍后重试");
+          }
+          try {
+            return JSON.parse(text) as { data: { b64_json?: string; url?: string }[] };
+          } catch {
+            throw new Error(
+              `生图上游返回了非 JSON 响应（${text.slice(0, 100)}），请稍后重试`
+            );
+          }
         };
+
+        let data: { data: { b64_json?: string; url?: string }[] };
+        try {
+          data = await doGenerate();
+        } catch {
+          // 网关空响应重试一次
+          data = await doGenerate();
+        }
         const item = data.data[0];
         let url = item.url ?? "";
         if (item.b64_json) {
@@ -180,7 +292,7 @@ export function buildImageTools(userId: string, onImage: (url: string) => void):
   };
 }
 
-async function saveGeneratedImage(userId: string, b64: string): Promise<string> {
+export async function saveGeneratedImage(userId: string, b64: string): Promise<string> {
   const { mkdir, writeFile } = await import("node:fs/promises");
   const dir = `${process.cwd()}/public/generated`;
   await mkdir(dir, { recursive: true });
@@ -201,14 +313,19 @@ export function buildVisionTool(): ToolSet {
       }),
       execute: async ({ imageUrl, question }) => {
         // C1: 校验图片 URL，防止被 prompt 注入用于拉取内网/云元数据（SSRF）
-        const { assertSafeUrl } = await import("@/lib/server/net-guard");
-        await assertSafeUrl(imageUrl);
+        if (imageUrl.startsWith("http://") || imageUrl.startsWith("https://")) {
+          const { assertSafeUrl } = await import("@/lib/server/net-guard");
+          await assertSafeUrl(imageUrl);
+        }
         const [s] = await db
           .select({ helper: schema.settings.visionHelperModelId })
           .from(schema.settings)
           .where(eq(schema.settings.id, "global"));
         if (!s?.helper) throw new Error("管理员尚未配置辅助识图模型");
         const { model } = await resolveModel(s.helper);
+
+        const imageSrc = await resolveImageSource(imageUrl);
+
         const { generateText } = await import("ai");
         const { text } = await generateText({
           model,
@@ -216,7 +333,7 @@ export function buildVisionTool(): ToolSet {
             {
               role: "user",
               content: [
-                { type: "image", image: new URL(imageUrl) },
+                { type: "image", image: new URL(imageSrc) },
                 { type: "text", text: question ?? "详细描述这张图片的内容。" },
               ],
             },
@@ -254,7 +371,7 @@ export function buildArtifactTools(conversationId: string): ToolSet {
           versions: [{ version: 1, content, createdAt: new Date().toISOString() }],
           currentVersion: 1,
         });
-        return { artifactId: id, text: `已创建 Artifact「${title}」` };
+        return { artifactId: id, artifactTitle: title, text: `已创建 Artifact「${title}」` };
       },
     }),
     update_artifact: tool({
@@ -283,7 +400,11 @@ export function buildArtifactTools(conversationId: string): ToolSet {
             updatedAt: new Date(),
           })
           .where(scope);
-        return { artifactId, text: `已更新 Artifact「${existing.title}」到 v${nextVersion}` };
+        return {
+          artifactId,
+          artifactTitle: existing.title,
+          text: `已更新 Artifact「${existing.title}」到 v${nextVersion}`,
+        };
       },
     }),
   };

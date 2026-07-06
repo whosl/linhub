@@ -8,18 +8,22 @@ import {
   ChevronRightIcon,
   CopyIcon,
   FileIcon,
+  Loader2Icon,
   PencilIcon,
   QuoteIcon,
   RefreshCwIcon,
   ThumbsDownIcon,
   ThumbsUpIcon,
   Volume2Icon,
+  VolumeXIcon,
 } from "lucide-react";
 import { cn, formatBytes } from "@/lib/utils";
 import type { Message, Model } from "@/lib/types";
 import { MarkdownRenderer } from "./markdown/markdown-renderer";
 import { ReasoningBlock } from "./reasoning-block";
 import { ToolCallCard } from "./tool-call-card";
+import { ToolCallsSummary, isWebTool } from "./tool-calls-summary";
+import { ImageLightbox } from "./image-lightbox";
 import { Tooltip } from "@/components/ui/tooltip";
 import {
   DropdownMenu,
@@ -47,6 +51,7 @@ export function MessageItem({
   onFeedback,
   onQuote,
   onOpenArtifact,
+  onImageEdited,
 }: {
   message: Message;
   isStreaming: boolean;
@@ -57,12 +62,15 @@ export function MessageItem({
   onFeedback?: (fb: "up" | "down" | null) => void;
   onQuote?: (text: string) => void;
   onOpenArtifact?: (artifactId: string) => void;
+  /** lightbox 编辑图片后，替换消息里的旧图（乐观更新） */
+  onImageEdited?: (oldUrl: string, newUrl: string) => void;
 }) {
   const [copied, setCopied] = React.useState(false);
   const [editing, setEditing] = React.useState(false);
   const [editText, setEditText] = React.useState("");
   const contentRef = React.useRef<HTMLDivElement>(null);
   const [selection, setSelection] = React.useState<{ text: string; x: number; y: number } | null>(null);
+  const [lightbox, setLightbox] = React.useState<{ src: string; alt?: string } | null>(null);
 
   const textContent = message.parts
     .filter((p): p is { type: "text"; text: string } => p.type === "text")
@@ -70,9 +78,14 @@ export function MessageItem({
     .join("\n");
 
   const copy = async () => {
-    await navigator.clipboard.writeText(textContent);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    // M5: 非安全上下文（HTTP / 无 clipboard 权限的 iframe）下 writeText 会 reject
+    try {
+      await navigator.clipboard.writeText(textContent);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      toast.error("复制失败，请手动选择文本");
+    }
   };
 
   // 选中文本 → 引用回复
@@ -99,6 +112,22 @@ export function MessageItem({
   };
 
   const modelName = models.find((m) => m.id === message.modelId)?.displayName;
+  const lightboxNode = (
+    <ImageLightbox
+      src={lightbox?.src ?? ""}
+      alt={lightbox?.alt}
+      open={!!lightbox}
+      onOpenChange={(o) => !o && setLightbox(null)}
+      onEdited={
+        onImageEdited && lightbox
+          ? (newUrl) => {
+              onImageEdited(lightbox.src, newUrl);
+              setLightbox(null);
+            }
+          : undefined
+      }
+    />
+  );
 
   // ---------- 用户消息 ----------
   if (message.role === "user") {
@@ -122,7 +151,8 @@ export function MessageItem({
                 key={i}
                 src={part.url}
                 alt={part.alt ?? "上传的图片"}
-                className="max-h-64 max-w-[75%] rounded-2xl border"
+                onClick={() => setLightbox({ src: part.url, alt: part.alt })}
+                className="max-h-64 max-w-[75%] cursor-zoom-in rounded-2xl border transition-opacity hover:opacity-90"
               />
             );
           }
@@ -206,6 +236,7 @@ export function MessageItem({
             </Tooltip>
           </div>
         )}
+        {lightboxNode}
       </motion.div>
     );
   }
@@ -230,6 +261,15 @@ export function MessageItem({
           </div>
         )}
 
+        {/* web 类工具调用收拢为折叠行组（替代原来堆叠的大卡片） */}
+        {(() => {
+          const webParts = message.parts.filter(
+            (p): p is Extract<(typeof message.parts)[number], { type: "tool-call" }> =>
+              p.type === "tool-call" && isWebTool(p.toolName)
+          );
+          return webParts.length > 0 ? <ToolCallsSummary parts={webParts} /> : null;
+        })()}
+
         {message.parts.map((part, i) => {
           const isLast = i === message.parts.length - 1;
           switch (part.type) {
@@ -242,13 +282,15 @@ export function MessageItem({
                 />
               );
             case "tool-call":
+              // web 类已由上方 ToolCallsSummary 统一渲染，这里跳过
+              if (isWebTool(part.toolName)) return null;
               return (
                 <ToolCallCard key={i} part={part} onOpenArtifact={onOpenArtifact} />
               );
             case "text":
               return (
                 <div key={i} className={cn(isStreaming && isLast && "streaming-cursor")}>
-                  <MarkdownRenderer content={part.text} />
+                  <MarkdownRenderer content={part.text} isStreaming={isStreaming && isLast} />
                 </div>
               );
             case "image":
@@ -258,7 +300,8 @@ export function MessageItem({
                   key={i}
                   src={part.url}
                   alt={part.alt ?? "生成的图片"}
-                  className="my-3 max-h-96 rounded-2xl border shadow-sm"
+                  onClick={() => setLightbox({ src: part.url, alt: part.alt })}
+                  className="my-3 max-h-96 cursor-zoom-in rounded-2xl border shadow-sm transition-opacity hover:opacity-90"
                 />
               );
             default:
@@ -357,6 +400,8 @@ export function MessageItem({
           )}
         </div>
       )}
+      {/* 图片全屏预览 */}
+      {lightboxNode}
     </motion.div>
   );
 }
@@ -410,7 +455,7 @@ function SpeakButton({ message }: { message: Message }) {
   };
 
   return (
-    <Tooltip label={state === "playing" ? "停止朗读" : "朗读"}>
+    <Tooltip label={state === "playing" ? "停止朗读" : state === "loading" ? "生成语音中…" : "朗读"}>
       <button
         onClick={speak}
         aria-label={state === "playing" ? "停止朗读" : "朗读"}
@@ -419,7 +464,13 @@ function SpeakButton({ message }: { message: Message }) {
           state === "idle" ? "text-muted-foreground" : "text-primary"
         )}
       >
-        <Volume2Icon className={cn("size-3.5", state === "loading" && "animate-pulse")} />
+        {state === "loading" ? (
+          <Loader2Icon className="size-3.5 animate-spin" />
+        ) : state === "playing" ? (
+          <VolumeXIcon className="size-3.5" />
+        ) : (
+          <Volume2Icon className="size-3.5" />
+        )}
       </button>
     </Tooltip>
   );

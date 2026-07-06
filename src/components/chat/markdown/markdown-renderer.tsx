@@ -10,6 +10,34 @@ import { cn } from "@/lib/utils";
 import { CodeBlock } from "./code-block";
 import { MermaidBlock } from "./mermaid-block";
 
+const AUTOLINK_BOUNDARIES = [
+  "%EF%BC%89", // ）
+  "%EF%BC%8C", // ，
+  "%E3%80%82", // 。
+  "%EF%BC%9B", // ；
+  "%EF%BC%9A", // ：
+  "）",
+  "，",
+  "。",
+  "；",
+  "：",
+];
+
+function normalizeAutolinkHref(href?: string): string | undefined {
+  if (!href) return href;
+  const boundary = AUTOLINK_BOUNDARIES.map((mark) => href.indexOf(mark))
+    .filter((i) => i > -1)
+    .sort((a, b) => a - b)[0];
+  const trimmed = boundary === undefined ? href : href.slice(0, boundary);
+  return trimmed.replace(/[),.;!?]+$/g, "");
+}
+
+function plainText(children: React.ReactNode): string {
+  return React.Children.toArray(children)
+    .map((child) => (typeof child === "string" ? child : ""))
+    .join("");
+}
+
 /**
  * 完整 Markdown 渲染：GFM 表格/任务列表/脚注、KaTeX 公式、
  * Shiki 代码高亮、Mermaid 图表。
@@ -18,9 +46,11 @@ import { MermaidBlock } from "./mermaid-block";
 export const MarkdownRenderer = React.memo(function MarkdownRenderer({
   content,
   className,
+  isStreaming,
 }: {
   content: string;
   className?: string;
+  isStreaming?: boolean;
 }) {
   return (
     <div
@@ -48,14 +78,37 @@ export const MarkdownRenderer = React.memo(function MarkdownRenderer({
             />
           ),
           hr: () => <hr className="my-5 border-border" />,
-          a: (p) => (
-            <a
-              className="font-medium text-primary underline decoration-primary/40 underline-offset-2 transition-colors hover:decoration-primary"
-              target="_blank"
-              rel="noopener noreferrer"
-              {...p}
-            />
-          ),
+          a: ({ href, children, ...props }) => {
+            const safeHref = normalizeAutolinkHref(href);
+            const childText = plainText(children);
+            if (safeHref && childText.startsWith(safeHref) && childText !== safeHref) {
+              return (
+                <>
+                  <a
+                    className="font-medium text-primary underline decoration-primary/40 underline-offset-2 transition-colors hover:decoration-primary"
+                    href={safeHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    {...props}
+                  >
+                    {safeHref}
+                  </a>
+                  {childText.slice(safeHref.length)}
+                </>
+              );
+            }
+            return (
+              <a
+                className="font-medium text-primary underline decoration-primary/40 underline-offset-2 transition-colors hover:decoration-primary"
+                href={safeHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                {...props}
+              >
+                {children}
+              </a>
+            );
+          },
           table: (p) => (
             <div className="my-3 overflow-x-auto rounded-xl border">
               <table className="w-full border-collapse text-sm" {...p} />
@@ -87,7 +140,7 @@ export const MarkdownRenderer = React.memo(function MarkdownRenderer({
               );
             }
             const lang = match?.[1] ?? "";
-            if (lang === "mermaid") return <MermaidBlock code={code} />;
+            if (lang === "mermaid") return <MermaidBlock code={code} isStreaming={isStreaming} />;
             return <CodeBlock language={lang} code={code} />;
           },
           pre: (p) => <>{p.children}</>,

@@ -21,21 +21,21 @@ import {
 import { cn } from "@/lib/utils";
 import type { ToolCallPart } from "@/lib/types";
 
-const TOOL_META: Record<string, { icon: React.ElementType; label: (args: Record<string, unknown>) => string }> = {
-  web_search: { icon: SearchIcon, label: (a) => `搜索「${a.query ?? ""}」` },
-  web_read: { icon: GlobeIcon, label: (a) => `阅读 ${shortUrl(String(a.url ?? ""))}` },
-  tavily_extract: { icon: GlobeIcon, label: (a) => `提取 ${shortUrl(String(a.url ?? ""))}` },
-  tavily_crawl: { icon: GlobeIcon, label: (a) => `爬取 ${shortUrl(String(a.url ?? ""))}` },
-  tavily_research: { icon: BrainCircuitIcon, label: () => "深度调研" },
-  generate_image: { icon: PaletteIcon, label: () => "生成图片" },
-  edit_image: { icon: ImageIcon, label: () => "编辑图片" },
-  analyze_image: { icon: ScanEyeIcon, label: () => "识别图片" },
-  run_code: { icon: CodeIcon, label: () => "运行代码" },
-  save_memory: { icon: SparklesIcon, label: () => "记住了这一点" },
-  search_memory: { icon: SparklesIcon, label: () => "回忆相关记忆" },
-  search_knowledge: { icon: BookOpenIcon, label: (a) => `检索知识库「${a.query ?? ""}」` },
-  create_artifact: { icon: CodeIcon, label: (a) => `创建作品「${a.title ?? ""}」` },
-  update_artifact: { icon: CodeIcon, label: (a) => `更新作品「${a.title ?? ""}」` },
+const TOOL_META: Record<string, { icon: React.ElementType; verb: string; label: (args: Record<string, unknown>) => string }> = {
+  web_search: { icon: SearchIcon, verb: "搜索", label: (a) => `搜索「${a.query ?? ""}」` },
+  web_read: { icon: GlobeIcon, verb: "阅读", label: (a) => `阅读 ${shortUrl(String(a.url ?? ""))}` },
+  tavily_extract: { icon: GlobeIcon, verb: "提取", label: (a) => `提取 ${shortUrl(String(a.url ?? ""))}` },
+  tavily_crawl: { icon: GlobeIcon, verb: "爬取", label: (a) => `爬取 ${shortUrl(String(a.url ?? ""))}` },
+  tavily_research: { icon: BrainCircuitIcon, verb: "调研", label: () => "深度调研" },
+  generate_image: { icon: PaletteIcon, verb: "生成图片", label: () => "生成图片" },
+  edit_image: { icon: ImageIcon, verb: "编辑图片", label: () => "编辑图片" },
+  analyze_image: { icon: ScanEyeIcon, verb: "识别图片", label: () => "识别图片" },
+  run_code: { icon: CodeIcon, verb: "运行代码", label: () => "运行代码" },
+  save_memory: { icon: SparklesIcon, verb: "记录", label: () => "记住了这一点" },
+  search_memory: { icon: SparklesIcon, verb: "回忆", label: () => "回忆相关记忆" },
+  search_knowledge: { icon: BookOpenIcon, verb: "检索", label: (a) => `检索知识库「${a.query ?? ""}」` },
+  create_artifact: { icon: CodeIcon, verb: "创建作品", label: (a) => `创建作品「${a.title ?? ""}」` },
+  update_artifact: { icon: CodeIcon, verb: "更新作品", label: (a) => `更新作品「${a.title ?? ""}」` },
 };
 
 function shortUrl(url: string): string {
@@ -44,6 +44,20 @@ function shortUrl(url: string): string {
   } catch {
     return url.slice(0, 40);
   }
+}
+
+/**
+ * 从工具参数生成的原始 JSON 片段里提取可读预览。
+ * 模型流式生成 tool input 时是 JSON 增量（如 {"query":"最新黑），
+ * 这里用正则抓取第一个字符串值，给用户一个"正在搜索 XX"的实时反馈。
+ */
+function extractPreviewValue(raw: string): string | null {
+  // 匹配 "key":"value 片段，取 value 部分（可能未闭合）
+  const m = raw.match(/"([^"]+)"\s*:\s*"([^"]*)/);
+  if (m) return m[2] || null;
+  // 兜底：匹配裸字符串值
+  const m2 = raw.match(/:\s*"([^"]*)/);
+  return m2 ? m2[1] || null : null;
 }
 
 export function ToolCallCard({
@@ -56,14 +70,22 @@ export function ToolCallCard({
   const [open, setOpen] = React.useState(false);
   const meta = TOOL_META[part.toolName] ?? {
     icon: WrenchIcon,
+    verb: "调用",
     label: () => part.toolName,
   };
   const Icon = meta.icon;
   const artifactId = part.result?.artifactId;
+  const artifactTitle = part.result?.artifactTitle ?? part.args.title ?? "作品";
   const hasDetail =
     !!part.result?.sources?.length ||
     !!part.result?.chunks?.length ||
+    !!part.result?.text ||
     !!part.errorMessage;
+
+  // 工具参数生成中（tool-input-delta 阶段）：args 还没结构化，
+  // 从原始 JSON 片段里提取引号内的字符串作为可读预览。
+  const isGenerating = part.state === "running" && part.inputPreview != null;
+  const previewText = isGenerating ? extractPreviewValue(part.inputPreview!) : null;
 
   // Artifact 卡片：点击打开右侧面板
   if (artifactId && part.state === "success") {
@@ -77,7 +99,7 @@ export function ToolCallCard({
         </span>
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium">
-            {String(part.args.title ?? "作品")}
+            {String(artifactTitle)}
           </span>
           <span className="block text-xs text-muted-foreground">
             点击打开 · 可预览与运行
@@ -116,7 +138,12 @@ export function ToolCallCard({
         </span>
         <span className="min-w-0 flex-1">
           <span className={cn("block truncate", part.state === "running" && "animate-thinking")}>
-            {meta.label(part.args)}
+            {isGenerating && previewText
+              ? // 参数生成中且有预览：显示实时关键词（搜索/阅读/检索等）
+                meta.label({ query: previewText, url: previewText, title: previewText })
+              : isGenerating
+                ? `${meta.verb}…`
+                : meta.label(part.args)}
           </span>
           {part.state === "success" && part.result?.sources && (
             <span className="block text-xs text-muted-foreground">
@@ -189,6 +216,11 @@ export function ToolCallCard({
                   </span>
                 </div>
               ))}
+              {part.result?.text && (
+                <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-lg border bg-muted/40 px-3 py-2 text-xs text-foreground">
+                  {part.result.text}
+                </pre>
+              )}
             </div>
           </motion.div>
         )}

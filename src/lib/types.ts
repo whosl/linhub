@@ -128,6 +128,12 @@ export interface ToolCallPart {
   /** 结果摘要，如搜索来源列表 */
   result?: ToolResultSummary;
   errorMessage?: string;
+  /**
+   * 工具参数生成中的原始 JSON 片段拼接（流式预览用）。
+   * tool-input-start 时初始化为空串，tool-input-delta 时累加，
+   * tool-call 到达后清空（args 已有完整结构化入参）。
+   */
+  inputPreview?: string;
 }
 
 export interface WebSource {
@@ -148,6 +154,8 @@ export interface ToolResultSummary {
   text?: string;
   /** 关联 artifact */
   artifactId?: string;
+  /** Artifact 展示标题 */
+  artifactTitle?: string;
 }
 
 export interface ImagePart {
@@ -465,6 +473,8 @@ export type StreamEvent =
   | { type: "text-delta"; messageId: string; delta: string }
   | { type: "tool-call-start"; messageId: string; part: ToolCallPart }
   | { type: "tool-call-end"; messageId: string; part: ToolCallPart }
+  | { type: "tool-input-start"; messageId: string; toolCallId: string; toolName: ToolName }
+  | { type: "tool-input-delta"; messageId: string; toolCallId: string; delta: string }
   | { type: "image"; messageId: string; part: ImagePart }
   | { type: "artifact"; messageId: string; artifact: Artifact }
   | { type: "title"; conversationId: string; title: string }

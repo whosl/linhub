@@ -17,8 +17,11 @@ import {
   recordUsage,
 } from "@/lib/server/billing";
 import { rateLimit } from "@/lib/server/rate-limit";
+import { toUiArtifact } from "@/app/api/artifacts/util";
+import { resolveImageSource } from "@/lib/server/llm/image-source";
 import {
   buildArtifactTools,
+  buildCodeTools,
   buildImageTools,
   buildKnowledgeTool,
   buildMcpTools,
@@ -296,10 +299,51 @@ async function handleRegenerate(
     modelId: input.modelId ?? target.modelId ?? conversation.modelId,
     styleId: conversation.styleId ?? undefined,
     extendedThinking: true,
+    // 重试时无法拿到用户前端的工具开关，给一个默认全开，
+    // 避免模型在重试时丢失联网搜索等能力。
+    toolToggles: {
+      webSearch: true,
+      imageGeneration: true,
+      codeRunner: true,
+      mcpServerIds: [],
+      knowledgeBaseIds: [],
+    },
     userId,
     emit,
     signal,
   });
+}
+
+/** 解析用户的有效默认模型 id：用户个人默认 → 全局默认 → 第一个可用模型 */
+async function getDefaultModelId(userId: string): Promise<string | null> {
+  const [user] = await db
+    .select({ defaultModelId: schema.users.defaultModelId })
+    .from(schema.users)
+    .where(eq(schema.users.id, userId))
+    .limit(1);
+  const [settings] = await db
+    .select({ defaultChatModelId: schema.settings.defaultChatModelId })
+    .from(schema.settings)
+    .where(eq(schema.settings.id, "global"))
+    .limit(1);
+  const enabledModels = await db
+    .select({ id: schema.models.id, capabilities: schema.models.capabilities })
+    .from(schema.models)
+    .where(eq(schema.models.enabled, true));
+  const chatModels = enabledModels.filter(
+    (m) => !(m.capabilities as string[]).includes("image-generation")
+  );
+  const chatModelIds = new Set(chatModels.map((m) => m.id));
+  if (user?.defaultModelId && chatModelIds.has(user.defaultModelId)) {
+    return user.defaultModelId;
+  }
+  if (
+    settings?.defaultChatModelId &&
+    chatModelIds.has(settings.defaultChatModelId)
+  ) {
+    return settings.defaultChatModelId;
+  }
+  return chatModels[0]?.id ?? null;
 }
 
 async function streamAssistant(opts: {
@@ -352,6 +396,16 @@ async function streamAssistant(opts: {
   }
 
   const history: ModelMessage[] = [];
+  const assistantImageContextIds = new Set(
+    chain
+      .filter((m) => {
+        if (m.role !== "assistant") return false;
+        const msgParts = m.parts as MessagePart[];
+        return msgParts.some((p) => p.type === "image");
+      })
+      .slice(-3)
+      .map((m) => m.id)
+  );
   for (const m of chain) {
     if (m.role === "system") continue;
     const msgParts = m.parts as MessagePart[];
@@ -384,26 +438,117 @@ async function streamAssistant(opts: {
     if (m.role === "user" && imageParts.length > 0) {
       const origin = process.env.APP_ORIGIN ?? "http://localhost:3000";
       if (modelHasVision) {
+        const imageSrcs = await Promise.all(
+          imageParts.map((img) => resolveImageSource(img.url, origin))
+        );
         history.push({
           role: "user",
           content: [
-            ...imageParts.map((img) => ({
-              type: "image" as const,
-              image: new URL(img.url.startsWith("http") ? img.url : origin + img.url),
+            ...imageSrcs.map((src) => ({
+              type: "file" as const,
+              data: new URL(src),
+              mediaType: "image" as const,
             })),
             { type: "text" as const, text: text || "请看这张图片。" },
           ],
         });
       } else {
         // 无视觉能力：提示模型调用 analyze_image 工具
+        // 本地路径不拼 origin（网关下载不到 localhost），原样传给工具，
+        // analyze_image 工具内部会把本地路径转 base64 内联。
         const urls = imageParts
-          .map((img) => (img.url.startsWith("http") ? img.url : origin + img.url))
+          .map((img) => (img.url.startsWith("http") ? img.url : img.url))
           .join("\n");
         history.push({
           role: "user",
-          content: `${text}\n\n（用户上传了图片，你无法直接查看。请调用 analyze_image 工具分析，图片 URL：\n${urls}）`,
+          content: `${text}\n\n（用户上传了图片，你无法直接查看。请调用 analyze_image 工具分析，图片路径：\n${urls}）`,
         });
       }
+      continue;
+    }
+
+    if (
+      m.role === "assistant" &&
+      imageParts.length > 0 &&
+      assistantImageContextIds.has(m.id)
+    ) {
+      const imageUrls = imageParts.map((img, i) => `图片${i + 1}: ${img.url}`).join("\n");
+      history.push({
+        role: "assistant",
+        content: `${text || "已生成图片。"}\n\n（助手生成的图片：\n${imageUrls}）`,
+      });
+      if (modelHasVision) {
+        const origin = process.env.APP_ORIGIN ?? "http://localhost:3000";
+        const imageSrcs = await Promise.all(
+          imageParts.map((img) => resolveImageSource(img.url, origin))
+        );
+        history.push({
+          role: "user",
+          content: [
+            {
+              type: "text" as const,
+              text: "以下是上一条助手生成的图片，仅作为后续对话的视觉上下文；用户追问上图、上一张图或刚生成的图片时请参考它，不需要单独回应本条上下文。",
+            },
+            ...imageSrcs.map((src) => ({
+              type: "file" as const,
+              data: new URL(src),
+              mediaType: "image" as const,
+            })),
+          ],
+        });
+      }
+      continue;
+    }
+
+    // assistant 消息里的工具调用：保留进历史，让模型在重试时能看到之前的搜索结果
+    const toolCallParts = msgParts.filter(
+      (p): p is ToolCallPart => p.type === "tool-call" && !!p.toolCallId
+    );
+    if (m.role === "assistant" && toolCallParts.length > 0) {
+      // 把 assistant 的文本 + 工具调用放进同一条 assistant 消息
+      const assistantContent: ModelMessage[] = [];
+      if (text.trim()) {
+        assistantContent.push({
+          role: "assistant",
+          content: [{ type: "text", text }],
+        });
+      }
+      // 逐个加 tool-call
+      for (const tc of toolCallParts) {
+        assistantContent.push({
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: tc.toolCallId,
+              toolName: tc.toolName,
+              input: tc.args,
+            },
+          ],
+        });
+        // 紧跟 tool-result（成功才带结果；running/error 的给占位避免 SDK 报缺 result）
+        const output =
+          tc.state === "success"
+            ? toToolResultOutput(tc.result ?? { text: "(无结果)" })
+            : tc.state === "error"
+              ? toToolResultOutput(
+                  { error: tc.errorMessage ?? "工具调用失败" },
+                  true
+                )
+              : toToolResultOutput({ text: "(工具调用未完成)" });
+        assistantContent.push({
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: tc.toolCallId,
+              toolName: tc.toolName,
+              output,
+            },
+          ],
+        });
+      }
+      history.push(...assistantContent);
       continue;
     }
 
@@ -471,16 +616,47 @@ async function streamAssistant(opts: {
     // 记忆读取失败不阻塞
   }
 
+  // Artifact 上下文：让模型能把“刚才那个作品/某标题”映射到 artifactId，
+  // 否则 update_artifact 只收 id，后续更新很容易产出空响应或不会调用工具。
+  try {
+    const artifacts = await db
+      .select({
+        id: schema.artifacts.id,
+        title: schema.artifacts.title,
+        kind: schema.artifacts.kind,
+        currentVersion: schema.artifacts.currentVersion,
+      })
+      .from(schema.artifacts)
+      .where(eq(schema.artifacts.conversationId, conversationId));
+    if (artifacts.length > 0) {
+      system +=
+        "\n\n当前会话已有 Artifacts（更新作品时必须使用对应 artifactId 调用 update_artifact，并传入完整更新后内容）：\n" +
+        artifacts
+          .map(
+            (a) =>
+              `- artifactId=${a.id}; title=${a.title}; kind=${a.kind}; currentVersion=${a.currentVersion}`
+          )
+          .join("\n");
+    }
+  } catch {
+    // Artifact 列表读取失败不阻塞聊天
+  }
+
   const parts: MessagePart[] = [];
   let usage = { inputTokens: 0, outputTokens: 0, costCents: 0 };
   let status: UiMessage["status"] = "complete";
 
   // 工具集：根据会话开关组装
   const toggles = opts.toolToggles;
+  if (toggles?.codeRunner) {
+    system +=
+      "\n\n工具选择规则：当用户要求运行、执行、验证代码，或明确要求调用代码运行工具时，优先调用 run_code；不要用 web_search 代替本地代码运行。";
+  }
   const pendingImages: string[] = [];
   let tools: ToolSet = {};
   let closeMcp: (() => Promise<void>) | undefined;
   if (toggles?.webSearch) Object.assign(tools, buildWebTools());
+  if (toggles?.codeRunner) Object.assign(tools, buildCodeTools());
   if (toggles?.imageGeneration)
     Object.assign(
       tools,
@@ -502,10 +678,38 @@ async function streamAssistant(opts: {
   let streamResult: ReturnType<typeof streamText> | undefined;
 
   try {
-    const { model, record, provider, storeEnabled } = await resolveModel(modelId);
+    let resolved;
+    try {
+      resolved = await resolveModel(modelId);
+      // 防护：图像生成模型不能用于文本对话（会被网关拒绝 no route），
+      // 自动回退到默认文本模型。图像生成应通过 generate_image 工具自动调用。
+      if ((resolved.record.capabilities as string[]).includes("image-generation")) {
+        throw new Error("IMAGE_MODEL_NOT_FOR_CHAT");
+      }
+    } catch {
+      // 模型不存在/已禁用/不适用于对话（如图像模型）：
+      // 自动回退到用户/全局默认模型，不让对话直接报错卡死。
+      const fallbackId = await getDefaultModelId(userId);
+      if (!fallbackId || fallbackId === modelId) throw new Error("模型不可用，请在设置中选择一个模型");
+      resolved = await resolveModel(fallbackId);
+      emit({
+        type: "text-delta",
+        messageId: assistantId,
+        delta: `⚠️ 当前模型不支持对话，已自动切换为「${resolved.record.displayName}」。\n\n`,
+      });
+    }
+    const { model, record, provider, storeEnabled } = resolved;
     // Pro 模型需订阅（C8）；余额/额度预检防透支（C2）
     await assertModelAccess(userId, record);
-    await assertCanSpend(userId);
+    const estimatedInputTokens = estimatePromptTokens(system, history);
+    const estimatedOutputTokens = record.maxOutputTokens ?? 4096;
+    await assertCanSpend(
+      userId,
+      computeCostCents(record, {
+        inputTokens: estimatedInputTokens,
+        outputTokens: estimatedOutputTokens,
+      })
+    );
     const supportsTools = (record.capabilities as string[]).includes("tools");
     if (!supportsTools) tools = {};
     const result = streamText({
@@ -527,17 +731,7 @@ async function streamAssistant(opts: {
 
     let reasoningStart = 0;
     const toolParts = new Map<string, ToolCallPart>();
-    let firstChunkAt = 0;
-    let chunkCount = 0;
     for await (const chunk of result.fullStream) {
-      if (!firstChunkAt) firstChunkAt = Date.now();
-      chunkCount++;
-      console.log(
-        `[chat-stream] +${Date.now() - firstChunkAt}ms #${chunkCount} ${chunk.type}` +
-        (chunk.type === "reasoning-delta" || chunk.type === "text-delta"
-          ? ` "${("text" in chunk ? chunk.text : "").slice(0, 30)}"`
-          : "")
-      );
       if (chunk.type === "reasoning-start") {
         reasoningStart = Date.now();
       } else if (chunk.type === "reasoning-delta") {
@@ -551,23 +745,76 @@ async function streamAssistant(opts: {
       } else if (chunk.type === "text-delta") {
         appendDelta(parts, "text", chunk.text);
         emit({ type: "text-delta", messageId: assistantId, delta: chunk.text });
-      } else if (chunk.type === "tool-call") {
+      } else if (chunk.type === "tool-input-start") {
+        // 工具调用开始：先建一个 running 的 part（args 为空），
+        // 让前端立刻展示「搜索中…」卡片，而不是干等参数生成完。
         const part: ToolCallPart = {
           type: "tool-call",
-          toolCallId: chunk.toolCallId,
+          toolCallId: chunk.id,
           toolName: chunk.toolName as ToolCallPart["toolName"],
-          args: (chunk.input ?? {}) as Record<string, unknown>,
+          args: {},
           state: "running",
+          inputPreview: "",
         };
-        toolParts.set(chunk.toolCallId, part);
+        toolParts.set(chunk.id, part);
         parts.push(part);
         emit({ type: "tool-call-start", messageId: assistantId, part });
+      } else if (chunk.type === "tool-input-delta") {
+        // 工具参数逐字生成（如 web_search 的 query），实时累加预览文本。
+        const part = toolParts.get(chunk.id);
+        if (part) {
+          part.inputPreview = (part.inputPreview ?? "") + chunk.delta;
+          emit({
+            type: "tool-input-delta",
+            messageId: assistantId,
+            toolCallId: chunk.id,
+            delta: chunk.delta,
+          });
+        }
+      } else if (chunk.type === "tool-call") {
+        // 参数生成完毕，工具真正开始执行：用完整结构化 input 覆盖 args，清掉预览。
+        const existing = toolParts.get(chunk.toolCallId);
+        if (existing) {
+          existing.args = (chunk.input ?? {}) as Record<string, unknown>;
+          existing.inputPreview = undefined;
+          emit({ type: "tool-call-start", messageId: assistantId, part: { ...existing } });
+        } else {
+          // 兜底：若 tool-input-start 未到达（部分模型不发），沿用旧逻辑创建。
+          const part: ToolCallPart = {
+            type: "tool-call",
+            toolCallId: chunk.toolCallId,
+            toolName: chunk.toolName as ToolCallPart["toolName"],
+            args: (chunk.input ?? {}) as Record<string, unknown>,
+            state: "running",
+          };
+          toolParts.set(chunk.toolCallId, part);
+          parts.push(part);
+          emit({ type: "tool-call-start", messageId: assistantId, part });
+        }
       } else if (chunk.type === "tool-result") {
         const part = toolParts.get(chunk.toolCallId);
         if (part) {
           part.state = "success";
           part.result = summarizeToolResult(chunk.output);
           emit({ type: "tool-call-end", messageId: assistantId, part });
+          if (
+            (part.toolName === "create_artifact" ||
+              part.toolName === "update_artifact") &&
+            part.result?.artifactId
+          ) {
+            const [artifact] = await db
+              .select()
+              .from(schema.artifacts)
+              .where(eq(schema.artifacts.id, part.result.artifactId))
+              .limit(1);
+            if (artifact) {
+              emit({
+                type: "artifact",
+                messageId: assistantId,
+                artifact: toUiArtifact(artifact),
+              });
+            }
+          }
           // 生图工具产出的图片作为独立 part 展示
           while (pendingImages.length > 0) {
             const url = pendingImages.shift()!;
@@ -587,6 +834,22 @@ async function streamAssistant(opts: {
       } else if (chunk.type === "error") {
         throw chunk.error instanceof Error ? chunk.error : new Error(String(chunk.error));
       }
+    }
+
+    if (signal.aborted) {
+      const abortError = new Error("Aborted");
+      abortError.name = "AbortError";
+      throw abortError;
+    }
+
+    if (parts.length === 0) {
+      status = "error";
+      appendDelta(parts, "text", "⚠️ 模型没有返回内容，请重试。");
+      emit({
+        type: "text-delta",
+        messageId: assistantId,
+        delta: "⚠️ 模型没有返回内容，请重试。",
+      });
     }
 
     const finalUsage = await result.usage;
@@ -690,12 +953,36 @@ function summarizeToolResult(output: unknown): ToolResultSummary {
     if (Array.isArray(o.sources)) summary.sources = o.sources as ToolResultSummary["sources"];
     if (Array.isArray(o.images)) summary.images = o.images as string[];
     if (typeof o.artifactId === "string") summary.artifactId = o.artifactId;
+    if (typeof o.artifactTitle === "string") summary.artifactTitle = o.artifactTitle;
     if (typeof o.answer === "string") summary.text = o.answer;
     else if (typeof o.text === "string") summary.text = o.text.slice(0, 500);
     if (Object.keys(summary).length > 0) return summary;
     return { text: JSON.stringify(output).slice(0, 500) };
   }
   return { text: String(output).slice(0, 500) };
+}
+
+type JsonValue =
+  | null
+  | string
+  | number
+  | boolean
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+function toJsonValue(value: unknown): JsonValue {
+  try {
+    return JSON.parse(JSON.stringify(value)) as JsonValue;
+  } catch {
+    return String(value);
+  }
+}
+
+function toToolResultOutput(output: unknown, isError = false) {
+  return {
+    type: isError ? ("error-json" as const) : ("json" as const),
+    value: toJsonValue(output),
+  };
 }
 
 function appendDelta(
@@ -709,6 +996,21 @@ function appendDelta(
   } else {
     parts.push({ type, text: delta } as MessagePart);
   }
+}
+
+function estimatePromptTokens(system: string, messages: ModelMessage[]) {
+  const chars = messages.reduce((total, message) => {
+    if (typeof message.content === "string") return total + message.content.length;
+    return (
+      total +
+      message.content.reduce((partTotal, part) => {
+        if (part.type === "text") return partTotal + part.text.length;
+        // 图片/文件的真实 token 由供应商决定，这里按一个保守下界预检。
+        return partTotal + 2000;
+      }, 0)
+    );
+  }, system.length);
+  return Math.ceil(chars / 4);
 }
 
 function toUiConversation(c: typeof schema.conversations.$inferSelect) {

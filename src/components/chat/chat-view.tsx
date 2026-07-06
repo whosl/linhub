@@ -7,7 +7,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowDownIcon } from "lucide-react";
 import { getDataService } from "@/lib/data";
 import { suggestedPrompts } from "@/lib/data/mock/fixtures";
-import type { Conversation, FilePart, ImagePart } from "@/lib/types";
+import type { FilePart, ImagePart } from "@/lib/types";
 import {
   deepestLeaf,
   useChatStore,
@@ -18,9 +18,10 @@ import { MessageItem, type BranchInfo } from "./message-item";
 import { ArtifactPanel } from "@/components/artifacts/artifact-panel";
 import { AnimatePresence } from "motion/react";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
 
 const DEFAULT_COMPOSER: ComposerState = {
-  modelId: "m-claude",
+  modelId: "",
   styleId: "style-normal",
   extendedThinking: true,
   tools: {
@@ -51,9 +52,19 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
     }
   }, [pendingContext.skillId, pendingContext.projectId, router]);
 
-  const { data: models = [] } = useQuery({
-    queryKey: ["models"],
-    queryFn: () => getDataService().listModels(),
+  const { data: modelsData } = useQuery({
+    queryKey: ["models", "with-default"],
+    queryFn: () => getDataService().listModelsWithDefault(),
+  });
+  const models = modelsData?.models ?? [];
+  const defaultModelId = modelsData?.defaultModelId;
+  const firstChatModelId = models.find(
+    (m) => !m.capabilities.includes("image-generation")
+  )?.id;
+  const { data: currentConversation } = useQuery({
+    queryKey: ["conversation", conversationId],
+    queryFn: () => getDataService().getConversation(conversationId!),
+    enabled: !!conversationId,
   });
   const { data: styles = [] } = useQuery({
     queryKey: ["styles"],
@@ -70,14 +81,38 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
   });
   const [openArtifactId, setOpenArtifactId] = React.useState<string | null>(null);
   const openArtifact = artifacts.find((a) => a.id === openArtifactId) ?? null;
+  const openArtifactById = React.useCallback(
+    (id: string) => {
+      setOpenArtifactId(id);
+      if (conversationId && !artifacts.some((a) => a.id === id)) {
+        void queryClient.invalidateQueries({ queryKey: ["artifacts", conversationId] });
+      }
+    },
+    [artifacts, conversationId, queryClient, setOpenArtifactId]
+  );
 
   const session = useChatStore((s) =>
     conversationId ? s.sessions[conversationId] : undefined
   );
+  const artifactPartsKey = (session?.messages ?? [])
+    .flatMap((m) =>
+      m.parts.flatMap((p) => {
+        if (
+          p.type !== "tool-call" ||
+          (p.toolName !== "create_artifact" && p.toolName !== "update_artifact") ||
+          p.state !== "success" ||
+          !p.result?.artifactId
+        ) {
+          return [];
+        }
+        return [`${p.toolCallId}:${p.result.artifactId}`];
+      })
+    )
+    .join("|");
   const pendingRedirect = useChatStore((s) => s.pendingRedirect);
   // I11: 新会话首条响应进行中标记，用于显示停止按钮
   const isStartingNew = useChatStore((s) => s.isStartingNew);
-  const { ensureSession, send, stop, regenerate, switchBranch, setFeedback, clearRedirect } =
+  const { ensureSession, send, stop, regenerate, switchBranch, setFeedback, clearRedirect, replaceMessageImage } =
     useChatStore();
 
   // 加载会话
@@ -85,17 +120,29 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
     if (conversationId) void ensureSession(conversationId);
   }, [conversationId, ensureSession]);
 
-  // 会话模型跟随会话设置（I14: 从已缓存的会话列表读 modelId，不再单独发请求）
   React.useEffect(() => {
-    if (!conversationId) return;
-    // 用 microtask 读取缓存以匹配现有 useQuery 数据时机；setState 在异步回调中，
-    // 既不新增网络请求，也符合 react-hooks/set-state-in-effect 规则。
+    if (!conversationId || !artifactPartsKey) return;
+    void queryClient.invalidateQueries({ queryKey: ["artifacts", conversationId] });
+  }, [artifactPartsKey, conversationId, queryClient]);
+
+  // 默认模型：后端返回的 defaultModelId 到达后，初始化 composer（仅首次，不覆盖用户已选）
+  React.useEffect(() => {
+    if (defaultModelId && composer.modelId === "") {
+      // 用 microtask 异步 setState，符合 react-hooks/set-state-in-effect 规则
+      Promise.resolve().then(() => {
+        setComposer((prev) => (prev.modelId === "" ? { ...prev, modelId: defaultModelId! } : prev));
+      });
+    }
+  }, [defaultModelId, composer.modelId]);
+
+  // 会话模型跟随会话设置。直达 /chat/:id 时侧栏缓存可能还没加载，
+  // 因此这里用独立 query 确保 composer 一定恢复到该会话的模型。
+  React.useEffect(() => {
+    if (!currentConversation) return;
     Promise.resolve().then(() => {
-      const cached = queryClient.getQueryData<Conversation[]>(["conversations"]);
-      const c = cached?.find((x) => x.id === conversationId);
-      if (c) setComposer((prev) => ({ ...prev, modelId: c.modelId }));
+      setComposer((prev) => ({ ...prev, modelId: currentConversation.modelId }));
     });
-  }, [conversationId, queryClient]);
+  }, [currentConversation]);
 
   // 新会话创建后跳转
   React.useEffect(() => {
@@ -140,6 +187,19 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
     });
   };
 
+  // 把指定模型设为用户默认（PATCH /api/me），并刷新用户缓存
+  const setDefaultModel = async (mid: string) => {
+    try {
+      await getDataService().updateProfile({ defaultModelId: mid });
+      queryClient.invalidateQueries({ queryKey: ["current-user"] });
+      queryClient.invalidateQueries({ queryKey: ["models"] });
+      queryClient.invalidateQueries({ queryKey: ["models", "with-default"] });
+      toast.success("已设为默认模型");
+    } catch {
+      toast.error("设置失败");
+    }
+  };
+
   // ---- 发送 ----
   const handleSend = (text: string, images: ImagePart[], files: FilePart[]) => {
     void send({
@@ -148,7 +208,7 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
       images,
       attachments: files,
       quotedText,
-      modelId: composer.modelId,
+      modelId: composer.modelId || defaultModelId || firstChatModelId || "",
       styleId: composer.styleId,
       extendedThinking: composer.extendedThinking,
       tools: composer.tools,
@@ -167,7 +227,7 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
       conversationId,
       parentId,
       text: newText,
-      modelId: composer.modelId,
+      modelId: composer.modelId || defaultModelId || firstChatModelId || "",
       styleId: composer.styleId,
       extendedThinking: composer.extendedThinking,
       tools: composer.tools,
@@ -223,6 +283,8 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
               onSend={handleSend}
               // I11: 新会话首条响应期间也能停止（store/api-service 用哨兵键登记 controller）
               onStop={() => void stop()}
+              defaultModelId={user?.defaultModelId ?? defaultModelId}
+              onSetDefaultModel={setDefaultModel}
               autoFocus
             />
             <div className="mx-auto mt-2 grid max-w-2xl grid-cols-2 gap-2 px-4 sm:grid-cols-3">
@@ -296,7 +358,13 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
                     : undefined
                 }
                 onQuote={(text) => setQuotedText(text)}
-                onOpenArtifact={(id) => setOpenArtifactId(id)}
+                onOpenArtifact={openArtifactById}
+                onImageEdited={
+                  conversationId
+                    ? (oldUrl, newUrl) =>
+                        void replaceMessageImage(conversationId, m.id, oldUrl, newUrl)
+                    : undefined
+                }
               />
             ))}
           </div>
@@ -330,6 +398,8 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
           isStreaming={!!isStreaming}
           onSend={handleSend}
           onStop={() => void stop(conversationId)}
+          defaultModelId={user?.defaultModelId ?? defaultModelId}
+          onSetDefaultModel={setDefaultModel}
         />
       </div>
 
