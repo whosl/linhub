@@ -94,9 +94,13 @@ export const models = pgTable("models", {
   outputPricePerM: integer("output_price_per_m").notNull().default(0),
   pricePerImage: integer("price_per_image"),
   contextWindow: integer("context_window").notNull().default(128000),
+  /** 单次回复最大输出 token（空=不限制，走供应商默认） */
+  maxOutputTokens: integer("max_output_tokens"),
   tier: text("tier", { enum: ["free", "pro"] })
     .notNull()
     .default("free"),
+  /** 模型选择器中的排序，小的在前 */
+  sortOrder: integer("sort_order").notNull().default(0),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
@@ -400,7 +404,8 @@ export const orders = pgTable("orders", {
   channel: text("channel", {
     enum: ["mock", "wechat", "alipay", "redeem-code"],
   }).notNull(),
-  externalOrderId: text("external_order_id"),
+  /** 第三方支付平台订单号，唯一约束保证回调幂等（M1） */
+  externalOrderId: text("external_order_id").unique(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   paidAt: timestamp("paid_at"),
 });

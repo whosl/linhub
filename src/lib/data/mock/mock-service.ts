@@ -125,6 +125,39 @@ class MockAdminService implements AdminService {
     await sleep(150);
     this.s.models = this.s.models.filter((m) => m.id !== id);
   }
+  async listRemoteModels(providerId: string) {
+    await sleep(400);
+    const existing = new Set(
+      this.s.models.filter((m) => m.providerId === providerId).map((m) => m.slug)
+    );
+    return ["demo-chat-large", "demo-chat-mini", "demo-vision-pro"].map((slug) => ({
+      slug,
+      added: existing.has(slug),
+    }));
+  }
+  async addRemoteModels(providerId: string, slugs: string[]) {
+    await sleep(300);
+    let added = 0;
+    for (const slug of slugs) {
+      if (this.s.models.some((m) => m.providerId === providerId && m.slug === slug)) continue;
+      const provider = this.s.providers.find((p) => p.id === providerId);
+      this.s.models.push({
+        id: `m-${uid()}`,
+        providerId,
+        providerKind: provider?.kind ?? "openai",
+        slug,
+        displayName: slug,
+        capabilities: ["tools"],
+        enabled: false,
+        inputPricePerM: 0,
+        outputPricePerM: 0,
+        contextWindow: 128000,
+        tier: "free",
+      });
+      added++;
+    }
+    return { added };
+  }
   async getSettings() {
     await sleep(100);
     return { ...this.s.settings };

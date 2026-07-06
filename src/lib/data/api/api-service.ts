@@ -15,6 +15,7 @@ import type {
   Plan,
   Project,
   Provider,
+  RemoteModel,
   Skill,
   SendMessageInput,
   StreamEvent,
@@ -428,6 +429,15 @@ class ApiAdminService implements AdminService {
   }
   async deleteModel(id: string) {
     await fetchJson(`/api/admin/models/${id}`, { method: "DELETE" });
+  }
+  listRemoteModels(providerId: string) {
+    return fetchJson<RemoteModel[]>(`/api/admin/providers/${providerId}/models`);
+  }
+  addRemoteModels(providerId: string, slugs: string[]) {
+    return fetchJson<{ added: number }>(`/api/admin/providers/${providerId}/models`, {
+      method: "POST",
+      body: JSON.stringify({ slugs }),
+    });
   }
   getSettings() {
     return fetchJson<AppSettings>("/api/admin/settings");

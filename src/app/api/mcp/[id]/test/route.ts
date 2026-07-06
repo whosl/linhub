@@ -27,6 +27,9 @@ export async function POST(
   }
 
   try {
+    // SSRF 防护：禁止指向内网/元数据地址
+    const { assertSafeUrl } = await import("@/lib/server/net-guard");
+    await assertSafeUrl(server.url);
     const { createMCPClient } = await import("@ai-sdk/mcp");
     const headers = server.headersEncrypted
       ? (JSON.parse(decryptSecret(server.headersEncrypted)) as Record<string, string>)

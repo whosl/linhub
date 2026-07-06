@@ -63,8 +63,20 @@ export interface Model {
   /** 每张图片价格（分），仅生图模型 */
   pricePerImage?: number;
   contextWindow: number;
+  /** 单次回复最大输出 token（空=供应商默认） */
+  maxOutputTokens?: number;
   /** 订阅分级：free 所有人可用 / pro 需订阅 */
   tier: "free" | "pro";
+  /** 模型选择器中的排序，小的在前 */
+  sortOrder?: number;
+}
+
+/** 从供应商 API 拉取到的远端模型（尚未入库） */
+export interface RemoteModel {
+  slug: string;
+  displayName?: string;
+  /** 是否已添加进本站模型列表 */
+  added: boolean;
 }
 
 // ---------- 消息与会话 ----------

@@ -18,7 +18,9 @@ function toUi(m: typeof schema.models.$inferSelect, providerKind: string) {
     outputPricePerM: m.outputPricePerM,
     pricePerImage: m.pricePerImage ?? undefined,
     contextWindow: m.contextWindow,
+    maxOutputTokens: m.maxOutputTokens ?? undefined,
     tier: m.tier,
+    sortOrder: m.sortOrder,
   };
 }
 
@@ -30,7 +32,7 @@ export async function GET() {
     .select({ model: schema.models, kind: schema.providers.kind })
     .from(schema.models)
     .innerJoin(schema.providers, eq(schema.models.providerId, schema.providers.id))
-    .orderBy(asc(schema.models.createdAt));
+    .orderBy(asc(schema.models.sortOrder), asc(schema.models.createdAt));
   return Response.json(rows.map((r) => toUi(r.model, r.kind)));
 }
 

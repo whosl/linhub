@@ -3,6 +3,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 import { requireSession } from "@/lib/server/auth";
 import { creditBalance } from "@/lib/server/payment/provider";
+import { rateLimit } from "@/lib/server/rate-limit";
 
 /** 卡密兑换 */
 export async function POST(req: NextRequest) {
@@ -12,6 +13,9 @@ export async function POST(req: NextRequest) {
   } catch {
     return Response.json({ error: "请先登录" }, { status: 401 });
   }
+  // 限频防暴力试卡密
+  const limited = rateLimit(`redeem:${session.user.id}`, 5, 60_000);
+  if (limited) return limited;
   const { code } = (await req.json()) as { code?: string };
   if (!code?.trim()) return Response.json({ error: "请输入卡密" }, { status: 400 });
 

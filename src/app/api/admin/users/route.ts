@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 import { requireAdmin } from "@/lib/server/auth";
 
@@ -35,22 +35,19 @@ export async function POST(req: NextRequest) {
   if (!Number.isFinite(amountCents) || amountCents <= 0) {
     return Response.json({ error: "金额无效" }, { status: 400 });
   }
+  // 原子自增，防并发丢更新（C2）
   await db.transaction(async (tx) => {
-    const [user] = await tx
-      .select({ balance: schema.users.balanceCents })
-      .from(schema.users)
-      .where(eq(schema.users.id, userId));
-    if (!user) throw new Error("用户不存在");
-    const newBalance = user.balance + amountCents;
-    await tx
+    const [updated] = await tx
       .update(schema.users)
-      .set({ balanceCents: newBalance })
-      .where(eq(schema.users.id, userId));
+      .set({ balanceCents: sql`${schema.users.balanceCents} + ${amountCents}` })
+      .where(eq(schema.users.id, userId))
+      .returning({ balance: schema.users.balanceCents });
+    if (!updated) throw new Error("用户不存在");
     await tx.insert(schema.ledger).values({
       id: `lg-${crypto.randomUUID().slice(0, 12)}`,
       userId,
       amountCents,
-      balanceAfterCents: newBalance,
+      balanceAfterCents: updated.balance,
       reason: "grant",
       description: note ?? "管理员赠送",
     });

@@ -14,6 +14,7 @@ import type {
   Plan,
   Project,
   Provider,
+  RemoteModel,
   SendMessageInput,
   Skill,
   StreamEvent,
@@ -117,6 +118,10 @@ export interface AdminService {
   listAllModels(): Promise<Model[]>;
   saveModel(m: Partial<Model> & { id?: string }): Promise<Model>;
   deleteModel(id: string): Promise<void>;
+  /** 调供应商 API 拉取远端模型列表（标记哪些已添加） */
+  listRemoteModels(providerId: string): Promise<RemoteModel[]>;
+  /** 批量添加选中的远端模型，返回新增数量 */
+  addRemoteModels(providerId: string, slugs: string[]): Promise<{ added: number }>;
   getSettings(): Promise<AppSettings>;
   saveSettings(patch: Partial<AppSettings> & { tavilyApiKey?: string; mimoApiKey?: string }): Promise<AppSettings>;
   listUsers(): Promise<User[]>;

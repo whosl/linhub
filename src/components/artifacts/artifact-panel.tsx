@@ -253,10 +253,17 @@ export function ArtifactPreview({
     );
   }
   if (artifact.kind === "svg") {
+    // SVG 可含脚本/事件属性，与 html 一样放进 sandbox iframe 渲染（防主页面 XSS）
+    const svgDoc = `<!doctype html><html><head><style>
+      html,body{margin:0;height:100%;display:flex;align-items:center;justify-content:center;background:#fff}
+      svg{max-width:100%;max-height:100%}
+    </style></head><body>${content}</body></html>`;
     return (
-      <div
-        className="flex h-full items-center justify-center p-6 [&_svg]:max-h-full [&_svg]:max-w-full"
-        dangerouslySetInnerHTML={{ __html: content }}
+      <iframe
+        srcDoc={svgDoc}
+        sandbox="allow-scripts"
+        className="size-full border-0 bg-white"
+        title={artifact.title}
       />
     );
   }

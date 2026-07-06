@@ -1,6 +1,9 @@
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import * as schema from "./schema";
+import { assertEnv } from "../env";
+
+assertEnv();
 
 const globalForDb = globalThis as unknown as {
   _pgClient?: ReturnType<typeof postgres>;

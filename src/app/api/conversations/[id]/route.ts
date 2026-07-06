@@ -68,7 +68,7 @@ export async function PATCH(
   const c = await ownedConversation(id, session.user.id);
   if (!c) return Response.json({ error: "not found" }, { status: 404 });
 
-  const patch = (await req.json()) as Partial<{
+  const body = (await req.json()) as Partial<{
     title: string;
     pinned: boolean;
     archived: boolean;
@@ -76,6 +76,32 @@ export async function PATCH(
     currentLeafId: string;
     modelId: string;
   }>;
+
+  // 白名单化补丁字段，避免客户端注入任意列
+  const patch: Partial<typeof schema.conversations.$inferInsert> = {};
+  if (typeof body.title === "string") patch.title = body.title.slice(0, 100);
+  if (typeof body.pinned === "boolean") patch.pinned = body.pinned;
+  if (typeof body.archived === "boolean") patch.archived = body.archived;
+  if (typeof body.currentLeafId === "string") patch.currentLeafId = body.currentLeafId;
+  if (typeof body.modelId === "string") patch.modelId = body.modelId;
+  if (body.projectId !== undefined) {
+    if (body.projectId === null) {
+      patch.projectId = null;
+    } else {
+      // 移入项目前校验项目归属（防 IDOR）
+      const [p] = await db
+        .select({ id: schema.projects.id })
+        .from(schema.projects)
+        .where(
+          and(
+            eq(schema.projects.id, body.projectId),
+            eq(schema.projects.ownerId, session.user.id)
+          )
+        );
+      if (!p) return Response.json({ error: "项目不存在" }, { status: 404 });
+      patch.projectId = body.projectId;
+    }
+  }
 
   await db
     .update(schema.conversations)

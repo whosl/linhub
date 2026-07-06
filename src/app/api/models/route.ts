@@ -16,7 +16,7 @@ export async function GET() {
     .from(schema.models)
     .innerJoin(schema.providers, eq(schema.models.providerId, schema.providers.id))
     .where(eq(schema.models.enabled, true))
-    .orderBy(asc(schema.models.createdAt));
+    .orderBy(asc(schema.models.sortOrder), asc(schema.models.createdAt));
 
   return Response.json(
     rows.map(({ model: m, providerKind }) => ({

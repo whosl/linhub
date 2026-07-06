@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 import { requireSession } from "@/lib/server/auth";
 import { creditBalance, getPaymentProvider } from "@/lib/server/payment/provider";
+import { rateLimit } from "@/lib/server/rate-limit";
 
 const uid = () => crypto.randomUUID().replace(/-/g, "").slice(0, 12);
 
@@ -15,6 +16,8 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: "请先登录" }, { status: 401 });
   }
   const userId = session.user.id;
+  const limited = rateLimit(`orders:${userId}`, 10, 60_000);
+  if (limited) return limited;
   const body = (await req.json()) as {
     kind: "recharge" | "subscription";
     amountCents?: number;
@@ -26,6 +29,13 @@ export async function POST(req: NextRequest) {
   let plan: typeof schema.plans.$inferSelect | undefined;
 
   if (body.kind === "recharge") {
+    // C1：mock 渠道创建即到账，未显式开启时禁止充值（生产必须接真实支付）
+    if (process.env.PAYMENT_MOCK_ENABLED !== "true") {
+      return Response.json(
+        { error: "支付渠道暂未开通，请使用卡密兑换或联系管理员" },
+        { status: 503 }
+      );
+    }
     amountCents = Math.floor(body.amountCents ?? 0);
     if (amountCents < 100 || amountCents > 1_000_000) {
       return Response.json({ error: "充值金额需在 1 到 10000 元之间" }, { status: 400 });
@@ -36,6 +46,13 @@ export async function POST(req: NextRequest) {
     [plan] = await db.select().from(schema.plans).where(eq(schema.plans.id, body.planId));
     if (!plan?.enabled) return Response.json({ error: "套餐不存在" }, { status: 400 });
     amountCents = plan.priceCentsPerMonth;
+    // C1：付费套餐同样受 mock 支付开关限制，0 元套餐放行
+    if (amountCents > 0 && process.env.PAYMENT_MOCK_ENABLED !== "true") {
+      return Response.json(
+        { error: "支付渠道暂未开通，请使用卡密兑换或联系管理员" },
+        { status: 503 }
+      );
+    }
     description = `订阅「${plan.name}」1 个月`;
   }
 

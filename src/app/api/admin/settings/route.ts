@@ -5,17 +5,23 @@ import { requireAdmin } from "@/lib/server/auth";
 import { decryptSecret, encryptSecret, maskSecret } from "@/lib/server/crypto";
 import { ensureSeeded } from "@/lib/server/seed";
 
+/** 解密失败（密钥轮换/数据损坏）时按未配置处理，不让整个设置页 500（M10） */
+function safeMask(encrypted: string | null): string | undefined {
+  if (!encrypted) return undefined;
+  try {
+    return maskSecret(decryptSecret(encrypted));
+  } catch {
+    return "解密失败，请重新填写";
+  }
+}
+
 function toUi(s: typeof schema.settings.$inferSelect) {
   return {
     siteName: s.siteName,
     visionHelperModelId: s.visionHelperModelId ?? undefined,
     embeddingModelId: s.embeddingModelId ?? undefined,
-    tavilyApiKeyMasked: s.tavilyApiKeyEncrypted
-      ? maskSecret(decryptSecret(s.tavilyApiKeyEncrypted))
-      : undefined,
-    mimoApiKeyMasked: s.mimoApiKeyEncrypted
-      ? maskSecret(decryptSecret(s.mimoApiKeyEncrypted))
-      : undefined,
+    tavilyApiKeyMasked: safeMask(s.tavilyApiKeyEncrypted),
+    mimoApiKeyMasked: safeMask(s.mimoApiKeyEncrypted),
     mimoTtsVoice: s.mimoTtsVoice ?? undefined,
     skillMarketRequiresReview: s.skillMarketRequiresReview,
     registrationEnabled: s.registrationEnabled,

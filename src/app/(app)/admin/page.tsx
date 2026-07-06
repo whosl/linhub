@@ -6,16 +6,26 @@ import {
   BotIcon,
   CheckIcon,
   CoinsIcon,
+  DownloadIcon,
   KeyIcon,
+  Loader2Icon,
   PencilIcon,
   PlusIcon,
+  SearchIcon,
   ServerIcon,
   Trash2Icon,
   UsersIcon,
   XIcon,
 } from "lucide-react";
 import { getDataService } from "@/lib/data";
-import type { Model, Plan, Provider, ProviderKind } from "@/lib/types";
+import type {
+  Model,
+  ModelCapability,
+  Plan,
+  Provider,
+  ProviderKind,
+  RemoteModel,
+} from "@/lib/types";
 import { formatCents, formatRelativeTime, formatTokens } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -95,6 +105,7 @@ function ProvidersTab() {
   const queryClient = useQueryClient();
   const [editorOpen, setEditorOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<Provider | null>(null);
+  const [fetchingFor, setFetchingFor] = React.useState<Provider | null>(null);
   const [form, setForm] = React.useState({
     kind: "openai" as ProviderKind,
     name: "",
@@ -158,12 +169,25 @@ function ProvidersTab() {
               {p.baseUrl && ` · ${p.baseUrl}`}
             </p>
           </div>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!p.apiKeyMasked}
+            onClick={() => setFetchingFor(p)}
+          >
+            <DownloadIcon /> 获取模型
+          </Button>
           <Button variant="ghost" size="icon-sm" onClick={() => openEditor(p)}>
             <PencilIcon />
           </Button>
           <Switch checked={p.enabled} onCheckedChange={() => toggle(p)} />
         </Card>
       ))}
+
+      <FetchModelsDialog
+        provider={fetchingFor}
+        onClose={() => setFetchingFor(null)}
+      />
 
       <Dialog open={editorOpen} onOpenChange={setEditorOpen}>
         <DialogContent>
@@ -207,6 +231,169 @@ function ProvidersTab() {
   );
 }
 
+/** 从供应商 API 拉取模型列表，勾选后批量添加 */
+function FetchModelsDialog({
+  provider,
+  onClose,
+}: {
+  provider: Provider | null;
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const [selected, setSelected] = React.useState<Set<string>>(new Set());
+  const [filter, setFilter] = React.useState("");
+  const [adding, setAdding] = React.useState(false);
+
+  const { data: remote, isLoading, error } = useQuery({
+    queryKey: ["remote-models", provider?.id],
+    queryFn: () => getDataService().admin.listRemoteModels(provider!.id),
+    enabled: !!provider,
+    retry: false,
+  });
+
+  React.useEffect(() => {
+    setSelected(new Set());
+    setFilter("");
+  }, [provider?.id]);
+
+  if (!provider) return null;
+
+  const list = (remote ?? []).filter((m) =>
+    m.slug.toLowerCase().includes(filter.trim().toLowerCase())
+  );
+  const addable = list.filter((m) => !m.added);
+
+  const toggleSlug = (m: RemoteModel) => {
+    if (m.added) return;
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(m.slug)) next.delete(m.slug);
+      else next.add(m.slug);
+      return next;
+    });
+  };
+
+  const addSelected = async () => {
+    setAdding(true);
+    try {
+      const { added } = await getDataService().admin.addRemoteModels(
+        provider.id,
+        [...selected]
+      );
+      toast.success(
+        `已添加 ${added} 个模型（默认停用），请到「模型与计价」设置价格后启用`
+      );
+      queryClient.invalidateQueries({ queryKey: ["admin-models"] });
+      queryClient.invalidateQueries({ queryKey: ["remote-models", provider.id] });
+      setSelected(new Set());
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "添加失败");
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  return (
+    <Dialog open={!!provider} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>从 {provider.name} 获取模型</DialogTitle>
+        </DialogHeader>
+
+        {isLoading ? (
+          <div className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
+            <Loader2Icon className="size-4 animate-spin" /> 正在请求供应商模型列表…
+          </div>
+        ) : error ? (
+          <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
+            {error instanceof Error ? error.message : "拉取失败"}
+            <p className="mt-1 text-xs text-muted-foreground">
+              请检查该供应商的 API Key 与 Base URL 是否正确、网络是否可达。
+            </p>
+          </div>
+        ) : (
+          <>
+            <div className="relative">
+              <SearchIcon className="absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                className="pl-8"
+                placeholder="筛选模型名…"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+              />
+            </div>
+
+            <div className="flex items-center justify-between text-xs text-muted-foreground">
+              <span>
+                共 {list.length} 个 · 已选 {selected.size} 个
+              </span>
+              <div className="flex gap-2">
+                <button
+                  className="hover:text-foreground"
+                  onClick={() =>
+                    setSelected(new Set(addable.map((m) => m.slug)))
+                  }
+                >
+                  全选未添加
+                </button>
+                <button
+                  className="hover:text-foreground"
+                  onClick={() => setSelected(new Set())}
+                >
+                  清空
+                </button>
+              </div>
+            </div>
+
+            <div className="max-h-72 space-y-1 overflow-y-auto rounded-xl border p-1.5">
+              {list.length === 0 && (
+                <p className="py-6 text-center text-sm text-muted-foreground">
+                  没有匹配的模型
+                </p>
+              )}
+              {list.map((m) => (
+                <label
+                  key={m.slug}
+                  className={`flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm transition-colors ${
+                    m.added ? "cursor-default opacity-60" : "hover:bg-accent"
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    className="accent-primary"
+                    checked={m.added || selected.has(m.slug)}
+                    disabled={m.added}
+                    onChange={() => toggleSlug(m)}
+                  />
+                  <span className="min-w-0 flex-1 truncate font-mono text-xs">
+                    {m.slug}
+                  </span>
+                  {m.displayName && m.displayName !== m.slug && (
+                    <span className="truncate text-xs text-muted-foreground">
+                      {m.displayName}
+                    </span>
+                  )}
+                  {m.added && <Badge variant="secondary">已添加</Badge>}
+                </label>
+              ))}
+            </div>
+          </>
+        )}
+
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>
+            关闭
+          </Button>
+          <Button onClick={addSelected} disabled={selected.size === 0 || adding}>
+            {adding && <Loader2Icon className="animate-spin" />}
+            添加所选（{selected.size}）
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // ---------- 模型与计价 ----------
 
 function ModelsTab() {
@@ -224,13 +411,25 @@ function ModelsTab() {
     queryClient.invalidateQueries({ queryKey: ["models"] });
   };
 
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ["admin-models"] });
+    queryClient.invalidateQueries({ queryKey: ["models"] });
+    // 模型增删后丢弃远端列表缓存，避免「获取模型」对话框显示过期的已添加标记
+    queryClient.removeQueries({ queryKey: ["remote-models"] });
+  };
+
   return (
     <div className="space-y-3">
+      <p className="text-xs text-muted-foreground">
+        在「供应商」页用「获取模型」拉取并添加模型；新添加的模型默认停用，设好计价后再启用。
+      </p>
       <Card className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b bg-muted/40 text-left text-xs text-muted-foreground">
               <th className="px-4 py-2.5 font-medium">模型</th>
+              <th className="px-3 py-2.5 font-medium">供应商</th>
+              <th className="px-3 py-2.5 font-medium">能力</th>
               <th className="px-3 py-2.5 font-medium">分级</th>
               <th className="px-3 py-2.5 text-right font-medium">输入 /M</th>
               <th className="px-3 py-2.5 text-right font-medium">输出 /M</th>
@@ -244,7 +443,19 @@ function ModelsTab() {
               <tr key={m.id} className="border-b last:border-b-0 hover:bg-accent/30">
                 <td className="px-4 py-2.5">
                   <p className="font-medium">{m.displayName}</p>
-                  <p className="text-xs text-muted-foreground">{m.slug}</p>
+                  <p className="font-mono text-xs text-muted-foreground">{m.slug}</p>
+                </td>
+                <td className="px-3 py-2.5 text-xs text-muted-foreground">
+                  {m.providerKind}
+                </td>
+                <td className="px-3 py-2.5">
+                  <div className="flex flex-wrap gap-1">
+                    {m.capabilities.map((c) => (
+                      <Badge key={c} variant="secondary">
+                        {CAPABILITY_LABELS[c] ?? c}
+                      </Badge>
+                    ))}
+                  </div>
                 </td>
                 <td className="px-3 py-2.5">
                   <Badge variant={m.tier === "pro" ? "default" : "secondary"}>
@@ -276,12 +487,11 @@ function ModelsTab() {
         </table>
       </Card>
 
-      <ModelPricingDialog
+      <ModelEditorDialog
         model={editing}
         onClose={() => setEditing(null)}
         onSaved={() => {
-          queryClient.invalidateQueries({ queryKey: ["admin-models"] });
-          queryClient.invalidateQueries({ queryKey: ["models"] });
+          invalidate();
           setEditing(null);
         }}
       />
@@ -289,7 +499,38 @@ function ModelsTab() {
   );
 }
 
-function ModelPricingDialog({
+const CAPABILITY_LABELS: Record<string, string> = {
+  vision: "视觉",
+  reasoning: "推理",
+  tools: "工具调用",
+  "image-generation": "生图",
+  "web-search-native": "原生联网",
+};
+
+const ALL_CAPABILITIES = Object.keys(CAPABILITY_LABELS) as ModelCapability[];
+
+function Field({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+        {label}
+        {hint && <span className="ml-1 font-normal opacity-70">{hint}</span>}
+      </label>
+      {children}
+    </div>
+  );
+}
+
+/** 模型详细设置：展示、能力、上下文、计价、分级、排序 */
+function ModelEditorDialog({
   model,
   onClose,
   onSaved,
@@ -300,51 +541,179 @@ function ModelPricingDialog({
 }) {
   const [form, setForm] = React.useState({
     displayName: "",
+    description: "",
+    capabilities: [] as ModelCapability[],
+    contextWindow: 128000,
+    maxOutputTokens: "" as string,
     inputPricePerM: 0,
     outputPricePerM: 0,
+    pricePerImage: "" as string,
     tier: "free" as Model["tier"],
+    sortOrder: 0,
   });
+  const [busy, setBusy] = React.useState(false);
 
   React.useEffect(() => {
     if (model) {
       setForm({
         displayName: model.displayName,
+        description: model.description ?? "",
+        capabilities: [...model.capabilities],
+        contextWindow: model.contextWindow,
+        maxOutputTokens: model.maxOutputTokens?.toString() ?? "",
         inputPricePerM: model.inputPricePerM,
         outputPricePerM: model.outputPricePerM,
+        pricePerImage: model.pricePerImage?.toString() ?? "",
         tier: model.tier,
+        sortOrder: model.sortOrder ?? 0,
       });
     }
   }, [model]);
 
   if (!model) return null;
 
+  const isImageModel = form.capabilities.includes("image-generation");
+
+  const toggleCapability = (c: ModelCapability) => {
+    setForm((f) => ({
+      ...f,
+      capabilities: f.capabilities.includes(c)
+        ? f.capabilities.filter((x) => x !== c)
+        : [...f.capabilities, c],
+    }));
+  };
+
   const save = async () => {
-    await getDataService().admin.saveModel({ id: model.id, ...form });
-    toast.success("模型已更新");
-    onSaved();
+    setBusy(true);
+    try {
+      await getDataService().admin.saveModel({
+        id: model.id,
+        displayName: form.displayName.trim() || model.slug,
+        description: (form.description.trim() || null) as unknown as string | undefined,
+        capabilities: form.capabilities,
+        contextWindow: Math.max(1000, Math.floor(form.contextWindow) || 128000),
+        // 传 null 才能清除已保存的值（undefined 会被 JSON 丢弃）
+        maxOutputTokens: (form.maxOutputTokens.trim()
+          ? Math.max(1, Math.floor(Number(form.maxOutputTokens)))
+          : null) as unknown as number | undefined,
+        inputPricePerM: Math.max(0, Math.floor(form.inputPricePerM) || 0),
+        outputPricePerM: Math.max(0, Math.floor(form.outputPricePerM) || 0),
+        pricePerImage: (form.pricePerImage.trim()
+          ? Math.max(0, Math.floor(Number(form.pricePerImage)))
+          : null) as unknown as number | undefined,
+        tier: form.tier,
+        sortOrder: Math.floor(form.sortOrder) || 0,
+      });
+      toast.success("模型已更新");
+      onSaved();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "保存失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!window.confirm(`确定删除模型「${model.displayName}」？删除后历史用量记录保留。`))
+      return;
+    setBusy(true);
+    try {
+      await getDataService().admin.deleteModel(model.id);
+      toast.success("模型已删除");
+      onSaved();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "删除失败");
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
     <Dialog open={!!model} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent>
+      <DialogContent className="max-h-[85dvh] max-w-xl overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>编辑 {model.slug}</DialogTitle>
+          <DialogTitle>
+            编辑模型 <span className="font-mono text-sm">{model.slug}</span>
+          </DialogTitle>
         </DialogHeader>
-        <div className="space-y-3">
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
-              展示名
-            </label>
-            <Input
-              value={form.displayName}
-              onChange={(e) => setForm({ ...form, displayName: e.target.value })}
-            />
-          </div>
+
+        <div className="space-y-4">
+          {/* 基本信息 */}
           <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
-                输入价格（分/百万 token）
-              </label>
+            <Field label="展示名">
+              <Input
+                value={form.displayName}
+                onChange={(e) => setForm({ ...form, displayName: e.target.value })}
+              />
+            </Field>
+            <Field label="排序" hint="（小的在前）">
+              <Input
+                type="number"
+                value={form.sortOrder}
+                onChange={(e) =>
+                  setForm({ ...form, sortOrder: Number(e.target.value) })
+                }
+              />
+            </Field>
+          </div>
+          <Field label="描述" hint="（展示在模型选择器中）">
+            <Input
+              placeholder="如：旗舰模型，综合能力最强"
+              value={form.description}
+              onChange={(e) => setForm({ ...form, description: e.target.value })}
+            />
+          </Field>
+
+          {/* 能力 */}
+          <Field label="能力" hint="（决定可用的工具与图片处理方式）">
+            <div className="flex flex-wrap gap-2">
+              {ALL_CAPABILITIES.map((c) => (
+                <label
+                  key={c}
+                  className={`flex cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
+                    form.capabilities.includes(c)
+                      ? "border-primary/60 bg-primary/5 text-foreground"
+                      : "text-muted-foreground hover:bg-accent"
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    className="accent-primary"
+                    checked={form.capabilities.includes(c)}
+                    onChange={() => toggleCapability(c)}
+                  />
+                  {CAPABILITY_LABELS[c]}
+                </label>
+              ))}
+            </div>
+          </Field>
+
+          {/* 上下文与输出限制 */}
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="上下文窗口" hint="（token）">
+              <Input
+                type="number"
+                value={form.contextWindow}
+                onChange={(e) =>
+                  setForm({ ...form, contextWindow: Number(e.target.value) })
+                }
+              />
+            </Field>
+            <Field label="最大输出" hint="（token，留空=供应商默认）">
+              <Input
+                type="number"
+                placeholder="不限制"
+                value={form.maxOutputTokens}
+                onChange={(e) =>
+                  setForm({ ...form, maxOutputTokens: e.target.value })
+                }
+              />
+            </Field>
+          </div>
+
+          {/* 计价 */}
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="输入价格" hint="（分/百万 token）">
               <Input
                 type="number"
                 value={form.inputPricePerM}
@@ -352,11 +721,8 @@ function ModelPricingDialog({
                   setForm({ ...form, inputPricePerM: Number(e.target.value) })
                 }
               />
-            </div>
-            <div>
-              <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
-                输出价格（分/百万 token）
-              </label>
+            </Field>
+            <Field label="输出价格" hint="（分/百万 token）">
               <Input
                 type="number"
                 value={form.outputPricePerM}
@@ -364,12 +730,21 @@ function ModelPricingDialog({
                   setForm({ ...form, outputPricePerM: Number(e.target.value) })
                 }
               />
-            </div>
+            </Field>
           </div>
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
-              可用分级
-            </label>
+          {isImageModel && (
+            <Field label="每张图片价格" hint="（分/张）">
+              <Input
+                type="number"
+                placeholder="如 30 = ¥0.30/张"
+                value={form.pricePerImage}
+                onChange={(e) => setForm({ ...form, pricePerImage: e.target.value })}
+              />
+            </Field>
+          )}
+
+          {/* 分级 */}
+          <Field label="可用分级">
             <Select
               value={form.tier}
               onValueChange={(v) => setForm({ ...form, tier: v as Model["tier"] })}
@@ -378,13 +753,22 @@ function ModelPricingDialog({
                 { value: "pro", label: "仅订阅用户" },
               ]}
             />
-          </div>
+          </Field>
         </div>
-        <DialogFooter>
-          <Button variant="ghost" onClick={onClose}>
-            取消
+
+        <DialogFooter className="justify-between">
+          <Button variant="ghost" className="text-destructive" onClick={remove} disabled={busy}>
+            <Trash2Icon /> 删除模型
           </Button>
-          <Button onClick={save}>保存</Button>
+          <div className="flex gap-2">
+            <Button variant="ghost" onClick={onClose}>
+              取消
+            </Button>
+            <Button onClick={save} disabled={busy}>
+              {busy && <Loader2Icon className="animate-spin" />}
+              保存
+            </Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>

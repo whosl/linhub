@@ -38,6 +38,17 @@ export const auth = betterAuth({
         // 第一个注册的用户自动成为管理员
         before: async (user) => {
           const [existing] = await db.select({ id: schema.users.id }).from(schema.users).limit(1);
+          // H5：管理员关闭注册后拒绝新用户（首个用户/未初始化设置时放行）
+          if (existing) {
+            const { eq } = await import("drizzle-orm");
+            const [s] = await db
+              .select({ enabled: schema.settings.registrationEnabled })
+              .from(schema.settings)
+              .where(eq(schema.settings.id, "global"));
+            if (s && !s.enabled) {
+              throw new Error("当前未开放注册，请联系管理员");
+            }
+          }
           return {
             data: {
               ...user,
@@ -49,6 +60,12 @@ export const auth = betterAuth({
         },
       },
     },
+  },
+  // 登录/注册等认证接口限频（better-auth 内置，按 IP）
+  rateLimit: {
+    enabled: true,
+    window: 60,
+    max: 20,
   },
   secret: process.env.BETTER_AUTH_SECRET,
   baseURL: process.env.BETTER_AUTH_URL,

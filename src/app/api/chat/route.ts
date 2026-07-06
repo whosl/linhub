@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, or, isNull, sql } from "drizzle-orm";
 import {
   generateText,
   stepCountIs,
@@ -11,6 +11,12 @@ import { db, schema } from "@/lib/server/db";
 import { requireSession } from "@/lib/server/auth";
 import { ensureSeeded } from "@/lib/server/seed";
 import { computeCostCents, resolveModel } from "@/lib/server/llm/registry";
+import {
+  assertCanSpend,
+  assertModelAccess,
+  recordUsage,
+} from "@/lib/server/billing";
+import { rateLimit } from "@/lib/server/rate-limit";
 import {
   buildArtifactTools,
   buildImageTools,
@@ -54,6 +60,8 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: "请先登录" }, { status: 401 });
   }
   const userId = session.user.id;
+  const limited = rateLimit(`chat:${userId}`, 20, 60_000);
+  if (limited) return limited;
   const body = (await req.json()) as ChatRequest;
 
   const encoder = new TextEncoder();
@@ -86,6 +94,48 @@ export async function POST(req: NextRequest) {
   });
 }
 
+/** 校验会话关联资源的归属，越权时抛错（IDOR 防护） */
+async function assertOwnedRefs(
+  userId: string,
+  refs: { projectId?: string | null; skillId?: string | null; styleId?: string | null }
+) {
+  if (refs.projectId) {
+    const [p] = await db
+      .select({ id: schema.projects.id })
+      .from(schema.projects)
+      .where(
+        and(eq(schema.projects.id, refs.projectId), eq(schema.projects.ownerId, userId))
+      );
+    if (!p) throw new Error("项目不存在");
+  }
+  if (refs.skillId) {
+    // 自己的 skill 或已公开的 skill 可用
+    const [s] = await db
+      .select({ id: schema.skills.id })
+      .from(schema.skills)
+      .where(
+        and(
+          eq(schema.skills.id, refs.skillId),
+          or(eq(schema.skills.ownerId, userId), eq(schema.skills.visibility, "public"))
+        )
+      );
+    if (!s) throw new Error("技能不存在");
+  }
+  if (refs.styleId) {
+    // 内置风格（ownerId 为空）或自己的风格可用
+    const [st] = await db
+      .select({ id: schema.styles.id })
+      .from(schema.styles)
+      .where(
+        and(
+          eq(schema.styles.id, refs.styleId),
+          or(isNull(schema.styles.ownerId), eq(schema.styles.ownerId, userId))
+        )
+      );
+    if (!st) throw new Error("回复风格不存在");
+  }
+}
+
 async function handleSend(
   input: SendMessageInput,
   userId: string,
@@ -98,6 +148,7 @@ async function handleSend(
   if (!conversationId) {
     conversationId = `c-${uid()}`;
     isNew = true;
+    await assertOwnedRefs(userId, input);
     await db.insert(schema.conversations).values({
       id: conversationId,
       ownerId: userId,
@@ -312,7 +363,12 @@ async function streamAssistant(opts: {
       const [att] = await db
         .select({ text: schema.attachments.extractedText, name: schema.attachments.name })
         .from(schema.attachments)
-        .where(eq(schema.attachments.id, f.attachmentId));
+        .where(
+          and(
+            eq(schema.attachments.id, f.attachmentId),
+            eq(schema.attachments.ownerId, userId)
+          )
+        );
       if (att?.text) {
         text += `\n\n<attached_file name="${att.name}">\n${att.text.slice(0, 30_000)}\n</attached_file>`;
       } else {
@@ -429,7 +485,7 @@ async function streamAssistant(opts: {
   Object.assign(tools, buildVisionTool());
   Object.assign(tools, buildArtifactTools(conversationId));
   Object.assign(tools, buildMemoryTools(userId, conversationId));
-  Object.assign(tools, buildKnowledgeTool(toggles?.knowledgeBaseIds ?? []));
+  Object.assign(tools, buildKnowledgeTool(userId, toggles?.knowledgeBaseIds ?? []));
   try {
     const mcp = await buildMcpTools(userId, toggles?.mcpServerIds ?? []);
     Object.assign(tools, mcp.tools);
@@ -439,8 +495,13 @@ async function streamAssistant(opts: {
   }
   const hasTools = Object.keys(tools).length > 0;
 
+  let streamResult: ReturnType<typeof streamText> | undefined;
+
   try {
     const { model, record } = await resolveModel(modelId);
+    // Pro 模型需订阅（C8）；余额/额度预检防透支（C2）
+    await assertModelAccess(userId, record);
+    await assertCanSpend(userId);
     const supportsTools = (record.capabilities as string[]).includes("tools");
     if (!supportsTools) tools = {};
     const result = streamText({
@@ -448,10 +509,12 @@ async function streamAssistant(opts: {
       system,
       messages: history,
       abortSignal: signal,
+      ...(record.maxOutputTokens ? { maxOutputTokens: record.maxOutputTokens } : {}),
       ...(hasTools && supportsTools
         ? { tools, stopWhen: stepCountIs(8) }
         : {}),
     });
+    streamResult = result;
 
     let reasoningStart = 0;
     const toolParts = new Map<string, ToolCallPart>();
@@ -523,15 +586,52 @@ async function streamAssistant(opts: {
     await closeMcp?.();
     if (signal.aborted || (e instanceof Error && e.name === "AbortError")) {
       status = "stopped";
+      // 中止也要为已产生的 token 计费（C3：防逃单）
+      try {
+        const { record } = await resolveModel(modelId);
+        // 优先取 SDK 真实用量（限 2s，abort 后可能拿不到）；否则按字符数估算
+        let inputTokens = 0;
+        let outputTokens = 0;
+        try {
+          const real = await Promise.race([
+            streamResult?.usage,
+            new Promise<never>((_, rej) => setTimeout(() => rej(new Error("timeout")), 2000)),
+          ]);
+          inputTokens = real?.inputTokens ?? 0;
+          outputTokens = real?.outputTokens ?? 0;
+        } catch {
+          const historyChars = history.reduce(
+            (n, m) => n + (typeof m.content === "string" ? m.content.length : 500),
+            system.length
+          );
+          const outputChars = parts.reduce(
+            (n, p) => n + ("text" in p && typeof p.text === "string" ? p.text.length : 0),
+            0
+          );
+          inputTokens = Math.ceil(historyChars / 4);
+          outputTokens = Math.ceil(outputChars / 4);
+        }
+        if (inputTokens > 0 || outputTokens > 0) {
+          usage = {
+            inputTokens,
+            outputTokens,
+            costCents: computeCostCents(record, { inputTokens, outputTokens }),
+          };
+          await recordUsage(userId, record, conversationId, usage);
+        }
+      } catch {
+        // 中止计费失败不阻塞消息落库
+      }
     } else {
       status = "error";
       const msg = e instanceof Error ? e.message : "生成失败";
+      const isBilling = e instanceof Error && e.name === "BillingError";
       appendDelta(
         parts,
         "text",
-        parts.length === 0
+        parts.length === 0 && !isBilling
           ? `⚠️ ${msg}\n\n请联系管理员在「管理后台 → 供应商」中检查该模型的 API Key 配置。`
-          : `\n\n⚠️ ${msg}`
+          : `${parts.length === 0 ? "" : "\n\n"}⚠️ ${msg}`
       );
       emit({
         type: "text-delta",
@@ -590,66 +690,6 @@ function appendDelta(
   } else {
     parts.push({ type, text: delta } as MessagePart);
   }
-}
-
-async function recordUsage(
-  userId: string,
-  record: typeof schema.models.$inferSelect,
-  conversationId: string,
-  usage: { inputTokens: number; outputTokens: number; costCents: number }
-) {
-  await db.transaction(async (tx) => {
-    await tx.insert(schema.usageRecords).values({
-      id: `ur-${uid()}`,
-      userId,
-      modelId: record.id,
-      modelName: record.displayName,
-      conversationId,
-      inputTokens: usage.inputTokens,
-      outputTokens: usage.outputTokens,
-      costCents: usage.costCents,
-    });
-    if (usage.costCents > 0) {
-      // 1) 优先扣订阅额度
-      let remaining = usage.costCents;
-      const [sub] = await tx
-        .select({ subscription: schema.subscriptions, quota: schema.plans.monthlyQuotaCents })
-        .from(schema.subscriptions)
-        .innerJoin(schema.plans, eq(schema.subscriptions.planId, schema.plans.id))
-        .where(eq(schema.subscriptions.userId, userId));
-      if (sub && sub.subscription.expiresAt > new Date()) {
-        const quotaLeft = sub.quota - sub.subscription.usedQuotaCents;
-        const fromQuota = Math.min(Math.max(quotaLeft, 0), remaining);
-        if (fromQuota > 0) {
-          await tx
-            .update(schema.subscriptions)
-            .set({ usedQuotaCents: sub.subscription.usedQuotaCents + fromQuota })
-            .where(eq(schema.subscriptions.id, sub.subscription.id));
-          remaining -= fromQuota;
-        }
-      }
-      // 2) 剩余部分扣余额并记账
-      if (remaining > 0) {
-        const [user] = await tx
-          .select({ balance: schema.users.balanceCents })
-          .from(schema.users)
-          .where(eq(schema.users.id, userId));
-        const newBalance = (user?.balance ?? 0) - remaining;
-        await tx
-          .update(schema.users)
-          .set({ balanceCents: newBalance })
-          .where(eq(schema.users.id, userId));
-        await tx.insert(schema.ledger).values({
-          id: `lg-${uid()}`,
-          userId,
-          amountCents: -remaining,
-          balanceAfterCents: newBalance,
-          reason: "usage",
-          description: `${record.displayName} 对话消费`,
-        });
-      }
-    }
-  });
 }
 
 function toUiConversation(c: typeof schema.conversations.$inferSelect) {

@@ -23,6 +23,11 @@ export async function DELETE(
       )
     );
   if (!kb) return Response.json({ error: "不存在" }, { status: 404 });
-  await db.delete(schema.kbDocuments).where(eq(schema.kbDocuments.id, docId));
+  // 联合条件：文档必须属于该知识库（防跨库越权删除）
+  await db
+    .delete(schema.kbDocuments)
+    .where(
+      and(eq(schema.kbDocuments.id, docId), eq(schema.kbDocuments.knowledgeBaseId, id))
+    );
   return Response.json({ ok: true });
 }

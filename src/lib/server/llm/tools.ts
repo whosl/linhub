@@ -1,7 +1,7 @@
 import { tool, type ToolSet } from "ai";
 import { createMCPClient } from "@ai-sdk/mcp";
 import { z } from "zod";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 import { decryptSecret } from "@/lib/server/crypto";
 import { resolveModel } from "./registry";
@@ -135,6 +135,9 @@ export function buildImageTools(userId: string, onImage: (url: string) => void):
       }),
       execute: async ({ prompt, size }) => {
         const { record, apiKey, baseURL } = await getImageModelConfig();
+        // 生图前预检余额/额度（C4）
+        const { assertCanSpend } = await import("@/lib/server/billing");
+        await assertCanSpend(userId);
         const res = await fetch(`${baseURL}/images/generations`, {
           method: "POST",
           headers: {
@@ -161,12 +164,9 @@ export function buildImageTools(userId: string, onImage: (url: string) => void):
           url = await saveGeneratedImage(userId, item.b64_json);
         }
         onImage(url);
-        // 记录生图用量
-        await db.insert(schema.usageRecords).values({
-          id: `ur-${crypto.randomUUID().slice(0, 12)}`,
-          userId,
-          modelId: record.id,
-          modelName: record.displayName,
+        // 生图计费：记录用量并扣订阅额度/余额（C4）
+        const { recordUsage } = await import("@/lib/server/billing");
+        await recordUsage(userId, record, null, {
           inputTokens: 0,
           outputTokens: 0,
           imageCount: 1,
@@ -259,10 +259,12 @@ export function buildArtifactTools(conversationId: string): ToolSet {
         content: z.string().describe("更新后的完整内容"),
       }),
       execute: async ({ artifactId, content }) => {
-        const [existing] = await db
-          .select()
-          .from(schema.artifacts)
-          .where(eq(schema.artifacts.id, artifactId));
+        // 只允许更新当前会话内的 artifact（防跨会话越权写）
+        const scope = and(
+          eq(schema.artifacts.id, artifactId),
+          eq(schema.artifacts.conversationId, conversationId)
+        );
+        const [existing] = await db.select().from(schema.artifacts).where(scope);
         if (!existing) throw new Error("Artifact 不存在");
         const nextVersion = existing.currentVersion + 1;
         await db
@@ -275,7 +277,7 @@ export function buildArtifactTools(conversationId: string): ToolSet {
             currentVersion: nextVersion,
             updatedAt: new Date(),
           })
-          .where(eq(schema.artifacts.id, artifactId));
+          .where(scope);
         return { artifactId, text: `已更新 Artifact「${existing.title}」到 v${nextVersion}` };
       },
     }),
@@ -373,7 +375,7 @@ export async function loadRecentMemories(userId: string, limit = 10): Promise<st
 
 // ---------- 知识库检索 ----------
 
-export function buildKnowledgeTool(kbIds: string[]): ToolSet {
+export function buildKnowledgeTool(userId: string, kbIds: string[]): ToolSet {
   if (kbIds.length === 0) return {};
   return {
     search_knowledge: tool({
@@ -396,7 +398,17 @@ export function buildKnowledgeTool(kbIds: string[]): ToolSet {
           })
           .from(schema.kbChunks)
           .innerJoin(schema.kbDocuments, eq(schema.kbChunks.documentId, schema.kbDocuments.id))
-          .where(inArray(schema.kbChunks.knowledgeBaseId, kbIds))
+          .innerJoin(
+            schema.knowledgeBases,
+            eq(schema.kbChunks.knowledgeBaseId, schema.knowledgeBases.id)
+          )
+          .where(
+            and(
+              inArray(schema.kbChunks.knowledgeBaseId, kbIds),
+              // 只允许检索当前用户自己的知识库（防 IDOR）
+              eq(schema.knowledgeBases.ownerId, userId)
+            )
+          )
           .orderBy((t) => descOp(t.similarity))
           .limit(6);
         const hits = rows.filter((r) => r.similarity > 0.2);
@@ -438,20 +450,35 @@ export async function buildMcpTools(
   const clients: Awaited<ReturnType<typeof createMCPClient>>[] = [];
   const tools: ToolSet = {};
 
+  const timeout = <T,>(p: Promise<T>, ms: number) =>
+    Promise.race([
+      p,
+      new Promise<never>((_, rej) =>
+        setTimeout(() => rej(new Error("MCP 连接超时")), ms)
+      ),
+    ]);
+
   for (const server of active) {
     try {
+      // SSRF 防护：禁止指向内网/元数据地址
+      const { assertSafeUrl } = await import("@/lib/server/net-guard");
+      await assertSafeUrl(server.url);
       const headers = server.headersEncrypted
         ? (JSON.parse(decryptSecret(server.headersEncrypted)) as Record<string, string>)
         : undefined;
-      const client = await createMCPClient({
-        transport: {
-          type: "sse",
-          url: server.url,
-          headers,
-        },
-      });
+      // 单服务器 10s 超时，防止慢/挂的 MCP 拖死整个聊天请求
+      const client = await timeout(
+        createMCPClient({
+          transport: {
+            type: "sse",
+            url: server.url,
+            headers,
+          },
+        }),
+        10_000
+      );
       clients.push(client);
-      const serverTools = (await client.tools()) as ToolSet;
+      const serverTools = (await timeout(client.tools(), 10_000)) as ToolSet;
       for (const [name, t] of Object.entries(serverTools)) {
         tools[`${server.name.replace(/\W+/g, "_")}_${name}`] = t;
       }

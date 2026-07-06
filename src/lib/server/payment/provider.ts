@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 
 /**
@@ -56,7 +56,7 @@ export function getPaymentProvider(channel: string): PaymentProvider {
   return provider;
 }
 
-/** 入账：加余额 + 记账本（幂等由调用方保证） */
+/** 入账：原子加余额 + 记账本（幂等由调用方保证；C2：防并发丢更新） */
 export async function creditBalance(
   userId: string,
   amountCents: number,
@@ -64,20 +64,16 @@ export async function creditBalance(
   description: string
 ) {
   await db.transaction(async (tx) => {
-    const [user] = await tx
-      .select({ balance: schema.users.balanceCents })
-      .from(schema.users)
-      .where(eq(schema.users.id, userId));
-    const newBalance = (user?.balance ?? 0) + amountCents;
-    await tx
+    const [updated] = await tx
       .update(schema.users)
-      .set({ balanceCents: newBalance })
-      .where(eq(schema.users.id, userId));
+      .set({ balanceCents: sql`${schema.users.balanceCents} + ${amountCents}` })
+      .where(eq(schema.users.id, userId))
+      .returning({ balance: schema.users.balanceCents });
     await tx.insert(schema.ledger).values({
       id: `lg-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
       userId,
       amountCents,
-      balanceAfterCents: newBalance,
+      balanceAfterCents: updated?.balance ?? 0,
       reason,
       description,
     });
