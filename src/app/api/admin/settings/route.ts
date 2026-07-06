@@ -18,6 +18,7 @@ function safeMask(encrypted: string | null): string | undefined {
 function toUi(s: typeof schema.settings.$inferSelect) {
   return {
     siteName: s.siteName,
+    defaultChatModelId: s.defaultChatModelId ?? undefined,
     visionHelperModelId: s.visionHelperModelId ?? undefined,
     embeddingModelId: s.embeddingModelId ?? undefined,
     tavilyApiKeyMasked: safeMask(s.tavilyApiKeyEncrypted),
@@ -46,6 +47,8 @@ export async function POST(req: NextRequest) {
   const body = (await req.json()) as Record<string, unknown>;
   const patch: Partial<typeof schema.settings.$inferInsert> = {};
   if (typeof body.siteName === "string") patch.siteName = body.siteName;
+  if (typeof body.defaultChatModelId === "string")
+    patch.defaultChatModelId = body.defaultChatModelId || null;
   if (typeof body.visionHelperModelId === "string")
     patch.visionHelperModelId = body.visionHelperModelId;
   if (typeof body.embeddingModelId === "string")

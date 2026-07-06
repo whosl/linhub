@@ -6,12 +6,20 @@ import { ensureSeeded } from "@/lib/server/seed";
 export async function PATCH(req: Request) {
   const session = await getSession();
   if (!session) return Response.json({ error: "unauthorized" }, { status: 401 });
-  const patch = (await req.json()) as { name?: string; avatarUrl?: string };
+  const patch = (await req.json()) as {
+    name?: string;
+    avatarUrl?: string;
+    /** 设置个人默认对话模型；传 null 清除 */
+    defaultModelId?: string | null;
+  };
   await db
     .update(schema.users)
     .set({
       ...(patch.name ? { name: patch.name } : {}),
       ...(patch.avatarUrl ? { image: patch.avatarUrl } : {}),
+      ...(patch.defaultModelId !== undefined
+        ? { defaultModelId: patch.defaultModelId || null }
+        : {}),
       updatedAt: new Date(),
     })
     .where(eq(schema.users.id, session.user.id));
@@ -46,6 +54,7 @@ export async function GET() {
     name: user.name,
     avatarUrl: user.image ?? undefined,
     role: user.role,
+    defaultModelId: user.defaultModelId ?? undefined,
     createdAt: user.createdAt.toISOString(),
     balance: user.balanceCents,
     subscription:

@@ -15,6 +15,8 @@ export interface User {
   role: UserRole;
   createdAt: string;
   balance: number; // 余额，单位：分
+  /** 用户个人默认对话模型（覆盖全局默认） */
+  defaultModelId?: string;
   subscription?: Subscription;
 }
 
@@ -411,6 +413,8 @@ export interface Order {
 
 export interface AppSettings {
   siteName: string;
+  /** 全局默认对话模型 */
+  defaultChatModelId?: string;
   /** 辅助识图模型 */
   visionHelperModelId?: string;
   /** embedding 模型 */

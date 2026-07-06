@@ -21,6 +21,8 @@ export const users = pgTable("users", {
     .notNull()
     .default("user"),
   balanceCents: integer("balance_cents").notNull().default(0),
+  /** 用户个人默认对话模型（覆盖全局默认），为空则用全局默认 */
+  defaultModelId: text("default_model_id"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
@@ -437,6 +439,8 @@ export const redeemCodes = pgTable("redeem_codes", {
 export const settings = pgTable("settings", {
   id: text("id").primaryKey().default("global"),
   siteName: text("site_name").notNull().default("LinHub"),
+  /** 全局默认对话模型（管理员设置，用户未自定义时用这个） */
+  defaultChatModelId: text("default_chat_model_id"),
   visionHelperModelId: text("vision_helper_model_id"),
   embeddingModelId: text("embedding_model_id"),
   tavilyApiKeyEncrypted: text("tavily_api_key_encrypted"),
