@@ -23,6 +23,10 @@ export async function POST(req: NextRequest) {
   if (!(audio instanceof File)) {
     return Response.json({ error: "缺少音频" }, { status: 400 });
   }
+  // M10: 限制音频大小，防超大上传耗尽上游配额
+  if (audio.size > 25 * 1024 * 1024) {
+    return Response.json({ error: "音频不能超过 25MB" }, { status: 400 });
+  }
 
   try {
     const { apiKey, baseURL } = await getMimoConfig();

@@ -133,9 +133,10 @@ export async function POST(
       .select()
       .from(schema.kbDocuments)
       .where(eq(schema.kbDocuments.id, docId));
+    // M6: 处理失败应用非 2xx 状态码，避免客户端误判为成功
     return Response.json(
       { ...toUi(doc), error: e instanceof Error ? e.message : "处理失败" },
-      { status: 200 }
+      { status: 422 }
     );
   }
 

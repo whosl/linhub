@@ -85,6 +85,26 @@ export function deepestLeaf(messages: Message[], rootId: string): string {
 }
 
 export const useChatStore = create<ChatState>((set, get) => {
+  // M11: sessions 上限，防止长时间使用后内存里堆积过多完整消息数组。
+  const MAX_SESSIONS = 20;
+
+  /** 把 sessions 裁剪到 MAX_SESSIONS 以内，优先丢弃非流式的已加载会话 */
+  const pruneSessions = (sessions: Record<string, ChatSession>) => {
+    const ids = Object.keys(sessions);
+    if (ids.length <= MAX_SESSIONS) return sessions;
+    // 保留所有 streaming 中的；其余按 loaded 程度（已加载的更可丢弃）排序后淘汰
+    const survivors = ids.filter((id) => sessions[id].status === "streaming");
+    const candidates = ids
+      .filter((id) => sessions[id].status !== "streaming")
+      .sort((a, b) => Number(sessions[b].loaded) - Number(sessions[a].loaded));
+    while (survivors.length < MAX_SESSIONS && candidates.length) {
+      survivors.push(candidates.pop()!);
+    }
+    const next: Record<string, ChatSession> = {};
+    for (const id of survivors) next[id] = sessions[id];
+    return next;
+  };
+
   const updateSession = (
     conversationId: string,
     updater: (s: ChatSession) => ChatSession
@@ -92,7 +112,10 @@ export const useChatStore = create<ChatState>((set, get) => {
     set((state) => {
       const session = state.sessions[conversationId] ?? emptySession(conversationId);
       return {
-        sessions: { ...state.sessions, [conversationId]: updater(session) },
+        sessions: pruneSessions({
+          ...state.sessions,
+          [conversationId]: updater(session),
+        }),
       };
     });
   };
@@ -179,6 +202,29 @@ export const useChatStore = create<ChatState>((set, get) => {
                       : p
                   )
                 : [...m.parts, event.part],
+            };
+          }),
+        }));
+        break;
+      }
+      case "tool-input-start":
+        // tool-call-start 已在后端 emit 时建好 part，这里无需处理
+        break;
+      case "tool-input-delta": {
+        updateSession(conversationId, (s) => ({
+          ...s,
+          messages: s.messages.map((m) => {
+            if (m.id !== event.messageId) return m;
+            return {
+              ...m,
+              parts: m.parts.map((p) =>
+                p.type === "tool-call" && p.toolCallId === event.toolCallId
+                  ? {
+                      ...p,
+                      inputPreview: (p.inputPreview ?? "") + event.delta,
+                    }
+                  : p
+              ),
             };
           }),
         }));
@@ -296,6 +342,20 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     stop: async (conversationId) => {
       await getDataService().stopGeneration(conversationId);
+      // abort 后 fetch 会抛 AbortError，streamNdjson 静默吞掉，
+      // done/error 事件不会到达，session 会永远卡在 streaming → 下次发送被守卫拒绝。
+      // 这里主动把状态重置回 idle，并把进行中的消息标记为 stopped。
+      // 新会话首条消息（conversationId 未知）由 send 的 finally 清 isStartingNew，无需处理。
+      if (conversationId) {
+        updateSession(conversationId, (s) => ({
+          ...s,
+          status: "idle",
+          streamingMessageId: undefined,
+          messages: s.messages.map((m) =>
+            m.id === s.streamingMessageId ? { ...m, status: "stopped" } : m
+          ),
+        }));
+      }
     },
 
     regenerate: async (conversationId, assistantMessageId, modelId) => {

@@ -10,6 +10,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
 import { codeToHtml } from "shiki";
 import { useTheme } from "next-themes";
 
@@ -53,9 +54,14 @@ export function CodeBlock({
   }, [code, language, resolvedTheme]);
 
   const copy = async () => {
-    await navigator.clipboard.writeText(code);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    // M5: 非安全上下文下 writeText 会 reject
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      toast.error("复制失败，请手动选择代码");
+    }
   };
 
   const lang = language.toLowerCase();
