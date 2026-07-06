@@ -10,7 +10,6 @@ import {
   PlugIcon,
   PlusIcon,
   Trash2Icon,
-  UserIcon,
 } from "lucide-react";
 import { getDataService } from "@/lib/data";
 import type { McpServer } from "@/lib/types";
@@ -78,7 +77,7 @@ function AccountTab() {
   const [name, setName] = React.useState("");
 
   React.useEffect(() => {
-    if (user) setName(user.name);
+    if (user) Promise.resolve().then(() => setName(user.name));
   }, [user]);
 
   if (!user) return null;

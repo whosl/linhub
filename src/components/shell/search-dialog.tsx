@@ -31,8 +31,10 @@ export function SearchDialog() {
 
   React.useEffect(() => {
     if (!searchOpen) {
-      setQuery("");
-      setDebouncedQuery("");
+      Promise.resolve().then(() => {
+        setQuery("");
+        setDebouncedQuery("");
+      });
     }
   }, [searchOpen]);
 

@@ -33,6 +33,8 @@ export default function KnowledgePage() {
   const [createOpen, setCreateOpen] = React.useState(false);
   const [name, setName] = React.useState("");
   const [description, setDescription] = React.useState("");
+  const [uploading, setUploading] = React.useState(false);
+  const [dragActive, setDragActive] = React.useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   const { data: kbs = [] } = useQuery({
@@ -62,14 +64,54 @@ export default function KnowledgePage() {
     toast.success("知识库已创建");
   };
 
-  const upload = async (files: FileList) => {
-    if (!selected) return;
-    for (const file of Array.from(files)) {
-      await getDataService().uploadDocument(selected.id, file);
+  const upload = async (files: FileList | File[]) => {
+    if (!selected || uploading) return;
+    const list = Array.from(files);
+    if (list.length === 0) return;
+    setUploading(true);
+    try {
+      for (const file of list) {
+        await getDataService().uploadDocument(selected.id, file);
+      }
+      queryClient.invalidateQueries({ queryKey: ["kb-documents", selected.id] });
+      queryClient.invalidateQueries({ queryKey: ["knowledge-bases"] });
+      toast.success("文档已上传，正在解析…");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "上传失败");
+    } finally {
+      setUploading(false);
+      setDragActive(false);
     }
-    queryClient.invalidateQueries({ queryKey: ["kb-documents", selected.id] });
-    queryClient.invalidateQueries({ queryKey: ["knowledge-bases"] });
-    toast.success("文档已上传，正在解析…");
+  };
+
+  const dropHandlers = selected
+    ? {
+        onDragEnter: (e: React.DragEvent) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setDragActive(true);
+        },
+        onDragOver: (e: React.DragEvent) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setDragActive(true);
+        },
+        onDragLeave: (e: React.DragEvent) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (e.currentTarget === e.target) setDragActive(false);
+        },
+        onDrop: (e: React.DragEvent) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setDragActive(false);
+          if (e.dataTransfer.files.length) void upload(e.dataTransfer.files);
+        },
+      }
+    : {};
+
+  const openFilePicker = () => {
+    if (!uploading) fileInputRef.current?.click();
   };
 
   const removeDoc = async (docId: string) => {
@@ -160,7 +202,13 @@ export default function KnowledgePage() {
                 description="点击左侧知识库查看和管理文档。"
               />
             ) : (
-              <Card className="p-5">
+              <Card
+                className={cn(
+                  "p-5 transition-colors",
+                  dragActive && "border-primary/60 bg-primary/5"
+                )}
+                {...dropHandlers}
+              >
                 <div className="mb-4 flex items-center justify-between">
                   <div>
                     <h2 className="font-medium">{selected.name}</h2>
@@ -175,21 +223,29 @@ export default function KnowledgePage() {
                     hidden
                     accept=".pdf,.doc,.docx,.md,.txt"
                     onChange={(e) => {
-                      if (e.target.files?.length) upload(e.target.files);
+                      if (e.target.files?.length) void upload(e.target.files);
                       e.target.value = "";
                     }}
                   />
-                  <Button size="sm" onClick={() => fileInputRef.current?.click()}>
-                    <UploadIcon /> 上传文档
+                  <Button size="sm" onClick={openFilePicker} disabled={uploading}>
+                    {uploading ? (
+                      <Loader2Icon className="animate-spin" />
+                    ) : (
+                      <UploadIcon />
+                    )}
+                    {uploading ? "上传中" : "上传文档"}
                   </Button>
                 </div>
 
                 {documents.length === 0 ? (
                   <div
-                    onClick={() => fileInputRef.current?.click()}
-                    className="cursor-pointer rounded-xl border border-dashed py-12 text-center text-sm text-muted-foreground transition-colors hover:border-primary/40 hover:bg-accent/30"
+                    onClick={openFilePicker}
+                    className={cn(
+                      "cursor-pointer rounded-xl border border-dashed py-12 text-center text-sm text-muted-foreground transition-colors hover:border-primary/40 hover:bg-accent/30",
+                      dragActive && "border-primary/60 bg-primary/5 text-foreground"
+                    )}
                   >
-                    点击或拖拽文件到此处上传
+                    {uploading ? "正在上传…" : "点击或拖拽文件到此处上传"}
                   </div>
                 ) : (
                   <div className="space-y-2">

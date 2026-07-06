@@ -17,8 +17,7 @@ export function ReasoningBlock({
 
   // 流式思考时自动展开，结束后自动收起
   React.useEffect(() => {
-    if (isStreaming) setOpen(true);
-    else setOpen(false);
+    Promise.resolve().then(() => setOpen(isStreaming));
   }, [isStreaming]);
 
   const seconds = part.durationMs ? Math.max(1, Math.round(part.durationMs / 1000)) : null;

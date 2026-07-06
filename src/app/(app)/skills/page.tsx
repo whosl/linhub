@@ -202,14 +202,16 @@ function SkillEditor({
 
   React.useEffect(() => {
     if (open) {
-      setForm({
-        name: skill?.name ?? "",
-        emoji: skill?.emoji ?? "🤖",
-        description: skill?.description ?? "",
-        systemPrompt: skill?.systemPrompt ?? "",
-        greeting: skill?.greeting ?? "",
-        defaultModelId: skill?.defaultModelId ?? "",
-        shareToMarket: skill?.visibility === "public" || skill?.visibility === "pending",
+      Promise.resolve().then(() => {
+        setForm({
+          name: skill?.name ?? "",
+          emoji: skill?.emoji ?? "🤖",
+          description: skill?.description ?? "",
+          systemPrompt: skill?.systemPrompt ?? "",
+          greeting: skill?.greeting ?? "",
+          defaultModelId: skill?.defaultModelId ?? "",
+          shareToMarket: skill?.visibility === "public" || skill?.visibility === "pending",
+        });
       });
     }
   }, [open, skill]);

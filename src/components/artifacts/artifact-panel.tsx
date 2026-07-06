@@ -84,7 +84,7 @@ export function ArtifactPanel({
   const [copied, setCopied] = React.useState(false);
 
   React.useEffect(() => {
-    setVersion(artifact.currentVersion);
+    Promise.resolve().then(() => setVersion(artifact.currentVersion));
   }, [artifact.id, artifact.currentVersion]);
 
   const current =
@@ -187,22 +187,38 @@ export function ArtifactPanel({
         )}
 
         <Tooltip label="复制代码">
-          <button onClick={copy} className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+          <button
+            onClick={copy}
+            aria-label="复制代码"
+            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
             {copied ? <CheckIcon className="size-4 text-success" /> : <CopyIcon className="size-4" />}
           </button>
         </Tooltip>
         <Tooltip label="下载">
-          <button onClick={download} className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+          <button
+            onClick={download}
+            aria-label="下载"
+            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
             <DownloadIcon className="size-4" />
           </button>
         </Tooltip>
         <Tooltip label="分享链接">
-          <button onClick={share} className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+          <button
+            onClick={share}
+            aria-label="分享链接"
+            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
             <Link2Icon className="size-4" />
           </button>
         </Tooltip>
         <Tooltip label="关闭">
-          <button onClick={onClose} className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+          <button
+            onClick={onClose}
+            aria-label="关闭"
+            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
             <XIcon className="size-4" />
           </button>
         </Tooltip>
