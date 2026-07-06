@@ -483,8 +483,9 @@ export class MockDataService implements DataService {
     yield { type: "done", messageId: assistant.id, usage: assistant.usage, status: finalStatus };
   }
 
-  async stopGeneration(conversationId: string) {
-    this.s.aborted.add(conversationId);
+  async stopGeneration(conversationId?: string) {
+    // I11: 新会话用固定哨兵键登记，便于首条响应期间也能停止
+    this.s.aborted.add(conversationId ?? "__new_conversation__");
   }
 
   async *regenerate(

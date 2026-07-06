@@ -3,6 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AuthShell } from "@/components/auth/auth-shell";
@@ -11,6 +12,7 @@ import { toast } from "sonner";
 
 export default function RegisterPage() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const [name, setName] = React.useState("");
   const [email, setEmail] = React.useState("");
   const [password, setPassword] = React.useState("");
@@ -26,6 +28,8 @@ export default function RegisterPage() {
       return;
     }
     toast.success("注册成功！");
+    // 注册即登录，同样要先清掉「未登录」时缓存的 null 再跳转。
+    queryClient.removeQueries({ queryKey: ["current-user"] });
     router.push("/");
     router.refresh();
   };

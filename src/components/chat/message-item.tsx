@@ -295,7 +295,7 @@ export function MessageItem({
         <div className="mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
           {branch && branch.total > 1 && <BranchSwitcher branch={branch} />}
           <Tooltip label={copied ? "已复制" : "复制"}>
-            <button onClick={copy} className="action-btn rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+            <button onClick={copy} aria-label={copied ? "已复制" : "复制"} className="action-btn rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
               {copied ? <CheckIcon className="size-3.5 text-success" /> : <CopyIcon className="size-3.5" />}
             </button>
           </Tooltip>
@@ -303,7 +303,7 @@ export function MessageItem({
             <DropdownMenu>
               <Tooltip label="重新生成">
                 <DropdownMenuTrigger asChild>
-                  <button className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+                  <button aria-label="重新生成" className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
                     <RefreshCwIcon className="size-3.5" />
                   </button>
                 </DropdownMenuTrigger>
@@ -328,6 +328,7 @@ export function MessageItem({
               <Tooltip label="有帮助">
                 <button
                   onClick={() => onFeedback(message.feedback === "up" ? null : "up")}
+                  aria-label="有帮助"
                   className={cn(
                     "rounded-md p-1.5 transition-colors hover:bg-accent",
                     message.feedback === "up" ? "text-success" : "text-muted-foreground hover:text-foreground"
@@ -339,6 +340,7 @@ export function MessageItem({
               <Tooltip label="没帮助">
                 <button
                   onClick={() => onFeedback(message.feedback === "down" ? null : "down")}
+                  aria-label="没帮助"
                   className={cn(
                     "rounded-md p-1.5 transition-colors hover:bg-accent",
                     message.feedback === "down" ? "text-destructive" : "text-muted-foreground hover:text-foreground"
@@ -411,6 +413,7 @@ function SpeakButton({ message }: { message: Message }) {
     <Tooltip label={state === "playing" ? "停止朗读" : "朗读"}>
       <button
         onClick={speak}
+        aria-label={state === "playing" ? "停止朗读" : "朗读"}
         className={cn(
           "rounded-md p-1.5 transition-colors hover:bg-accent hover:text-foreground",
           state === "idle" ? "text-muted-foreground" : "text-primary"
@@ -428,6 +431,7 @@ function BranchSwitcher({ branch }: { branch: BranchInfo }) {
       <button
         onClick={branch.onPrev}
         disabled={branch.index <= 0}
+        aria-label="上一分支"
         className="rounded p-0.5 transition-colors hover:bg-accent disabled:opacity-40"
       >
         <ChevronLeftIcon className="size-3.5" />
@@ -438,6 +442,7 @@ function BranchSwitcher({ branch }: { branch: BranchInfo }) {
       <button
         onClick={branch.onNext}
         disabled={branch.index >= branch.total - 1}
+        aria-label="下一分支"
         className="rounded p-0.5 transition-colors hover:bg-accent disabled:opacity-40"
       >
         <ChevronRightIcon className="size-3.5" />

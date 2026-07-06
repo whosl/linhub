@@ -1,16 +1,22 @@
 import { NextRequest } from "next/server";
 import { requireSession } from "@/lib/server/auth";
+import { rateLimit } from "@/lib/server/rate-limit";
 import { getMimoConfig } from "@/lib/server/voice";
 
 export const maxDuration = 120;
 
 /** MiMo ASR：接收录音，返回转写文字（OpenAI 兼容 /audio/transcriptions） */
 export async function POST(req: NextRequest) {
+  let session;
   try {
-    await requireSession();
+    session = await requireSession();
   } catch {
     return Response.json({ error: "请先登录" }, { status: 401 });
   }
+
+  // I3: 限频——ASR 代理付费上游，10 次/分/用户
+  const limited = rateLimit(`voice-transcribe:${session.user.id}`, 10, 60_000);
+  if (limited) return limited;
 
   const form = await req.formData();
   const audio = form.get("audio");

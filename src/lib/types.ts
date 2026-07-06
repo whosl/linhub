@@ -469,4 +469,6 @@ export type StreamEvent =
       usage?: Message["usage"];
       status: Message["status"];
     }
-  | { type: "error"; messageId?: string; message: string };
+  | { type: "error"; messageId?: string; message: string }
+  /** I13: 心跳，防止 CDN/代理在长 reasoning/tool 期间因空闲超时断流 */
+  | { type: "ping" };

@@ -1,16 +1,22 @@
 import { NextRequest } from "next/server";
 import { requireSession } from "@/lib/server/auth";
+import { rateLimit } from "@/lib/server/rate-limit";
 import { getMimoConfig } from "@/lib/server/voice";
 
 export const maxDuration = 120;
 
 /** MiMo TTS：文本合成语音，直接透传音频流（OpenAI 兼容 /audio/speech） */
 export async function POST(req: NextRequest) {
+  let session;
   try {
-    await requireSession();
+    session = await requireSession();
   } catch {
     return Response.json({ error: "请先登录" }, { status: 401 });
   }
+
+  // I3: 限频——TTS 代理付费上游，10 次/分/用户
+  const limited = rateLimit(`voice-tts:${session.user.id}`, 10, 60_000);
+  if (limited) return limited;
 
   const { text } = (await req.json()) as { text?: string };
   if (!text?.trim()) {

@@ -3,6 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AuthShell } from "@/components/auth/auth-shell";
@@ -11,6 +12,7 @@ import { toast } from "sonner";
 
 export default function LoginPage() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const [email, setEmail] = React.useState("");
   const [password, setPassword] = React.useState("");
   const [loading, setLoading] = React.useState(false);
@@ -25,6 +27,9 @@ export default function LoginPage() {
       return;
     }
     toast.success("欢迎回来！");
+    // 登录成功后必须先清掉「未登录」时缓存的 null，
+    // 否则 AuthGuard 会在 staleTime 内读到旧值并把我们弹回 /login。
+    queryClient.removeQueries({ queryKey: ["current-user"] });
     router.push("/");
     router.refresh();
   };

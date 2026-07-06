@@ -86,6 +86,9 @@ export function runJavaScript(code: string, timeoutMs = 15_000): Promise<string>
       reject(new Error("运行超时"));
     }, timeoutMs);
     const onMessage = (e: MessageEvent) => {
+      // I16: 校验来源窗口必须是我们的 iframe（opaque origin 下 targetOrigin 只能是 "*"），
+      // 配合随机 channel 防止其他 iframe/tab 伪造运行结果。
+      if (e.source !== iframe.contentWindow) return;
       if (e.data?.channel !== channel) return;
       clearTimeout(timer);
       cleanup();

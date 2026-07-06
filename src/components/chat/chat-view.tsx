@@ -75,6 +75,8 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
     conversationId ? s.sessions[conversationId] : undefined
   );
   const pendingRedirect = useChatStore((s) => s.pendingRedirect);
+  // I11: 新会话首条响应进行中标记，用于显示停止按钮
+  const isStartingNew = useChatStore((s) => s.isStartingNew);
   const { ensureSession, send, stop, regenerate, switchBranch, setFeedback, clearRedirect } =
     useChatStore();
 
@@ -217,9 +219,10 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
               styles={styles}
               composer={composer}
               onComposerChange={(p) => setComposer((prev) => ({ ...prev, ...p }))}
-              isStreaming={false}
+              isStreaming={isStartingNew}
               onSend={handleSend}
-              onStop={() => {}}
+              // I11: 新会话首条响应期间也能停止（store/api-service 用哨兵键登记 controller）
+              onStop={() => void stop()}
               autoFocus
             />
             <div className="mx-auto mt-2 grid max-w-2xl grid-cols-2 gap-2 px-4 sm:grid-cols-3">
@@ -258,6 +261,20 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
           className="flex-1 overflow-y-auto"
         >
           <div className="mx-auto flex max-w-3xl flex-col gap-5 px-4 pb-6 pt-14">
+            {/* I17: 会话不存在或为空时显示占位，而非空白 */}
+            {session?.loaded && messages.length === 0 && (
+              <div className="flex flex-col items-center justify-center gap-2 py-20 text-center">
+                <p className="text-sm text-muted-foreground">
+                  会话不存在或已被删除。
+                </p>
+                <button
+                  onClick={() => router.push("/")}
+                  className="rounded-lg border px-3 py-1.5 text-xs transition-colors hover:bg-accent"
+                >
+                  返回新对话
+                </button>
+              </div>
+            )}
             {messages.map((m) => (
               <MessageItem
                 key={m.id}

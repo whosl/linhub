@@ -26,9 +26,11 @@ interface ChatState {
   sessions: Record<string, ChatSession>;
   /** 新会话创建后待跳转的 id */
   pendingRedirect: string | null;
+  /** I11: 新会话首条响应是否进行中（用于在拿到 conversation-created 前显示停止按钮） */
+  isStartingNew: boolean;
   ensureSession: (conversationId: string) => Promise<void>;
   send: (input: SendMessageInput) => Promise<void>;
-  stop: (conversationId: string) => Promise<void>;
+  stop: (conversationId?: string) => Promise<void>;
   regenerate: (
     conversationId: string,
     assistantMessageId: string,
@@ -214,12 +216,17 @@ export const useChatStore = create<ChatState>((set, get) => {
         }));
         break;
       }
+      // I13: 心跳事件，仅维持连接，无需更新状态
+      case "ping": {
+        break;
+      }
     }
   };
 
   return {
     sessions: {},
     pendingRedirect: null,
+    isStartingNew: false,
 
     clearRedirect: () => set({ pendingRedirect: null }),
 
@@ -260,23 +267,30 @@ export const useChatStore = create<ChatState>((set, get) => {
         const s = get().sessions[input.conversationId];
         if (s?.status === "streaming") return;
       }
+      // I11: 新会话首条响应标记进行中，用于在 / 页面显示停止按钮
+      const isNewConversation = !input.conversationId;
+      if (isNewConversation) set({ isStartingNew: true });
       let conversationId = input.conversationId;
-      for await (const event of getDataService().sendMessage(input)) {
-        if (event.type === "conversation-created") {
-          conversationId = event.conversation.id;
-          set((state) => ({
-            sessions: {
-              ...state.sessions,
-              [conversationId!]: {
-                ...emptySession(conversationId!),
-                loaded: true,
+      try {
+        for await (const event of getDataService().sendMessage(input)) {
+          if (event.type === "conversation-created") {
+            conversationId = event.conversation.id;
+            set((state) => ({
+              sessions: {
+                ...state.sessions,
+                [conversationId!]: {
+                  ...emptySession(conversationId!),
+                  loaded: true,
+                },
               },
-            },
-            pendingRedirect: conversationId,
-          }));
-          continue;
+              pendingRedirect: conversationId,
+            }));
+            continue;
+          }
+          if (conversationId) applyEvent(conversationId, event);
         }
-        if (conversationId) applyEvent(conversationId, event);
+      } finally {
+        if (isNewConversation) set({ isStartingNew: false });
       }
     },
 

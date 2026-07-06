@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { and, desc, eq } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 import { requireSession } from "@/lib/server/auth";
+import { rateLimit } from "@/lib/server/rate-limit";
 
 export const maxDuration = 300;
 
@@ -67,6 +68,10 @@ export async function POST(
   if (!(await requireOwnedKb(kbId, session.user.id))) {
     return Response.json({ error: "不存在" }, { status: 404 });
   }
+
+  // I3: 限频——文档上传触发昂贵的 PDF 解析 + 嵌入批，10 次/分/用户
+  const limited = rateLimit(`kb-doc-upload:${session.user.id}`, 10, 60_000);
+  if (limited) return limited;
 
   const form = await req.formData();
   const file = form.get("file");

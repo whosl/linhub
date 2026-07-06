@@ -69,6 +69,9 @@ export async function POST(req: NextRequest) {
     async start(controller) {
       const emit = (event: StreamEvent) =>
         controller.enqueue(encoder.encode(JSON.stringify(event) + "\n"));
+      // I13: 心跳——长 reasoning/tool 期间每 15s 发一次 ping，
+      // 防止 CDN/代理（通常 60-100s 空闲超时）静默断流。客户端 applyEvent 忽略。
+      const heartbeat = setInterval(() => emit({ type: "ping" }), 15_000);
       try {
         if ("regenerate" in body) {
           await handleRegenerate(body, userId, emit, req.signal);
@@ -81,6 +84,7 @@ export async function POST(req: NextRequest) {
           message: e instanceof Error ? e.message : "生成失败",
         });
       } finally {
+        clearInterval(heartbeat);
         controller.close();
       }
     },
@@ -523,7 +527,17 @@ async function streamAssistant(opts: {
 
     let reasoningStart = 0;
     const toolParts = new Map<string, ToolCallPart>();
+    let firstChunkAt = 0;
+    let chunkCount = 0;
     for await (const chunk of result.fullStream) {
+      if (!firstChunkAt) firstChunkAt = Date.now();
+      chunkCount++;
+      console.log(
+        `[chat-stream] +${Date.now() - firstChunkAt}ms #${chunkCount} ${chunk.type}` +
+        (chunk.type === "reasoning-delta" || chunk.type === "text-delta"
+          ? ` "${("text" in chunk ? chunk.text : "").slice(0, 30)}"`
+          : "")
+      );
       if (chunk.type === "reasoning-start") {
         reasoningStart = Date.now();
       } else if (chunk.type === "reasoning-delta") {

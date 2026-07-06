@@ -221,6 +221,7 @@ export function ChatInput({
             </div>
             <button
               onClick={onClearQuote}
+              aria-label="取消引用"
               className="rounded-md p-1 text-muted-foreground hover:bg-accent"
             >
               <XIcon className="size-3.5" />
@@ -240,6 +241,7 @@ export function ChatInput({
                     revokeUrl(img.url); // C4
                     setImages((prev) => prev.filter((_, j) => j !== i));
                   }}
+                  aria-label="移除图片"
                   className="absolute -right-1.5 -top-1.5 rounded-full bg-foreground p-0.5 text-background opacity-0 transition-opacity group-hover/att:opacity-100"
                 >
                   <XIcon className="size-3" />
@@ -255,6 +257,7 @@ export function ChatInput({
                 </div>
                 <button
                   onClick={() => setFiles((prev) => prev.filter((_, j) => j !== i))}
+                  aria-label="移除文件"
                   className="absolute -right-1.5 -top-1.5 rounded-full bg-foreground p-0.5 text-background opacity-0 transition-opacity group-hover/att:opacity-100"
                 >
                   <XIcon className="size-3" />
@@ -302,6 +305,7 @@ export function ChatInput({
           <Tooltip label="上传文件或图片">
             <button
               onClick={() => fileInputRef.current?.click()}
+              aria-label="上传文件或图片"
               className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
             >
               <PaperclipIcon className="size-4" />
@@ -312,7 +316,7 @@ export function ChatInput({
           <Popover>
             <Tooltip label="工具">
               <PopoverTrigger asChild>
-                <button className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+                <button aria-label="工具" className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
                   <SlidersHorizontalIcon className="size-4" />
                 </button>
               </PopoverTrigger>
@@ -354,6 +358,7 @@ export function ChatInput({
               onClick={() =>
                 onComposerChange({ extendedThinking: !composer.extendedThinking })
               }
+              aria-label={composer.extendedThinking ? "关闭深度思考" : "开启深度思考"}
               className={cn(
                 "flex items-center gap-1 rounded-lg p-2 text-sm transition-colors",
                 composer.extendedThinking
@@ -437,6 +442,7 @@ export function ChatInput({
           <Tooltip label={recording ? "停止录音" : "语音输入"}>
             <button
               onClick={toggleRecording}
+              aria-label={recording ? "停止录音" : "语音输入"}
               className={cn(
                 "rounded-lg p-2 transition-colors",
                 recording
@@ -453,6 +459,7 @@ export function ChatInput({
             <Tooltip label="停止生成">
               <button
                 onClick={onStop}
+                aria-label="停止生成"
                 className="rounded-full bg-foreground p-2 text-background transition-transform hover:scale-105 active:scale-95"
               >
                 <SquareIcon className="size-4 fill-current" />
@@ -462,6 +469,7 @@ export function ChatInput({
             <button
               onClick={doSend}
               disabled={!canSend}
+              aria-label="发送"
               className={cn(
                 "rounded-full p-2 transition-all",
                 canSend

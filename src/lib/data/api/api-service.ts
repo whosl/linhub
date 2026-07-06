@@ -159,8 +159,15 @@ export class ApiDataService implements DataService {
   // ---- 聊天 ----
   async *sendMessage(input: SendMessageInput): AsyncIterable<StreamEvent> {
     const controller = new AbortController();
-    if (input.conversationId)
+    // I11: 新会话首条响应期间 conversationId 尚未知，用一个固定哨兵键登记
+    // abort controller，使 stop 按钮在拿到 conversation-created 前也能生效。
+    const isNew = !input.conversationId;
+    const sentinel = "__new_conversation__";
+    if (input.conversationId) {
       this.abortControllers.set(input.conversationId, controller);
+    } else {
+      this.abortControllers.set(sentinel, controller);
+    }
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -170,6 +177,8 @@ export class ApiDataService implements DataService {
     try {
       for await (const event of streamNdjson(res, controller.signal)) {
         if (event.type === "conversation-created") {
+          // I11: 拿到真实 id 后，把哨兵键换成真实 id（替换而非复制）
+          if (isNew) this.abortControllers.delete(sentinel);
           this.abortControllers.set(event.conversation.id, controller);
         }
         yield event;
@@ -181,12 +190,17 @@ export class ApiDataService implements DataService {
           message: e instanceof Error ? e.message : "连接中断",
         };
       }
+    } finally {
+      // 兜底清理：流结束后若哨兵仍在（异常退出未触发 conversation-created）
+      if (isNew) this.abortControllers.delete(sentinel);
     }
   }
 
-  async stopGeneration(conversationId: string) {
-    this.abortControllers.get(conversationId)?.abort();
-    this.abortControllers.delete(conversationId);
+  async stopGeneration(conversationId?: string) {
+    // I11: conversationId 为空时停止新会话的 in-flight 流
+    const key = conversationId ?? "__new_conversation__";
+    this.abortControllers.get(key)?.abort();
+    this.abortControllers.delete(key);
   }
 
   async *regenerate(

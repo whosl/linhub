@@ -50,7 +50,7 @@ export interface DataService {
 
   // ---- 聊天（流式） ----
   sendMessage(input: SendMessageInput): AsyncIterable<StreamEvent>;
-  stopGeneration(conversationId: string): Promise<void>;
+  stopGeneration(conversationId?: string): Promise<void>;
   regenerate(
     conversationId: string,
     assistantMessageId: string,
