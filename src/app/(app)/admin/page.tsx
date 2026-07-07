@@ -3,19 +3,25 @@
 import * as React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  AlertCircleIcon,
   BotIcon,
   CheckCircleIcon,
   CheckIcon,
   CoinsIcon,
   DownloadIcon,
+  GlobeIcon,
+  ImageIcon,
   KeyIcon,
   Loader2Icon,
+  MicIcon,
   PencilIcon,
   PlusIcon,
+  SaveIcon,
   SearchIcon,
   ServerIcon,
   Trash2Icon,
   UsersIcon,
+  Volume2Icon,
   XIcon,
   ZapIcon,
 } from "lucide-react";
@@ -23,13 +29,16 @@ import { getDataService } from "@/lib/data";
 import type {
   Model,
   ModelCapability,
+  McpServer,
+  EngineId,
   Plan,
   Provider,
   ProviderKind,
   RemoteModel,
 } from "@/lib/types";
-import { formatCents, formatRelativeTime, formatTokens } from "@/lib/utils";
+import { cn, formatCents, formatRelativeTime, formatTokens } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import {
   Avatar,
@@ -46,6 +55,7 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -215,7 +225,13 @@ function ProvidersTab() {
           >
             <DownloadIcon /> 获取模型
           </Button>
-          <Button variant="ghost" size="icon-sm" onClick={() => openEditor(p)}>
+          <Button
+            type="button"
+            aria-label={`编辑供应商「${p.name}」`}
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => openEditor(p)}
+          >
             <PencilIcon />
           </Button>
           <Switch checked={p.enabled} onCheckedChange={() => toggle(p)} />
@@ -383,6 +399,7 @@ function FetchModelsDialog({
               </span>
               <div className="flex gap-2">
                 <button
+                  type="button"
                   className="hover:text-foreground"
                   onClick={() =>
                     setSelected(new Set(addable.map((m) => m.slug)))
@@ -391,6 +408,7 @@ function FetchModelsDialog({
                   全选未添加
                 </button>
                 <button
+                  type="button"
                   className="hover:text-foreground"
                   onClick={() => setSelected(new Set())}
                 >
@@ -493,8 +511,75 @@ function ModelsTab() {
       <p className="text-xs text-muted-foreground">
         在「供应商」页用「获取模型」拉取并添加模型；新添加的模型默认停用，设好计价后再启用。
       </p>
-      <Card className="overflow-x-auto">
-        <table className="w-full text-sm">
+      <div className="space-y-2 md:hidden">
+        {models.map((m) => (
+          <Card key={m.id} className="space-y-3 p-3">
+            <div className="flex min-w-0 items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="break-words font-medium">{m.displayName}</p>
+                <p className="break-all font-mono text-xs text-muted-foreground">
+                  {m.slug}
+                </p>
+              </div>
+              <Badge variant={m.tier === "pro" ? "default" : "secondary"}>
+                {m.tier === "pro" ? "Pro" : "免费"}
+              </Badge>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              <Badge variant="outline">{m.providerKind}</Badge>
+              {m.capabilities.map((c) => (
+                <Badge key={c} variant="secondary">
+                  {CAPABILITY_LABELS[c] ?? c}
+                </Badge>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <div>
+                <p className="text-muted-foreground">输入 /M</p>
+                <p className="mt-0.5 font-medium tabular-nums">
+                  {formatCents(m.inputPricePerM)}
+                </p>
+              </div>
+              <div>
+                <p className="text-muted-foreground">输出 /M</p>
+                <p className="mt-0.5 font-medium tabular-nums">
+                  {m.pricePerImage
+                    ? `${formatCents(m.pricePerImage)}/图`
+                    : formatCents(m.outputPricePerM)}
+                </p>
+              </div>
+              <div>
+                <p className="text-muted-foreground">上下文</p>
+                <p className="mt-0.5 font-medium tabular-nums">
+                  {formatTokens(m.contextWindow)}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-3 border-t pt-3">
+              <label className="flex items-center gap-2 text-sm">
+                <Switch
+                  aria-label={`启用模型「${m.displayName}」`}
+                  checked={m.enabled}
+                  onCheckedChange={() => toggle(m)}
+                />
+                启用
+              </label>
+              <ModelActions
+                model={m}
+                testingModel={testingModel}
+                onTest={testModel}
+                onEdit={setEditing}
+              />
+            </div>
+          </Card>
+        ))}
+      </div>
+
+      <Card className="hidden overflow-x-auto md:block">
+        <table className="min-w-[900px] w-full text-sm">
           <thead>
             <tr className="border-b bg-muted/40 text-left text-xs text-muted-foreground">
               <th className="px-4 py-2.5 font-medium">模型</th>
@@ -544,27 +629,19 @@ function ModelsTab() {
                   {formatTokens(m.contextWindow)}
                 </td>
                 <td className="px-3 py-2.5 text-center">
-                  <Switch checked={m.enabled} onCheckedChange={() => toggle(m)} />
+                  <Switch
+                    aria-label={`启用模型「${m.displayName}」`}
+                    checked={m.enabled}
+                    onCheckedChange={() => toggle(m)}
+                  />
                 </td>
                 <td className="px-3 py-2.5">
-                  <div className="flex items-center gap-1">
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      disabled={testingModel === m.id}
-                      onClick={() => testModel(m)}
-                      title="测试模型可用性"
-                    >
-                      {testingModel === m.id ? (
-                        <Loader2Icon className="size-4 animate-spin" />
-                      ) : (
-                        <ZapIcon />
-                      )}
-                    </Button>
-                    <Button variant="ghost" size="icon-sm" onClick={() => setEditing(m)}>
-                      <PencilIcon />
-                    </Button>
-                  </div>
+                  <ModelActions
+                    model={m}
+                    testingModel={testingModel}
+                    onTest={testModel}
+                    onEdit={setEditing}
+                  />
                 </td>
               </tr>
             ))}
@@ -580,6 +657,47 @@ function ModelsTab() {
           setEditing(null);
         }}
       />
+    </div>
+  );
+}
+
+function ModelActions({
+  model,
+  testingModel,
+  onTest,
+  onEdit,
+}: {
+  model: Model;
+  testingModel: string | null;
+  onTest: (model: Model) => void;
+  onEdit: (model: Model) => void;
+}) {
+  return (
+    <div className="flex shrink-0 items-center gap-1">
+      <Button
+        type="button"
+        aria-label={`测试模型「${model.displayName}」`}
+        variant="ghost"
+        size="icon-sm"
+        disabled={testingModel === model.id}
+        onClick={() => onTest(model)}
+        title="测试模型可用性"
+      >
+        {testingModel === model.id ? (
+          <Loader2Icon className="size-4 animate-spin" />
+        ) : (
+          <ZapIcon />
+        )}
+      </Button>
+      <Button
+        type="button"
+        aria-label={`编辑模型「${model.displayName}」`}
+        variant="ghost"
+        size="icon-sm"
+        onClick={() => onEdit(model)}
+      >
+        <PencilIcon />
+      </Button>
     </div>
   );
 }
@@ -637,10 +755,12 @@ function ModelEditorDialog({
     sortOrder: 0,
   });
   const [busy, setBusy] = React.useState(false);
+  const [deleteOpen, setDeleteOpen] = React.useState(false);
 
   React.useEffect(() => {
     if (model) {
       Promise.resolve().then(() => {
+        setDeleteOpen(false);
         setForm({
           displayName: model.displayName,
           description: model.description ?? "",
@@ -701,12 +821,11 @@ function ModelEditorDialog({
   };
 
   const remove = async () => {
-    if (!window.confirm(`确定删除模型「${model.displayName}」？删除后历史用量记录保留。`))
-      return;
     setBusy(true);
     try {
       await getDataService().admin.deleteModel(model.id);
       toast.success("模型已删除");
+      setDeleteOpen(false);
       onSaved();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "删除失败");
@@ -716,6 +835,7 @@ function ModelEditorDialog({
   };
 
   return (
+    <>
     <Dialog open={!!model} onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="max-h-[85dvh] max-w-xl overflow-y-auto">
         <DialogHeader>
@@ -844,7 +964,13 @@ function ModelEditorDialog({
         </div>
 
         <DialogFooter className="justify-between">
-          <Button variant="ghost" className="text-destructive" onClick={remove} disabled={busy}>
+          <Button
+            type="button"
+            variant="ghost"
+            className="text-destructive"
+            onClick={() => setDeleteOpen(true)}
+            disabled={busy}
+          >
             <Trash2Icon /> 删除模型
           </Button>
           <div className="flex gap-2">
@@ -859,6 +985,19 @@ function ModelEditorDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    <ConfirmDialog
+      open={deleteOpen}
+      onOpenChange={(open) => {
+        if (!open && !busy) setDeleteOpen(false);
+      }}
+      title="删除模型"
+      description={`确定删除模型「${model.displayName}」？删除后历史用量记录会保留。`}
+      confirmLabel="删除"
+      destructive
+      loading={busy}
+      onConfirm={remove}
+    />
+    </>
   );
 }
 
@@ -902,22 +1041,44 @@ function PlansAdminTab() {
 
 function UsersTab() {
   const queryClient = useQueryClient();
+  const [grantTarget, setGrantTarget] = React.useState<{ id: string; name: string } | null>(null);
+  const [grantYuan, setGrantYuan] = React.useState("10");
+  const [granting, setGranting] = React.useState(false);
+  const grantInFlightRef = React.useRef(false);
   const { data: users = [] } = useQuery({
     queryKey: ["admin-users"],
     queryFn: () => getDataService().admin.listUsers(),
   });
 
-  const grant = async (userId: string) => {
-    const input = window.prompt("赠送金额（元）", "10");
-    if (!input) return;
-    const amount = Math.round(Number(input) * 100);
-    if (!Number.isFinite(amount) || amount <= 0) return;
-    await getDataService().admin.grantBalance(userId, amount);
-    queryClient.invalidateQueries({ queryKey: ["admin-users"] });
-    toast.success("已赠送");
+  const openGrant = (user: { id: string; name: string }) => {
+    setGrantTarget(user);
+    setGrantYuan("10");
+  };
+
+  const grant = async () => {
+    if (!grantTarget) return;
+    const amount = Math.round(Number(grantYuan) * 100);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      toast.error("请输入有效的赠送金额");
+      return;
+    }
+    if (grantInFlightRef.current) return;
+    grantInFlightRef.current = true;
+    const target = grantTarget;
+    setGranting(true);
+    try {
+      await getDataService().admin.grantBalance(target.id, amount);
+      queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+      toast.success("已赠送");
+      setGrantTarget(null);
+    } finally {
+      grantInFlightRef.current = false;
+      setGranting(false);
+    }
   };
 
   return (
+    <>
     <Card className="divide-y overflow-hidden">
       {users.map((u) => (
         <div key={u.id} className="flex items-center gap-3 px-5 py-3">
@@ -932,12 +1093,57 @@ function UsersTab() {
             </p>
           </div>
           <span className="text-sm tabular-nums">{formatCents(u.balance)}</span>
-          <Button variant="outline" size="sm" onClick={() => grant(u.id)}>
+          <Button variant="outline" size="sm" onClick={() => openGrant(u)}>
             <CoinsIcon /> 赠送余额
           </Button>
         </div>
       ))}
     </Card>
+    <Dialog
+      open={!!grantTarget}
+      onOpenChange={(open) => {
+        if (!open && !granting) setGrantTarget(null);
+      }}
+    >
+      <DialogContent aria-describedby="grant-balance-description">
+        <DialogHeader>
+          <DialogTitle>赠送余额</DialogTitle>
+          <DialogDescription id="grant-balance-description">
+            {grantTarget
+              ? `为用户「${grantTarget.name}」赠送余额，金额以元为单位。`
+              : "为用户赠送余额，金额以元为单位。"}
+          </DialogDescription>
+        </DialogHeader>
+        <Input
+          type="number"
+          min="0.01"
+          step="0.01"
+          value={grantYuan}
+          onChange={(event) => setGrantYuan(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void grant();
+            }
+          }}
+          autoFocus
+        />
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="ghost"
+            disabled={granting}
+            onClick={() => setGrantTarget(null)}
+          >
+            取消
+          </Button>
+          <Button type="button" disabled={granting || !grantYuan.trim()} onClick={() => void grant()}>
+            {granting ? "赠送中..." : "赠送"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    </>
   );
 }
 
@@ -992,6 +1198,93 @@ function SkillReviewTab() {
 
 // ---------- 系统设置 ----------
 
+type EngineDraft = {
+  baseUrl: string;
+  model: string;
+  voice?: string;
+  apiKey: string;
+};
+
+function EngineCard({
+  title,
+  description,
+  icon,
+  dirty,
+  saving,
+  testing,
+  children,
+  onSave,
+  onTest,
+}: {
+  title: string;
+  description: string;
+  icon: React.ReactNode;
+  dirty: boolean;
+  saving: boolean;
+  testing: boolean;
+  children: React.ReactNode;
+  onSave: () => void;
+  onTest: () => void;
+}) {
+  return (
+    <Card
+      className={cn(
+        "space-y-4 p-4 transition-colors",
+        dirty && "border-destructive/70 bg-destructive/5"
+      )}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex min-w-0 items-start gap-3">
+          <div
+            className={cn(
+              "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary [&_svg]:size-4",
+              dirty && "bg-destructive/10 text-destructive"
+            )}
+          >
+            {icon}
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-medium">{title}</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">{description}</p>
+            {dirty && (
+              <p className="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-destructive">
+                <AlertCircleIcon className="size-3.5" />
+                有未保存更改
+              </p>
+            )}
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={onTest} disabled={testing}>
+            {testing ? <Loader2Icon className="animate-spin" /> : <CheckCircleIcon />}
+            测试连接
+          </Button>
+          <Button type="button" size="sm" onClick={onSave} disabled={!dirty || saving}>
+            {saving ? <Loader2Icon className="animate-spin" /> : <SaveIcon />}
+            保存
+          </Button>
+        </div>
+      </div>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">{children}</div>
+    </Card>
+  );
+}
+
+function EngineField({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className="space-y-1.5">
+      <span className="block text-xs font-medium text-muted-foreground">{label}</span>
+      {children}
+    </label>
+  );
+}
+
 function SystemSettingsTab() {
   const queryClient = useQueryClient();
   const { data: settings } = useQuery({
@@ -1007,8 +1300,71 @@ function SystemSettingsTab() {
     queryFn: () => getDataService().listMcpServers("global"),
   });
 
-  const [tavilyKey, setTavilyKey] = React.useState("");
-  const [mimoKey, setMimoKey] = React.useState("");
+  const [imageDraft, setImageDraft] = React.useState<EngineDraft>({
+    baseUrl: "",
+    model: "",
+    apiKey: "",
+  });
+  const [ttsDraft, setTtsDraft] = React.useState<EngineDraft>({
+    baseUrl: "",
+    model: "",
+    voice: "",
+    apiKey: "",
+  });
+  const [asrDraft, setAsrDraft] = React.useState<EngineDraft>({
+    baseUrl: "",
+    model: "",
+    apiKey: "",
+  });
+  const [searchDraft, setSearchDraft] = React.useState<EngineDraft>({
+    baseUrl: "",
+    model: "",
+    apiKey: "",
+  });
+  const [savingEngine, setSavingEngine] = React.useState<EngineId | null>(null);
+  const [testingEngine, setTestingEngine] = React.useState<EngineId | null>(null);
+  const [mcpDialogOpen, setMcpDialogOpen] = React.useState(false);
+  const [mcpSaving, setMcpSaving] = React.useState(false);
+  const [testingMcp, setTestingMcp] = React.useState<string | null>(null);
+  const [deleteMcpTarget, setDeleteMcpTarget] = React.useState<McpServer | null>(null);
+  const [deletingMcp, setDeletingMcp] = React.useState(false);
+  const [mcpForm, setMcpForm] = React.useState({
+    name: "",
+    url: "",
+    transport: "streamable-http" as McpServer["transport"],
+  });
+
+  React.useEffect(() => {
+    if (!settings) return;
+    let active = true;
+    Promise.resolve().then(() => {
+      if (!active) return;
+      setImageDraft({
+        baseUrl: settings.imageGenBaseUrl ?? "",
+        model: settings.imageGenModel ?? "",
+        apiKey: "",
+      });
+      setTtsDraft({
+        baseUrl: settings.ttsBaseUrl ?? "",
+        model: settings.ttsModel ?? "",
+        voice: settings.mimoTtsVoice ?? "",
+        apiKey: "",
+      });
+      setAsrDraft({
+        baseUrl: settings.asrBaseUrl ?? "",
+        model: settings.asrModel ?? "",
+        apiKey: "",
+      });
+      setSearchDraft({
+        baseUrl: settings.searchBaseUrl ?? "",
+        model: "",
+        apiKey: "",
+      });
+    });
+    return () => {
+      active = false;
+    };
+  }, [settings]);
 
   if (!settings) return null;
 
@@ -1021,6 +1377,159 @@ function SystemSettingsTab() {
   };
 
   const visionModels = models.filter((m) => m.capabilities.includes("vision"));
+
+  const isDirty = (draft: EngineDraft, saved: Partial<EngineDraft>) =>
+    (draft.baseUrl.trim() !== (saved.baseUrl ?? "").trim()) ||
+    (draft.model.trim() !== (saved.model ?? "").trim()) ||
+    ((draft.voice ?? "").trim() !== (saved.voice ?? "").trim()) ||
+    draft.apiKey.trim().length > 0;
+
+  const engineDirty = {
+    image: isDirty(imageDraft, {
+      baseUrl: settings.imageGenBaseUrl ?? "",
+      model: settings.imageGenModel ?? "",
+    }),
+    tts: isDirty(ttsDraft, {
+      baseUrl: settings.ttsBaseUrl ?? "",
+      model: settings.ttsModel ?? "",
+      voice: settings.mimoTtsVoice ?? "",
+    }),
+    asr: isDirty(asrDraft, {
+      baseUrl: settings.asrBaseUrl ?? "",
+      model: settings.asrModel ?? "",
+    }),
+    search: isDirty(searchDraft, {
+      baseUrl: settings.searchBaseUrl ?? "",
+    }),
+  } satisfies Record<EngineId, boolean>;
+
+  const saveEngine = async (engine: EngineId) => {
+    setSavingEngine(engine);
+    try {
+      let nextSettings: typeof settings;
+      if (engine === "image") {
+        nextSettings = await getDataService().admin.saveSettings({
+          imageGenBaseUrl: imageDraft.baseUrl.trim(),
+          imageGenModel: imageDraft.model.trim(),
+          ...(imageDraft.apiKey.trim()
+            ? { imageGenApiKey: imageDraft.apiKey.trim() }
+            : {}),
+        });
+      } else if (engine === "tts") {
+        nextSettings = await getDataService().admin.saveSettings({
+          ttsBaseUrl: ttsDraft.baseUrl.trim(),
+          ttsModel: ttsDraft.model.trim(),
+          mimoTtsVoice: (ttsDraft.voice ?? "").trim(),
+          ...(ttsDraft.apiKey.trim() ? { ttsApiKey: ttsDraft.apiKey.trim() } : {}),
+        });
+      } else if (engine === "asr") {
+        nextSettings = await getDataService().admin.saveSettings({
+          asrBaseUrl: asrDraft.baseUrl.trim(),
+          asrModel: asrDraft.model.trim(),
+          ...(asrDraft.apiKey.trim() ? { asrApiKey: asrDraft.apiKey.trim() } : {}),
+        });
+      } else {
+        nextSettings = await getDataService().admin.saveSettings({
+          searchBaseUrl: searchDraft.baseUrl.trim(),
+          ...(searchDraft.apiKey.trim()
+            ? { tavilyApiKey: searchDraft.apiKey.trim() }
+            : {}),
+        });
+      }
+      queryClient.setQueryData(["admin-settings"], nextSettings);
+      await queryClient.invalidateQueries({ queryKey: ["admin-settings"] });
+      toast.success("引擎设置已保存");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "保存失败");
+    } finally {
+      setSavingEngine(null);
+    }
+  };
+
+  const testEngine = async (engine: EngineId, draft: EngineDraft) => {
+    setTestingEngine(engine);
+    try {
+      const result = await getDataService().admin.testEngineConnection({
+        engine,
+        config: {
+          baseUrl: draft.baseUrl.trim() || undefined,
+          model: draft.model.trim() || undefined,
+          voice: draft.voice?.trim() || undefined,
+          apiKey: draft.apiKey.trim() || undefined,
+        },
+      });
+      if (result.ok) toast.success(result.message);
+      else toast.error(result.error);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "测试失败");
+    } finally {
+      setTestingEngine(null);
+    }
+  };
+
+  const invalidateMcp = () => {
+    queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+  };
+
+  const addGlobalMcp = async () => {
+    if (mcpSaving) return;
+    setMcpSaving(true);
+    try {
+      await getDataService().saveMcpServer({
+        ...mcpForm,
+        name: mcpForm.name.trim(),
+        url: mcpForm.url.trim(),
+        scope: "global",
+        enabled: false,
+      });
+      invalidateMcp();
+      setMcpDialogOpen(false);
+      setMcpForm({ name: "", url: "", transport: "streamable-http" });
+      toast.success("全局 MCP 服务器已添加，默认停用，请测试后启用");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "添加失败");
+    } finally {
+      setMcpSaving(false);
+    }
+  };
+
+  const testGlobalMcp = async (id: string) => {
+    setTestingMcp(id);
+    try {
+      const result = await getDataService().testMcpServer(id);
+      invalidateMcp();
+      if (result.ok) toast.success(`连接成功，发现 ${result.tools.length} 个工具`);
+      else toast.error(result.error ?? "连接失败");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "连接失败");
+    } finally {
+      setTestingMcp(null);
+    }
+  };
+
+  const toggleGlobalMcp = async (server: McpServer) => {
+    try {
+      await getDataService().saveMcpServer({ ...server, enabled: !server.enabled });
+      invalidateMcp();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "保存失败");
+    }
+  };
+
+  const deleteGlobalMcp = async () => {
+    if (!deleteMcpTarget || deletingMcp) return;
+    setDeletingMcp(true);
+    try {
+      await getDataService().deleteMcpServer(deleteMcpTarget.id);
+      invalidateMcp();
+      setDeleteMcpTarget(null);
+      toast.success("全局 MCP 服务器已删除");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "删除失败");
+    } finally {
+      setDeletingMcp(false);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -1050,57 +1559,162 @@ function SystemSettingsTab() {
         </div>
       </Card>
 
-      <Card className="space-y-4 p-5">
-        <p className="text-sm font-medium">外部服务密钥</p>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
-              Tavily API Key（当前 {settings.tavilyApiKeyMasked ?? "未配置"}）
-            </label>
-            <div className="flex gap-2">
-              <Input
-                type="password"
-                placeholder="tvly-…"
-                value={tavilyKey}
-                onChange={(e) => setTavilyKey(e.target.value)}
-              />
-              <Button
-                variant="outline"
-                disabled={!tavilyKey.trim()}
-                onClick={() => {
-                  save({ tavilyApiKey: tavilyKey.trim() });
-                  setTavilyKey("");
-                }}
-              >
-                更新
-              </Button>
-            </div>
-          </div>
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
-              MiMo API Key — ASR/TTS（当前 {settings.mimoApiKeyMasked ?? "未配置"}）
-            </label>
-            <div className="flex gap-2">
-              <Input
-                type="password"
-                placeholder="mm-…"
-                value={mimoKey}
-                onChange={(e) => setMimoKey(e.target.value)}
-              />
-              <Button
-                variant="outline"
-                disabled={!mimoKey.trim()}
-                onClick={() => {
-                  save({ mimoApiKey: mimoKey.trim() });
-                  setMimoKey("");
-                }}
-              >
-                更新
-              </Button>
-            </div>
-          </div>
+      <section className="space-y-3">
+        <div>
+          <p className="text-sm font-medium">引擎配置</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            每个能力域独立配置 baseURL / API Key / 模型，互不干扰。文本对话模型在「供应商」页配置。
+          </p>
         </div>
-      </Card>
+
+        <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+          <EngineCard
+            title="图像生成"
+            description="用于 generate_image / edit_image。测试会真实生成 1 张测试图。"
+            icon={<ImageIcon />}
+            dirty={engineDirty.image}
+            saving={savingEngine === "image"}
+            testing={testingEngine === "image"}
+            onSave={() => void saveEngine("image")}
+            onTest={() => void testEngine("image", imageDraft)}
+          >
+            <EngineField label="Base URL">
+              <Input
+                placeholder="如 https://api.cdn-krill-ai.com/codex/v1"
+                value={imageDraft.baseUrl}
+                onChange={(e) =>
+                  setImageDraft({ ...imageDraft, baseUrl: e.target.value })
+                }
+              />
+            </EngineField>
+            <EngineField label="模型 slug">
+              <Input
+                placeholder="如 gpt-image-2"
+                value={imageDraft.model}
+                onChange={(e) =>
+                  setImageDraft({ ...imageDraft, model: e.target.value })
+                }
+              />
+            </EngineField>
+            <EngineField label="API Key">
+              <Input
+                type="password"
+                placeholder={`留空沿用当前 Key（${settings.imageGenApiKeyMasked ?? "未配置"}）`}
+                value={imageDraft.apiKey}
+                onChange={(e) =>
+                  setImageDraft({ ...imageDraft, apiKey: e.target.value })
+                }
+              />
+            </EngineField>
+          </EngineCard>
+
+          <EngineCard
+            title="语音合成（TTS）"
+            description="用于把文本合成为语音，兼容旧 MiMo Key 回退。"
+            icon={<Volume2Icon />}
+            dirty={engineDirty.tts}
+            saving={savingEngine === "tts"}
+            testing={testingEngine === "tts"}
+            onSave={() => void saveEngine("tts")}
+            onTest={() => void testEngine("tts", ttsDraft)}
+          >
+            <EngineField label="Base URL">
+              <Input
+                placeholder="如 https://token-plan-cn.xiaomimimo.com/v1"
+                value={ttsDraft.baseUrl}
+                onChange={(e) => setTtsDraft({ ...ttsDraft, baseUrl: e.target.value })}
+              />
+            </EngineField>
+            <EngineField label="模型">
+              <Input
+                placeholder="如 mimo-v2.5-tts"
+                value={ttsDraft.model}
+                onChange={(e) => setTtsDraft({ ...ttsDraft, model: e.target.value })}
+              />
+            </EngineField>
+            <EngineField label="音色">
+              <Input
+                placeholder="如 冰糖 / Chloe"
+                value={ttsDraft.voice ?? ""}
+                onChange={(e) => setTtsDraft({ ...ttsDraft, voice: e.target.value })}
+              />
+            </EngineField>
+            <EngineField label="API Key">
+              <Input
+                type="password"
+                placeholder={`留空沿用当前 Key（${settings.ttsApiKeyMasked ?? "未配置"}）`}
+                value={ttsDraft.apiKey}
+                onChange={(e) => setTtsDraft({ ...ttsDraft, apiKey: e.target.value })}
+              />
+            </EngineField>
+          </EngineCard>
+
+          <EngineCard
+            title="语音识别（ASR）"
+            description="用于录音转写，兼容旧 MiMo Key 回退。"
+            icon={<MicIcon />}
+            dirty={engineDirty.asr}
+            saving={savingEngine === "asr"}
+            testing={testingEngine === "asr"}
+            onSave={() => void saveEngine("asr")}
+            onTest={() => void testEngine("asr", asrDraft)}
+          >
+            <EngineField label="Base URL">
+              <Input
+                placeholder="如 https://token-plan-cn.xiaomimimo.com/v1"
+                value={asrDraft.baseUrl}
+                onChange={(e) => setAsrDraft({ ...asrDraft, baseUrl: e.target.value })}
+              />
+            </EngineField>
+            <EngineField label="模型">
+              <Input
+                placeholder="如 mimo-v2.5-asr"
+                value={asrDraft.model}
+                onChange={(e) => setAsrDraft({ ...asrDraft, model: e.target.value })}
+              />
+            </EngineField>
+            <EngineField label="API Key">
+              <Input
+                type="password"
+                placeholder={`留空沿用当前 Key（${settings.asrApiKeyMasked ?? "未配置"}）`}
+                value={asrDraft.apiKey}
+                onChange={(e) => setAsrDraft({ ...asrDraft, apiKey: e.target.value })}
+              />
+            </EngineField>
+          </EngineCard>
+
+          <EngineCard
+            title="联网搜索（Tavily）"
+            description="用于 web_search / web_read / web_crawl。"
+            icon={<GlobeIcon />}
+            dirty={engineDirty.search}
+            saving={savingEngine === "search"}
+            testing={testingEngine === "search"}
+            onSave={() => void saveEngine("search")}
+            onTest={() => void testEngine("search", searchDraft)}
+          >
+            <EngineField label="Base URL">
+              <Input
+                placeholder="默认 https://api.tavily.com"
+                value={searchDraft.baseUrl}
+                onChange={(e) =>
+                  setSearchDraft({ ...searchDraft, baseUrl: e.target.value })
+                }
+              />
+            </EngineField>
+            <EngineField label="API Key">
+              <Input
+                type="password"
+                placeholder={`留空沿用当前 Key（${settings.tavilyApiKeyMasked ?? "未配置"}）`}
+                value={searchDraft.apiKey}
+                onChange={(e) =>
+                  setSearchDraft({ ...searchDraft, apiKey: e.target.value })
+                }
+              />
+            </EngineField>
+          </EngineCard>
+        </div>
+      </section>
 
       <Card className="space-y-3 p-5">
         <div className="flex items-center justify-between">
@@ -1108,34 +1722,151 @@ function SystemSettingsTab() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => toast.info("与个人 MCP 相同的表单，写入 scope=global（P4 接真）")}
+            onClick={() => setMcpDialogOpen(true)}
           >
             <PlusIcon /> 添加
           </Button>
         </div>
-        {globalMcp.map((s) => (
-          <div key={s.id} className="flex items-center gap-3 rounded-xl border px-3.5 py-2.5">
-            <ServerIcon className="size-4 text-primary" />
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium">{s.name}</p>
-              <p className="truncate text-xs text-muted-foreground">{s.url}</p>
-            </div>
-            <div className="flex flex-wrap gap-1">
-              {s.tools.slice(0, 3).map((t) => (
-                <Badge key={t.name} variant="secondary">
-                  {t.name}
-                </Badge>
-              ))}
-            </div>
+        {globalMcp.length === 0 ? (
+          <p className="rounded-lg border border-dashed px-3 py-6 text-center text-sm text-muted-foreground">
+            还没有全局 MCP 服务器。
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {globalMcp.map((s) => (
+              <div
+                key={s.id}
+                className="group rounded-xl border px-3.5 py-2.5"
+              >
+                <div className="flex flex-wrap items-center gap-3">
+                  <ServerIcon className="size-4 shrink-0 text-primary" />
+                  <div className="min-w-0 flex-1 basis-48">
+                    <p className="flex items-center gap-2 text-sm font-medium">
+                      {s.name}
+                      {s.status === "connected" && (
+                        <CheckCircleIcon className="size-3.5 text-success" />
+                      )}
+                    </p>
+                    <p className="truncate text-xs text-muted-foreground">{s.url}</p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void testGlobalMcp(s.id)}
+                      disabled={testingMcp === s.id}
+                    >
+                      {testingMcp === s.id ? (
+                        <Loader2Icon className="animate-spin" />
+                      ) : (
+                        "测试连接"
+                      )}
+                    </Button>
+                    <Switch
+                      aria-label={`${s.enabled ? "停用" : "启用"}全局 MCP 服务器「${s.name}」`}
+                      checked={s.enabled}
+                      onCheckedChange={() => void toggleGlobalMcp(s)}
+                    />
+                    <button
+                      type="button"
+                      aria-label={`删除全局 MCP 服务器「${s.name}」`}
+                      onClick={() => setDeleteMcpTarget(s)}
+                      className="rounded-md p-1.5 text-muted-foreground opacity-100 transition-opacity hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 sm:opacity-0 sm:group-hover:opacity-100"
+                    >
+                      <Trash2Icon className="size-4" />
+                    </button>
+                  </div>
+                </div>
+                {s.tools.length > 0 && (
+                  <div className="mt-2.5 flex flex-wrap gap-1.5 pl-7">
+                    {s.tools.map((t) => (
+                      <Badge key={t.name} variant="secondary">
+                        {t.name}
+                      </Badge>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
-        ))}
+        )}
       </Card>
+
+      <Dialog
+        open={mcpDialogOpen}
+        onOpenChange={(open) => {
+          if (!open && mcpSaving) return;
+          setMcpDialogOpen(open);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>添加全局 MCP 服务器</DialogTitle>
+            <DialogDescription>
+              全局服务器会出现在所有用户的对话工具面板中。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Input
+              placeholder="名称，例如：公司知识库"
+              value={mcpForm.name}
+              onChange={(e) => setMcpForm({ ...mcpForm, name: e.target.value })}
+            />
+            <Input
+              placeholder="服务器 URL（https://…/mcp）"
+              value={mcpForm.url}
+              onChange={(e) => setMcpForm({ ...mcpForm, url: e.target.value })}
+            />
+            <Select
+              value={mcpForm.transport}
+              onValueChange={(v) =>
+                setMcpForm({ ...mcpForm, transport: v as McpServer["transport"] })
+              }
+              options={[
+                { value: "streamable-http", label: "Streamable HTTP" },
+                { value: "sse", label: "SSE" },
+              ]}
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={mcpSaving}
+              onClick={() => setMcpDialogOpen(false)}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void addGlobalMcp()}
+              disabled={mcpSaving || !mcpForm.name.trim() || !mcpForm.url.trim()}
+            >
+              {mcpSaving ? "添加中..." : "添加"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <ConfirmDialog
+        open={!!deleteMcpTarget}
+        onOpenChange={(open) => {
+          if (!open && !deletingMcp) setDeleteMcpTarget(null);
+        }}
+        title="删除全局 MCP 服务器"
+        description={`将删除全局 MCP 服务器「${deleteMcpTarget?.name ?? ""}」。此操作不可撤销。`}
+        confirmLabel="删除"
+        destructive
+        loading={deletingMcp}
+        onConfirm={deleteGlobalMcp}
+      />
 
       <Card className="space-y-3 p-5">
         <p className="text-sm font-medium">注册与广场</p>
         <label className="flex items-center justify-between">
           <span className="text-sm">开放注册</span>
           <Switch
+            aria-label="开放注册"
             checked={settings.registrationEnabled}
             onCheckedChange={(v) => save({ registrationEnabled: v })}
           />
@@ -1143,6 +1874,7 @@ function SystemSettingsTab() {
         <label className="flex items-center justify-between">
           <span className="text-sm">技能广场需要审核</span>
           <Switch
+            aria-label="技能广场需要审核"
             checked={settings.skillMarketRequiresReview}
             onCheckedChange={(v) => save({ skillMarketRequiresReview: v })}
           />

@@ -94,11 +94,19 @@ export function ArtifactPanel({
   const previewable = ["html", "react", "svg", "markdown", "mermaid"].includes(
     artifact.kind
   );
+  const codeLanguage =
+    artifact.kind === "code"
+      ? artifact.language ?? KIND_LANGUAGE.code
+      : KIND_LANGUAGE[artifact.kind];
 
   const copy = async () => {
-    await navigator.clipboard.writeText(current.content);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    try {
+      await navigator.clipboard.writeText(current.content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      toast.error("复制失败，请手动选择代码");
+    }
   };
 
   const download = () => {
@@ -121,11 +129,18 @@ export function ArtifactPanel({
   };
 
   const share = async () => {
-    const { shareToken } = await getDataService().shareArtifact(artifact.id);
-    await navigator.clipboard.writeText(
-      `${location.origin}/share/artifact/${shareToken}`
-    );
-    toast.success("分享链接已复制");
+    try {
+      const { shareToken } = await getDataService().shareArtifact(artifact.id);
+      const url = `${location.origin}/share/artifact/${shareToken}`;
+      try {
+        await navigator.clipboard.writeText(url);
+        toast.success("分享链接已复制");
+      } catch {
+        toast.error(`复制失败，请手动复制：${url}`);
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "生成分享链接失败");
+    }
   };
 
   return (
@@ -231,7 +246,7 @@ export function ArtifactPanel({
         ) : (
           <div className="p-3 [&>div]:my-0">
             <CodeBlock
-              language={artifact.language ?? KIND_LANGUAGE[artifact.kind]}
+              language={codeLanguage}
               code={current.content}
             />
           </div>

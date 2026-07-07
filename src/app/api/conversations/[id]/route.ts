@@ -34,6 +34,7 @@ export async function GET(
       id: c.id,
       title: c.title,
       projectId: c.projectId ?? undefined,
+      skillId: c.skillId ?? undefined,
       modelId: c.modelId,
       styleId: c.styleId ?? undefined,
       pinned: c.pinned,

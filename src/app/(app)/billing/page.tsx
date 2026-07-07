@@ -105,14 +105,28 @@ export default function BillingPage() {
 }
 
 function PlansTab({ currentPlanId }: { currentPlanId?: string }) {
+  const queryClient = useQueryClient();
+  const [subscribingPlanId, setSubscribingPlanId] = React.useState<string | null>(null);
   const { data: plans = [] } = useQuery({
     queryKey: ["plans"],
     queryFn: () => getDataService().listPlans(),
   });
 
   const subscribe = async (planId: string) => {
-    await getDataService().createOrder({ kind: "subscription", planId });
-    toast.info("Mock 订单已创建 — 支付渠道将在 P8 接入（微信/支付宝走 PaymentProvider 接口）");
+    if (subscribingPlanId) return;
+    setSubscribingPlanId(planId);
+    try {
+      const order = await getDataService().createOrder({ kind: "subscription", planId });
+      queryClient.invalidateQueries({ queryKey: ["current-user"] });
+      queryClient.invalidateQueries({ queryKey: ["ledger"] });
+      toast.success(
+        order.status === "paid" ? "订阅已生效" : "订单已创建，请按提示完成支付"
+      );
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "订阅失败");
+    } finally {
+      setSubscribingPlanId(null);
+    }
   };
 
   return (
@@ -152,10 +166,14 @@ function PlansTab({ currentPlanId }: { currentPlanId?: string }) {
             <Button
               className="mt-5"
               variant={isCurrent ? "secondary" : highlight ? "default" : "outline"}
-              disabled={isCurrent}
+              disabled={isCurrent || subscribingPlanId !== null}
               onClick={() => subscribe(p.id)}
             >
-              {isCurrent ? "当前套餐" : "选择"}
+              {subscribingPlanId === p.id
+                ? "处理中…"
+                : isCurrent
+                  ? "当前套餐"
+                  : "选择"}
             </Button>
           </Card>
         );
@@ -169,13 +187,32 @@ function RechargeTab() {
   const [code, setCode] = React.useState("");
   const amounts = [1000, 3000, 5000, 10000, 20000, 50000];
   const [selected, setSelected] = React.useState(5000);
+  const [recharging, setRecharging] = React.useState(false);
+  const [redeeming, setRedeeming] = React.useState(false);
 
   const recharge = async () => {
-    await getDataService().createOrder({ kind: "recharge", amountCents: selected });
-    toast.info("Mock 订单已创建 — 微信/支付宝支付将在 P8 通过 PaymentProvider 接入");
+    if (recharging) return;
+    setRecharging(true);
+    try {
+      const order = await getDataService().createOrder({
+        kind: "recharge",
+        amountCents: selected,
+      });
+      queryClient.invalidateQueries({ queryKey: ["current-user"] });
+      queryClient.invalidateQueries({ queryKey: ["ledger"] });
+      toast.success(
+        order.status === "paid" ? "充值已到账" : "订单已创建，请按提示完成支付"
+      );
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "充值失败");
+    } finally {
+      setRecharging(false);
+    }
   };
 
   const redeem = async () => {
+    if (redeeming) return;
+    setRedeeming(true);
     try {
       const { amountCents } = await getDataService().redeemCode(code.trim());
       queryClient.invalidateQueries({ queryKey: ["current-user"] });
@@ -184,6 +221,8 @@ function RechargeTab() {
       toast.success(`兑换成功，已到账 ${formatCents(amountCents)}`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "兑换失败");
+    } finally {
+      setRedeeming(false);
     }
   };
 
@@ -209,8 +248,8 @@ function RechargeTab() {
             </button>
           ))}
         </div>
-        <Button className="mt-4 w-full" onClick={recharge}>
-          去支付 {formatCents(selected)}
+        <Button className="mt-4 w-full" onClick={recharge} disabled={recharging}>
+          {recharging ? "创建订单中…" : `去支付 ${formatCents(selected)}`}
         </Button>
         <p className="mt-2 text-center text-xs text-muted-foreground">
           支持微信支付 / 支付宝（P8 接入）
@@ -228,8 +267,8 @@ function RechargeTab() {
             onChange={(e) => setCode(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && code.trim() && redeem()}
           />
-          <Button onClick={redeem} disabled={!code.trim()}>
-            兑换
+          <Button onClick={redeem} disabled={!code.trim() || redeeming}>
+            {redeeming ? "兑换中…" : "兑换"}
           </Button>
         </div>
         <p className="mt-3 text-xs text-muted-foreground">

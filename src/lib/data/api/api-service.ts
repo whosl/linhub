@@ -1,9 +1,11 @@
-import type { AdminService, DataService } from "@/lib/data/service";
+import type { AdminService, DataService, ProjectPatch } from "@/lib/data/service";
 import type {
   AppSettings,
   Artifact,
   ChatStyle,
   Conversation,
+  EngineTestInput,
+  EngineTestResult,
   KnowledgeBase,
   KnowledgeDocument,
   LedgerEntry,
@@ -14,6 +16,7 @@ import type {
   Order,
   Plan,
   Project,
+  ProjectFile,
   Provider,
   RemoteModel,
   Skill,
@@ -24,16 +27,64 @@ import type {
 } from "@/lib/types";
 import { getMockDataService } from "@/lib/data/mock/mock-service";
 
-async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, {
-    ...init,
-    headers: { "Content-Type": "application/json", ...init?.headers },
-  });
-  if (!res.ok) {
-    const body = (await res.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(body?.error ?? `请求失败（${res.status}）`);
+async function fetchJson<T>(
+  url: string,
+  init?: RequestInit,
+  timeoutMs = 20_000
+): Promise<T> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  const upstreamSignal = init?.signal;
+  const abortFromCaller = () => controller.abort();
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) controller.abort();
+    else upstreamSignal.addEventListener("abort", abortFromCaller, { once: true });
   }
-  return res.json() as Promise<T>;
+
+  try {
+    const res = await fetch(url, {
+      ...init,
+      signal: controller.signal,
+      headers: { "Content-Type": "application/json", ...init?.headers },
+    });
+    if (!res.ok) {
+      const body = (await res.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(body?.error ?? `请求失败（${res.status}）`);
+    }
+    return res.json() as Promise<T>;
+  } catch (e) {
+    if (timedOut) throw new Error("请求超时，请检查服务器连接");
+    throw e;
+  } finally {
+    clearTimeout(timer);
+    upstreamSignal?.removeEventListener("abort", abortFromCaller);
+  }
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  timeoutMessage = "请求超时，请稍后重试"
+): Promise<Response> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (e) {
+    if (timedOut) throw new Error(timeoutMessage);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** 解析 NDJSON 流为 StreamEvent */
@@ -86,11 +137,33 @@ async function* streamNdjson(
  */
 export class ApiDataService implements DataService {
   private mock = getMockDataService();
-  private abortControllers = new Map<string, AbortController>();
+  private abortControllers = new Map<string, Set<AbortController>>();
+  private startingConversationId: string | null = null;
+  private startingGenerationId: string | null = null;
+
+  private addAbortController(key: string, controller: AbortController) {
+    const controllers = this.abortControllers.get(key) ?? new Set();
+    controllers.add(controller);
+    this.abortControllers.set(key, controllers);
+  }
+
+  private removeAbortController(key: string, controller: AbortController) {
+    const controllers = this.abortControllers.get(key);
+    if (!controllers) return;
+    controllers.delete(controller);
+    if (controllers.size === 0) this.abortControllers.delete(key);
+  }
+
+  private abortControllersForKey(key: string) {
+    const controllers = this.abortControllers.get(key);
+    if (!controllers) return;
+    for (const controller of controllers) controller.abort();
+    this.abortControllers.delete(key);
+  }
 
   // ---- 用户 ----
   async getCurrentUser(): Promise<User | null> {
-    return fetchJson<User | null>("/api/me");
+    return fetchJson<User | null>("/api/me", undefined, 8_000);
   }
   async updateProfile(patch: {
     name?: string;
@@ -170,24 +243,30 @@ export class ApiDataService implements DataService {
     // abort controller，使 stop 按钮在拿到 conversation-created 前也能生效。
     const isNew = !input.conversationId;
     const sentinel = "__new_conversation__";
+    const clientGenerationId =
+      input.clientGenerationId ??
+      `cg-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+    const payload = { ...input, clientGenerationId };
     let activeKey = input.conversationId ?? sentinel;
     if (input.conversationId) {
-      this.abortControllers.set(input.conversationId, controller);
+      this.addAbortController(input.conversationId, controller);
     } else {
-      this.abortControllers.set(sentinel, controller);
+      this.addAbortController(sentinel, controller);
+      this.startingGenerationId = clientGenerationId;
     }
-    const res = await fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(input),
-      signal: controller.signal,
-    });
     try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
       for await (const event of streamNdjson(res, controller.signal)) {
         if (event.type === "conversation-created") {
-          // I11: 拿到真实 id 后，把哨兵键换成真实 id（替换而非复制）
-          if (isNew) this.abortControllers.delete(sentinel);
-          this.abortControllers.set(event.conversation.id, controller);
+          // I11: 新会话在路由跳转完成前，停止按钮仍会调用 stop(undefined)。
+          // 因此哨兵键保留到 finally，再同时登记真实 id。
+          this.addAbortController(event.conversation.id, controller);
+          this.startingConversationId = event.conversation.id;
           activeKey = event.conversation.id;
         }
         yield event;
@@ -200,37 +279,23 @@ export class ApiDataService implements DataService {
         };
       }
     } finally {
-      this.abortControllers.delete(activeKey);
-      if (isNew) this.abortControllers.delete(sentinel);
+      this.removeAbortController(activeKey, controller);
+      if (isNew) this.removeAbortController(sentinel, controller);
+      if (isNew) this.startingConversationId = null;
+      if (isNew && this.startingGenerationId === clientGenerationId) {
+        this.startingGenerationId = null;
+      }
     }
   }
 
-  async stopGeneration(conversationId?: string) {
-    // I11: conversationId 为空时停止新会话的 in-flight 流
-    const key = conversationId ?? "__new_conversation__";
-    this.abortControllers.get(key)?.abort();
-    this.abortControllers.delete(key);
-  }
-
-  async *regenerate(
-    conversationId: string,
-    assistantMessageId: string,
-    modelId?: string
-  ): AsyncIterable<StreamEvent> {
+  async *streamConversation(conversationId: string): AsyncIterable<StreamEvent> {
     const controller = new AbortController();
-    this.abortControllers.set(conversationId, controller);
-    const res = await fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        regenerate: true,
-        conversationId,
-        assistantMessageId,
-        modelId,
-      }),
-      signal: controller.signal,
-    });
+    this.addAbortController(conversationId, controller);
     try {
+      const res = await fetch(
+        `/api/chat?conversationId=${encodeURIComponent(conversationId)}`,
+        { signal: controller.signal }
+      );
       yield* streamNdjson(res, controller.signal);
     } catch (e) {
       if (!controller.signal.aborted) {
@@ -240,7 +305,66 @@ export class ApiDataService implements DataService {
         };
       }
     } finally {
-      this.abortControllers.delete(conversationId);
+      this.removeAbortController(conversationId, controller);
+    }
+  }
+
+  async stopGeneration(conversationId?: string) {
+    // I11: conversationId 为空时停止新会话的 in-flight 流
+    const key = conversationId ?? this.startingConversationId ?? "__new_conversation__";
+    const serverConversationId = conversationId ?? this.startingConversationId;
+    if (serverConversationId) {
+      await fetchJson(
+        `/api/chat?conversationId=${encodeURIComponent(serverConversationId)}`,
+        { method: "DELETE" },
+        8_000
+      ).catch(() => null);
+    } else if (this.startingGenerationId) {
+      await fetchJson(
+        `/api/chat?clientGenerationId=${encodeURIComponent(this.startingGenerationId)}`,
+        { method: "DELETE" },
+        8_000
+      ).catch(() => null);
+    }
+    this.abortControllersForKey(key);
+    if (!conversationId) {
+      this.abortControllersForKey("__new_conversation__");
+      this.startingConversationId = null;
+      this.startingGenerationId = null;
+    }
+  }
+
+  async *regenerate(
+    conversationId: string,
+    assistantMessageId: string,
+    modelId?: string
+  ): AsyncIterable<StreamEvent> {
+    const controller = new AbortController();
+    const clientGenerationId = `cg-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+    this.addAbortController(conversationId, controller);
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          regenerate: true,
+          clientGenerationId,
+          conversationId,
+          assistantMessageId,
+          modelId,
+        }),
+        signal: controller.signal,
+      });
+      yield* streamNdjson(res, controller.signal);
+    } catch (e) {
+      if (!controller.signal.aborted) {
+        yield {
+          type: "error",
+          message: e instanceof Error ? e.message : "连接中断",
+        };
+      }
+    } finally {
+      this.removeAbortController(conversationId, controller);
     }
   }
 
@@ -255,6 +379,16 @@ export class ApiDataService implements DataService {
       method: "PATCH",
       body: JSON.stringify({ oldUrl, newUrl }),
     });
+  }
+  async editImage(input: { image: string; mask?: string | null; prompt: string }) {
+    return fetchJson<{ url: string }>(
+      "/api/edit-image",
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+      190_000
+    );
   }
 
   // ---- 以下模块暂委托 Mock，按里程碑接真 ----
@@ -293,11 +427,38 @@ export class ApiDataService implements DataService {
       body: JSON.stringify(p),
     });
   }
+  updateProject(id: string, patch: ProjectPatch) {
+    return fetchJson<Project>(`/api/projects/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
+  }
   async deleteProject(id: string) {
     await fetchJson(`/api/projects/${id}`, { method: "DELETE" });
   }
   listProjectConversations(projectId: string) {
     return fetchJson<Conversation[]>(`/api/projects/${projectId}/conversations`);
+  }
+  async uploadProjectFile(projectId: string, file: File) {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("projectId", projectId);
+    const res = await fetch("/api/upload", { method: "POST", body: form });
+    if (!res.ok) {
+      const err = (await res.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(err?.error ?? "上传失败");
+    }
+    const data = (await res.json()) as ProjectFile;
+    return {
+      id: data.id,
+      name: data.name,
+      mimeType: data.mimeType || file.type || "application/octet-stream",
+      size: data.size,
+      createdAt: data.createdAt ?? new Date().toISOString(),
+    };
+  }
+  async deleteProjectFile(fileId: string) {
+    await fetchJson(`/api/attachments/${fileId}`, { method: "DELETE" });
   }
 
   // ---- 记忆（已接真） ----
@@ -403,10 +564,15 @@ export class ApiDataService implements DataService {
           ? "recording.mp3"
           : "recording.webm";
     form.append("audio", audio, filename);
-    const res = await fetch("/api/voice/transcribe", {
-      method: "POST",
-      body: form,
-    });
+    const res = await fetchWithTimeout(
+      "/api/voice/transcribe",
+      {
+        method: "POST",
+        body: form,
+      },
+      70_000,
+      "语音转写超时，请稍后重试"
+    );
     if (!res.ok) {
       const err = (await res.json().catch(() => null)) as { error?: string } | null;
       throw new Error(err?.error ?? "语音转写失败");
@@ -414,11 +580,16 @@ export class ApiDataService implements DataService {
     return res.json() as Promise<{ text: string }>;
   }
   async synthesizeSpeech(text: string): Promise<{ audioUrl: string }> {
-    const res = await fetch("/api/voice/tts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-    });
+    const res = await fetchWithTimeout(
+      "/api/voice/tts",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      },
+      55_000,
+      "语音合成超时，请稍后重试"
+    );
     if (!res.ok) {
       const err = (await res.json().catch(() => null)) as { error?: string } | null;
       throw new Error(err?.error ?? "语音合成失败");
@@ -499,6 +670,16 @@ class ApiAdminService implements AdminService {
       method: "POST",
       body: JSON.stringify(patch),
     });
+  }
+  testEngineConnection(input: EngineTestInput) {
+    return fetchJson<EngineTestResult>(
+      "/api/admin/settings/engine-test",
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+      input.engine === "image" ? 130_000 : 70_000
+    );
   }
   listUsers() {
     return fetchJson<User[]>("/api/admin/users");

@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { and, eq } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 import { requireSession } from "@/lib/server/auth";
 import { rateLimit } from "@/lib/server/rate-limit";
@@ -52,6 +53,23 @@ export async function POST(req: NextRequest) {
   if (file.size > 20 * 1024 * 1024) {
     return Response.json({ error: "文件不能超过 20MB" }, { status: 400 });
   }
+  const rawProjectId = form.get("projectId");
+  const projectId = typeof rawProjectId === "string" && rawProjectId ? rawProjectId : null;
+  if (projectId) {
+    const [project] = await db
+      .select({ id: schema.projects.id })
+      .from(schema.projects)
+      .where(
+        and(
+          eq(schema.projects.id, projectId),
+          eq(schema.projects.ownerId, session.user.id)
+        )
+      )
+      .limit(1);
+    if (!project) {
+      return Response.json({ error: "项目不存在" }, { status: 404 });
+    }
+  }
 
   const buffer = Buffer.from(await file.arrayBuffer());
   const id = `att-${uid()}`;
@@ -83,12 +101,19 @@ export async function POST(req: NextRequest) {
   await db.insert(schema.attachments).values({
     id,
     ownerId: session.user.id,
+    projectId,
     name: file.name,
     mimeType: file.type || "application/octet-stream",
     size: file.size,
     storagePath: isImage ? `/uploads/${safeName}` : `data/uploads/${safeName}`,
     extractedText,
   });
+  if (projectId) {
+    await db
+      .update(schema.projects)
+      .set({ updatedAt: new Date() })
+      .where(eq(schema.projects.id, projectId));
+  }
 
   return Response.json({
     id,
@@ -97,6 +122,7 @@ export async function POST(req: NextRequest) {
     size: file.size,
     url: isImage ? `/uploads/${safeName}` : undefined,
     hasText: !!extractedText,
+    createdAt: new Date().toISOString(),
   });
 }
 
@@ -114,6 +140,15 @@ async function extractText(
       lower.endsWith(".csv") ||
       lower.endsWith(".json")
     ) {
+      return buffer.toString("utf-8").slice(0, 100_000);
+    }
+    // 代码文件：作为 UTF-8 文本读取（之前遗漏导致上传后模型看不到内容）
+    const codeExts = [
+      ".js", ".ts", ".jsx", ".tsx", ".py", ".java", ".go", ".rs",
+      ".c", ".cpp", ".h", ".css", ".sql", ".sh", ".rb", ".php",
+      ".xml", ".yaml", ".yml", ".log", ".html", ".vue", ".svelte",
+    ];
+    if (codeExts.some((ext) => lower.endsWith(ext))) {
       return buffer.toString("utf-8").slice(0, 100_000);
     }
     if (mimeType === "application/pdf" || lower.endsWith(".pdf")) {

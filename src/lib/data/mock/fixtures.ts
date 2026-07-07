@@ -72,6 +72,7 @@ export const mockProviders: Provider[] = [
   { id: "pv-zhipu", kind: "zhipu", name: "智谱 GLM", apiKeyMasked: "e5f2...a1b9", enabled: true, storeEnabled: true },
   { id: "pv-deepseek", kind: "deepseek", name: "DeepSeek", apiKeyMasked: "sk-...m2Nc", enabled: true, storeEnabled: true },
   { id: "pv-xiaomi", kind: "xiaomi", name: "Xiaomi MiMo", apiKeyMasked: "mm-...t7Rd", enabled: true, storeEnabled: true },
+  { id: "pv-xiaomi-token-plan", kind: "xiaomi-token-plan", name: "Xiaomi MiMo Token Plan", apiKeyMasked: "mm-...t7Rd", enabled: true, storeEnabled: true },
 ];
 
 export const mockModels: Model[] = [

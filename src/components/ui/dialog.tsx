@@ -48,7 +48,11 @@ function DialogContent({
       >
         {children}
         {!hideClose && (
-          <DialogPrimitive.Close className="absolute right-4 top-4 rounded-md p-1 text-muted-foreground opacity-70 transition-opacity hover:bg-accent hover:opacity-100 focus:outline-none">
+          <DialogPrimitive.Close
+            type="button"
+            aria-label="关闭"
+            className="absolute right-4 top-4 rounded-md p-1 text-muted-foreground opacity-70 transition-opacity hover:bg-accent hover:opacity-100 focus:outline-none"
+          >
             <XIcon className="size-4" />
           </DialogPrimitive.Close>
         )}

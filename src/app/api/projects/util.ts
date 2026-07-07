@@ -15,6 +15,7 @@ export function projectToUi(
     description: p.description ?? undefined,
     instructions: p.instructions ?? undefined,
     color: p.color ?? undefined,
+    modelId: p.modelId ?? undefined,
     createdAt: p.createdAt.toISOString(),
     updatedAt: p.updatedAt.toISOString(),
     conversationCount,

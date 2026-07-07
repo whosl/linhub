@@ -7,7 +7,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AuthShell } from "@/components/auth/auth-shell";
-import { signIn } from "@/lib/auth-client";
+import { signIn, withAuthTimeout } from "@/lib/auth-client";
 import { toast } from "sonner";
 
 export default function LoginPage() {
@@ -20,18 +20,23 @@ export default function LoginPage() {
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    const { error } = await signIn.email({ email, password });
-    setLoading(false);
-    if (error) {
-      toast.error(error.message ?? "邮箱或密码错误");
-      return;
+    try {
+      const { error } = await withAuthTimeout(signIn.email({ email, password }));
+      if (error) {
+        toast.error(error.message ?? "邮箱或密码错误");
+        return;
+      }
+      toast.success("欢迎回来！");
+      // 登录成功后必须先清掉「未登录」时缓存的 null，
+      // 否则 AuthGuard 会在 staleTime 内读到旧值并把我们弹回 /login。
+      queryClient.removeQueries({ queryKey: ["current-user"] });
+      router.push("/");
+      router.refresh();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "登录失败");
+    } finally {
+      setLoading(false);
     }
-    toast.success("欢迎回来！");
-    // 登录成功后必须先清掉「未登录」时缓存的 null，
-    // 否则 AuthGuard 会在 staleTime 内读到旧值并把我们弹回 /login。
-    queryClient.removeQueries({ queryKey: ["current-user"] });
-    router.push("/");
-    router.refresh();
   };
 
   return (

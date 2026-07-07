@@ -8,6 +8,7 @@ import { PlusIcon, SparklesIcon, Trash2Icon, PencilIcon, MessageSquareIcon } fro
 import { getDataService } from "@/lib/data";
 import type { Skill } from "@/lib/types";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input, Textarea } from "@/components/ui/input";
 import { Badge, Card, EmptyState, Select, Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/misc";
 import {
@@ -27,6 +28,8 @@ export default function SkillsPage() {
   const queryClient = useQueryClient();
   const [editorOpen, setEditorOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<Skill | null>(null);
+  const [deleteTarget, setDeleteTarget] = React.useState<Skill | null>(null);
+  const [deleting, setDeleting] = React.useState(false);
 
   const { data: mySkills = [] } = useQuery({
     queryKey: ["skills", "mine"],
@@ -46,11 +49,21 @@ export default function SkillsPage() {
     setEditorOpen(true);
   };
 
-  const remove = async (skill: Skill) => {
-    if (!window.confirm(`删除技能「${skill.name}」？`)) return;
-    await getDataService().deleteSkill(skill.id);
-    queryClient.invalidateQueries({ queryKey: ["skills"] });
-    toast.success("已删除");
+  const remove = (skill: Skill) => {
+    setDeleteTarget(skill);
+  };
+
+  const confirmRemove = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      await getDataService().deleteSkill(deleteTarget.id);
+      queryClient.invalidateQueries({ queryKey: ["skills"] });
+      toast.success("已删除");
+      setDeleteTarget(null);
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const startChat = (skill: Skill) => {
@@ -109,6 +122,22 @@ export default function SkillsPage() {
           setEditorOpen(false);
         }}
       />
+      <ConfirmDialog
+        open={!!deleteTarget}
+        onOpenChange={(open) => {
+          if (!open && !deleting) setDeleteTarget(null);
+        }}
+        title="删除技能"
+        description={
+          deleteTarget
+            ? `确定删除技能「${deleteTarget.name}」？删除后无法撤销。`
+            : "确定删除这个技能？删除后无法撤销。"
+        }
+        confirmLabel="删除"
+        destructive
+        loading={deleting}
+        onConfirm={confirmRemove}
+      />
     </PageContainer>
   );
 }
@@ -145,9 +174,11 @@ function SkillGrid({
             </p>
             <div className="mt-3 flex items-center justify-between text-xs text-muted-foreground">
               <span>{s.usageCount} 次使用</span>
-              <div className="flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+              <div className="flex gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
                 {onEdit && (
                   <button
+                    type="button"
+                    aria-label={`编辑技能「${s.name}」`}
                     onClick={() => onEdit(s)}
                     className="rounded-md p-1.5 hover:bg-accent hover:text-foreground"
                   >
@@ -156,6 +187,8 @@ function SkillGrid({
                 )}
                 {onDelete && (
                   <button
+                    type="button"
+                    aria-label={`删除技能「${s.name}」`}
                     onClick={() => onDelete(s)}
                     className="rounded-md p-1.5 text-destructive hover:bg-destructive/10"
                   >
@@ -163,6 +196,7 @@ function SkillGrid({
                   </button>
                 )}
                 <button
+                  type="button"
                   onClick={() => onChat(s)}
                   className="flex items-center gap-1 rounded-md bg-primary/10 px-2 py-1.5 font-medium text-primary hover:bg-primary/20"
                 >
@@ -252,6 +286,8 @@ function SkillEditor({
                 {EMOJI_CHOICES.map((e) => (
                   <button
                     key={e}
+                    type="button"
+                    aria-label={`选择图标 ${e}`}
                     onClick={() => setForm({ ...form, emoji: e })}
                     className={`rounded-lg p-1.5 text-xl transition-colors ${form.emoji === e ? "bg-primary/15 ring-1 ring-primary" : "hover:bg-accent"}`}
                   >

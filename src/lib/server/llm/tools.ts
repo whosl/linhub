@@ -1,36 +1,29 @@
 import { tool, type ToolSet } from "ai";
 import { createMCPClient } from "@ai-sdk/mcp";
 import { z } from "zod";
-import { and, eq } from "drizzle-orm";
+import { and, eq, or, isNull } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 import { decryptSecret } from "@/lib/server/crypto";
 import { resolveImageSource } from "./image-source";
 import { getProviderBaseURL, resolveModel } from "./registry";
 import { formatUpstreamError } from "@/lib/server/upstream-error";
+import { getImageGenConfig, getSearchConfig } from "@/lib/server/engine-config";
+import { assertModelAccess } from "@/lib/server/billing";
+import { assertSafeUrl } from "@/lib/server/net-guard";
 import type { WebSource } from "@/lib/types";
 
 // ---------- Tavily ----------
 
-async function getTavilyKey(): Promise<string | null> {
-  const [s] = await db
-    .select({ key: schema.settings.tavilyApiKeyEncrypted })
-    .from(schema.settings)
-    .where(eq(schema.settings.id, "global"));
-  return s?.key ? decryptSecret(s.key) : null;
-}
-
 async function tavilyRequest<T>(path: string, body: Record<string, unknown>): Promise<T> {
-  const key = await getTavilyKey();
-  if (!key) throw new Error("管理员尚未配置 Tavily API Key");
-  const base = process.env.TAVILY_BASE_URL ?? "https://api.tavily.com";
+  const { apiKey, baseURL } = await getSearchConfig();
   // 网络抖动时 fetch 会直接抛 "fetch failed"（TCP/DNS 层），模型只能靠运气重试。
   // 这里加 15s 超时 + 1 次自动重试，消除大部分偶发失败。
   const doFetch = () =>
-    fetch(`${base}${path}`, {
+    fetch(`${baseURL}${path}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${key}`,
+        Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(15_000),
@@ -197,6 +190,68 @@ export function buildCodeTools(): ToolSet {
 
 // ---------- 图像生成 / 编辑（gpt-image-2） ----------
 
+class RetryableImageError extends Error {}
+
+const REMOTE_IMAGE_MAX_BYTES = 12 * 1024 * 1024;
+const REMOTE_IMAGE_DOWNLOAD_TIMEOUT_MS = 30_000;
+const MAX_REMOTE_IMAGE_REDIRECTS = 5;
+
+function imageExtensionFromContentType(contentType: string | null): string | null {
+  const type = contentType?.split(";")[0]?.trim().toLowerCase();
+  if (type === "image/png") return ".png";
+  if (type === "image/jpeg" || type === "image/jpg") return ".jpg";
+  if (type === "image/webp") return ".webp";
+  return null;
+}
+
+async function saveRemoteGeneratedImage(userId: string, remoteUrl: string): Promise<string> {
+  const res = await fetchSafeRemoteImage(remoteUrl);
+  if (!res.ok) throw new Error(await formatUpstreamError(res, "下载生图结果失败"));
+
+  const ext = imageExtensionFromContentType(res.headers.get("content-type"));
+  if (!ext) throw new Error("生图结果图片格式不受支持");
+  const len = Number(res.headers.get("content-length") ?? 0);
+  if (len > REMOTE_IMAGE_MAX_BYTES) throw new Error("生图结果图片过大");
+
+  const buffer = Buffer.from(await res.arrayBuffer());
+  if (buffer.byteLength > REMOTE_IMAGE_MAX_BYTES) throw new Error("生图结果图片过大");
+
+  const { mkdir, writeFile } = await import("node:fs/promises");
+  const dir = `${process.cwd()}/public/generated`;
+  await mkdir(dir, { recursive: true });
+  const name = `${userId.slice(0, 6)}-${Date.now()}-${crypto
+    .randomUUID()
+    .replace(/-/g, "")
+    .slice(0, 8)}${ext}`;
+  await writeFile(`${dir}/${name}`, buffer);
+  return `/generated/${name}`;
+}
+
+async function fetchSafeRemoteImage(rawUrl: string): Promise<Response> {
+  let url = rawUrl;
+  for (let redirects = 0; redirects <= MAX_REMOTE_IMAGE_REDIRECTS; redirects++) {
+    await assertSafeUrl(url);
+    const res = await fetch(url, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(REMOTE_IMAGE_DOWNLOAD_TIMEOUT_MS),
+    });
+    if (![301, 302, 303, 307, 308].includes(res.status)) return res;
+
+    const location = res.headers.get("location");
+    if (!location) throw new Error("下载生图结果失败：重定向缺少 Location");
+    url = new URL(location, url).toString();
+  }
+  throw new Error("下载生图结果失败：重定向次数过多");
+}
+
+function isRetryableImageError(e: unknown) {
+  if (e instanceof RetryableImageError) return true;
+  return (
+    e instanceof Error &&
+    /fetch failed|network|timeout|ECONN|ETIMEDOUT|AbortError/i.test(e.message)
+  );
+}
+
 export async function getImageModelConfig() {
   const rows = await db
     .select({ model: schema.models, provider: schema.providers })
@@ -226,12 +281,27 @@ export function buildImageTools(userId: string, onImage: (url: string) => void):
         size: z.enum(["1024x1024", "1536x1024", "1024x1536"]).optional(),
       }),
       execute: async ({ prompt, size }) => {
-        const { record, apiKey, baseURL } = await getImageModelConfig();
-        // 生图前预检余额/额度（C4）
-        const { assertCanSpend } = await import("@/lib/server/billing");
-        await assertCanSpend(userId, Math.max(0, record.pricePerImage ?? 0));
+        const imgConfig = await getImageGenConfig();
+        const { apiKey, baseURL, model, record } = imgConfig;
+        if (record) await assertModelAccess(userId, record);
+        const pricePerImage = Math.max(0, record?.pricePerImage ?? 30);
+        const {
+          recordReservedUsage,
+          refundSpendReservation,
+          reserveSpend,
+        } = await import("@/lib/server/billing");
+        const reservation =
+          record && pricePerImage > 0
+            ? await reserveSpend(
+                userId,
+                pricePerImage,
+                `${record.displayName} 生图消费`
+              )
+            : null;
 
         // 网关偶发返回空 200，封装请求 + 重试
+        // 生图通常 10-60s，给 120s 超时；重试一次也要留在聊天路由 300s 内。
+        // 超时抛 TimeoutError（消息含 timeout）会被 isRetryableImageError 识别并重试一次。
         const doGenerate = async () => {
           const res = await fetch(`${baseURL}/images/generations`, {
             method: "POST",
@@ -240,53 +310,86 @@ export function buildImageTools(userId: string, onImage: (url: string) => void):
               Authorization: `Bearer ${apiKey}`,
             },
             body: JSON.stringify({
-              model: record.slug,
+              model,
               prompt,
               size: size ?? "1024x1024",
               n: 1,
             }),
+            signal: AbortSignal.timeout(120_000),
           });
           if (!res.ok) {
-            throw new Error(await formatUpstreamError(res, "生图失败"));
+            const message = await formatUpstreamError(res, "生图失败");
+            if (
+              res.status === 408 ||
+              res.status === 409 ||
+              res.status === 425 ||
+              res.status === 429 ||
+              res.status >= 500
+            ) {
+              throw new RetryableImageError(message);
+            }
+            throw new Error(message);
           }
           // 网关偶发返回 200 但空响应体（application/octet-stream, 0 bytes）
           const text = await res.text();
           if (!text.trim()) {
-            throw new Error("生图上游返回空响应（网关异常），请稍后重试");
+            throw new RetryableImageError("生图上游返回空响应（网关异常），请稍后重试");
           }
           try {
             return JSON.parse(text) as { data: { b64_json?: string; url?: string }[] };
           } catch {
-            throw new Error(
+            throw new RetryableImageError(
               `生图上游返回了非 JSON 响应（${text.slice(0, 100)}），请稍后重试`
             );
           }
         };
 
-        let data: { data: { b64_json?: string; url?: string }[] };
         try {
-          data = await doGenerate();
-        } catch {
-          // 网关空响应重试一次
-          data = await doGenerate();
+          let data: { data: { b64_json?: string; url?: string }[] };
+          try {
+            data = await doGenerate();
+          } catch (e) {
+            if (!isRetryableImageError(e)) throw e;
+            // 仅对网络/限流/5xx/网关空响应等瞬时错误重试一次。
+            data = await doGenerate();
+          }
+          const item = data.data[0];
+          if (item.b64_json) {
+            const url = await saveGeneratedImage(userId, item.b64_json);
+            if (record) await recordReservedUsage(userId, record, null, {
+              inputTokens: 0,
+              outputTokens: 0,
+              imageCount: 1,
+              costCents: pricePerImage,
+            });
+            onImage(url);
+            return { images: [url], text: "图片已生成并展示给用户" };
+          }
+          const url = item.url
+            ? await saveRemoteGeneratedImage(userId, item.url)
+            : "";
+          // I7: 仅在确实拿到图片 URL 时才回调与计费，避免空结果也扣费
+          if (!url) throw new Error("生图失败：上游未返回图片 URL");
+          if (record) await recordReservedUsage(userId, record, null, {
+            inputTokens: 0,
+            outputTokens: 0,
+            imageCount: 1,
+            costCents: pricePerImage,
+          });
+          onImage(url);
+          return { images: [url], text: "图片已生成并展示给用户" };
+        } catch (e) {
+          if (reservation) {
+            await refundSpendReservation(
+              userId,
+              reservation,
+              `${record?.displayName ?? "生图"} 失败退款`
+            ).catch((err) =>
+              console.error("[billing] 生图失败退款异常", err)
+            );
+          }
+          throw e;
         }
-        const item = data.data[0];
-        let url = item.url ?? "";
-        if (item.b64_json) {
-          url = await saveGeneratedImage(userId, item.b64_json);
-        }
-        // I7: 仅在确实拿到图片 URL 时才回调与计费，避免空结果也扣费
-        if (!url) throw new Error("生图失败：上游未返回图片 URL");
-        onImage(url);
-        // 生图计费：记录用量并扣订阅额度/余额（C4）；costCents 夹下界防 pricePerImage 为负
-        const { recordUsage } = await import("@/lib/server/billing");
-        await recordUsage(userId, record, null, {
-          inputTokens: 0,
-          outputTokens: 0,
-          imageCount: 1,
-          costCents: Math.max(0, record.pricePerImage ?? 0),
-        });
-        return { images: [url], text: "图片已生成并展示给用户" };
       },
     }),
   };
@@ -412,7 +515,11 @@ export function buildArtifactTools(conversationId: string): ToolSet {
 
 // ---------- 记忆 ----------
 
-export function buildMemoryTools(userId: string, conversationId: string): ToolSet {
+export function buildMemoryTools(
+  userId: string,
+  conversationId: string,
+  projectId?: string | null
+): ToolSet {
   return {
     save_memory: tool({
       description:
@@ -434,6 +541,7 @@ export function buildMemoryTools(userId: string, conversationId: string): ToolSe
           ownerId: userId,
           content,
           sourceConversationId: conversationId,
+          projectId: projectId ?? null,
           embedding,
         });
         return { text: `已记住：${content}` };
@@ -445,7 +553,7 @@ export function buildMemoryTools(userId: string, conversationId: string): ToolSe
         query: z.string().describe("检索关键词"),
       }),
       execute: async ({ query }) => {
-        const results = await searchMemories(userId, query, 5);
+        const results = await searchMemories(userId, query, 5, projectId);
         if (results.length === 0) return { text: "没有找到相关记忆" };
         return { text: results.map((m, i) => `${i + 1}. ${m}`).join("\n") };
       },
@@ -456,8 +564,16 @@ export function buildMemoryTools(userId: string, conversationId: string): ToolSe
 export async function searchMemories(
   userId: string,
   query: string,
-  limit: number
+  limit: number,
+  projectId?: string | null
 ): Promise<string[]> {
+  // 项目级记忆：只检索同一项目的 + 全局的（projectId=null）
+  const memFilter = projectId
+    ? and(
+        eq(schema.memories.ownerId, userId),
+        or(eq(schema.memories.projectId, projectId), isNull(schema.memories.projectId))
+      )
+    : and(eq(schema.memories.ownerId, userId), isNull(schema.memories.projectId));
   try {
     const { embedText } = await import("./embedding");
     const queryEmbedding = await embedText(query);
@@ -466,7 +582,7 @@ export async function searchMemories(
     const rows = await db
       .select({ content: schema.memories.content, similarity })
       .from(schema.memories)
-      .where(eq(schema.memories.ownerId, userId))
+      .where(memFilter)
       .orderBy((t) => descOp(t.similarity))
       .limit(limit);
     return rows.filter((r) => r.similarity > 0.3).map((r) => r.content);
@@ -478,7 +594,7 @@ export async function searchMemories(
       .from(schema.memories)
       .where(
         andOp(
-          eq(schema.memories.ownerId, userId),
+          memFilter,
           ilike(schema.memories.content, `%${query.slice(0, 20)}%`)
         )
       )
@@ -487,13 +603,24 @@ export async function searchMemories(
   }
 }
 
-/** 开场注入：取用户最近的记忆拼进系统提示词 */
-export async function loadRecentMemories(userId: string, limit = 10): Promise<string[]> {
+/** 开场注入：取用户最近的记忆拼进系统提示词（项目级隔离） */
+export async function loadRecentMemories(
+  userId: string,
+  limit = 10,
+  projectId?: string | null
+): Promise<string[]> {
   const { desc: descOp } = await import("drizzle-orm");
+  // 项目级记忆：项目内 + 全局（projectId=null）；无项目时只取全局
+  const memFilter = projectId
+    ? and(
+        eq(schema.memories.ownerId, userId),
+        or(eq(schema.memories.projectId, projectId), isNull(schema.memories.projectId))
+      )
+    : and(eq(schema.memories.ownerId, userId), isNull(schema.memories.projectId));
   const rows = await db
     .select({ content: schema.memories.content })
     .from(schema.memories)
-    .where(eq(schema.memories.ownerId, userId))
+    .where(memFilter)
     .orderBy(descOp(schema.memories.updatedAt))
     .limit(limit);
   return rows.map((r) => r.content);
@@ -532,7 +659,8 @@ export function buildKnowledgeTool(userId: string, kbIds: string[]): ToolSet {
             and(
               inArray(schema.kbChunks.knowledgeBaseId, kbIds),
               // 只允许检索当前用户自己的知识库（防 IDOR）
-              eq(schema.knowledgeBases.ownerId, userId)
+              eq(schema.knowledgeBases.ownerId, userId),
+              eq(schema.kbDocuments.status, "ready")
             )
           )
           .orderBy((t) => descOp(t.similarity))

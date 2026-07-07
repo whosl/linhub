@@ -9,16 +9,21 @@ import type { ReasoningPart } from "@/lib/types";
 export function ReasoningBlock({
   part,
   isStreaming,
+  keepOpen,
 }: {
   part: ReasoningPart;
+  /** 当前 reasoning part 是否还在接收增量。 */
   isStreaming: boolean;
+  /** assistant 正在生成正文时，保留已产生的思考内容展开显示。 */
+  keepOpen?: boolean;
 }) {
   const [open, setOpen] = React.useState(false);
+  const hasText = part.text.trim().length > 0;
 
-  // 流式思考时自动展开，结束后自动收起
+  // 思考和正文仍在流式生成时保持展开；整条消息完成后自动收起。
   React.useEffect(() => {
-    Promise.resolve().then(() => setOpen(isStreaming));
-  }, [isStreaming]);
+    Promise.resolve().then(() => setOpen(isStreaming || Boolean(keepOpen && hasText)));
+  }, [hasText, isStreaming, keepOpen]);
 
   const seconds = part.durationMs ? Math.max(1, Math.round(part.durationMs / 1000)) : null;
 
@@ -41,7 +46,7 @@ export function ReasoningBlock({
         />
       </button>
       <AnimatePresence initial={false}>
-        {open && (
+        {open && hasText && (
           <motion.div
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: "auto", opacity: 1 }}

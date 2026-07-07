@@ -4,6 +4,7 @@ import * as React from "react";
 import { motion } from "motion/react";
 import {
   ArrowUpIcon,
+  BookOpenIcon,
   BrainIcon,
   CheckIcon,
   ChevronDownIcon,
@@ -20,7 +21,14 @@ import {
   XIcon,
 } from "lucide-react";
 import { cn, formatBytes } from "@/lib/utils";
-import type { ChatStyle, ChatToolToggles, FilePart, ImagePart, Model } from "@/lib/types";
+import type {
+  ChatStyle,
+  ChatToolToggles,
+  FilePart,
+  ImagePart,
+  KnowledgeBase,
+  Model,
+} from "@/lib/types";
 import { ImageMaskEditor } from "./image-mask-editor";
 import { Tooltip } from "@/components/ui/tooltip";
 import { Switch } from "@/components/ui/misc";
@@ -66,9 +74,11 @@ export function ChatInput({
   autoFocus,
   defaultModelId,
   onSetDefaultModel,
+  knowledgeBases = [],
 }: {
   models: Model[];
   styles: ChatStyle[];
+  knowledgeBases?: KnowledgeBase[];
   composer: ComposerState;
   onComposerChange: (patch: Partial<ComposerState>) => void;
   quotedText?: string;
@@ -104,6 +114,18 @@ export function ChatInput({
   const chatModels = models.filter((m) => !m.capabilities.includes("image-generation"));
   const currentModel = chatModels.find((m) => m.id === composer.modelId) ?? chatModels[0];
   const currentStyle = styles.find((s) => s.id === composer.styleId);
+  const selectedKnowledgeBaseIds = composer.tools.knowledgeBaseIds ?? [];
+
+  const toggleKnowledgeBase = (id: string, checked: boolean) => {
+    onComposerChange({
+      tools: {
+        ...composer.tools,
+        knowledgeBaseIds: checked
+          ? Array.from(new Set([...selectedKnowledgeBaseIds, id]))
+          : selectedKnowledgeBaseIds.filter((kbId) => kbId !== id),
+      },
+    });
+  };
 
   const resize = React.useCallback(() => {
     const el = textareaRef.current;
@@ -307,6 +329,7 @@ export function ChatInput({
               <p className="line-clamp-2 text-xs text-muted-foreground">{quotedText}</p>
             </div>
             <button
+              type="button"
               onClick={onClearQuote}
               aria-label="取消引用"
               className="rounded-md p-1 text-muted-foreground hover:bg-accent"
@@ -325,6 +348,7 @@ export function ChatInput({
                 <img src={img.url} alt={img.alt ?? ""} className="size-16 rounded-xl border object-cover" />
                 {/* 编辑 mask 按钮 */}
                 <button
+                  type="button"
                   onClick={() => setEditingImage(img.url)}
                   aria-label="编辑图片"
                   className="absolute -left-1.5 -top-1.5 rounded-full bg-primary p-0.5 text-primary-foreground opacity-0 transition-opacity group-hover/att:opacity-100"
@@ -332,6 +356,7 @@ export function ChatInput({
                   <PencilIcon className="size-3" />
                 </button>
                 <button
+                  type="button"
                   onClick={() => {
                     revokeUrl(img.url); // C4
                     setImages((prev) => prev.filter((_, j) => j !== i));
@@ -351,6 +376,7 @@ export function ChatInput({
                   <p className="text-[10px] text-muted-foreground">{formatBytes(f.size)}</p>
                 </div>
                 <button
+                  type="button"
                   onClick={() => setFiles((prev) => prev.filter((_, j) => j !== i))}
                   aria-label="移除文件"
                   className="absolute -right-1.5 -top-1.5 rounded-full bg-foreground p-0.5 text-background opacity-0 transition-opacity group-hover/att:opacity-100"
@@ -399,6 +425,7 @@ export function ChatInput({
           />
           <Tooltip label="上传文件或图片">
             <button
+              type="button"
               onClick={() => fileInputRef.current?.click()}
               aria-label="上传文件或图片"
               className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
@@ -411,7 +438,7 @@ export function ChatInput({
           <Popover>
             <Tooltip label="工具">
               <PopoverTrigger asChild>
-                <button aria-label="工具" className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+                <button type="button" aria-label="工具" className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
                   <SlidersHorizontalIcon className="size-4" />
                 </button>
               </PopoverTrigger>
@@ -444,12 +471,45 @@ export function ChatInput({
                   onComposerChange({ tools: { ...composer.tools, codeRunner: v } })
                 }
               />
+              {knowledgeBases.length > 0 && (
+                <div className="mt-1 border-t pt-1.5">
+                  <p className="flex items-center gap-1.5 px-2 pb-1.5 text-xs font-medium text-muted-foreground">
+                    <BookOpenIcon className="size-3.5" />
+                    挂载知识库
+                  </p>
+                  <div className="max-h-40 overflow-y-auto pr-1">
+                    {knowledgeBases.map((kb) => {
+                      const checked = selectedKnowledgeBaseIds.includes(kb.id);
+                      return (
+                        <label
+                          key={kb.id}
+                          className="flex cursor-pointer items-start gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-accent"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(event) => toggleKnowledgeBase(kb.id, event.target.checked)}
+                            className="mt-0.5 size-4 shrink-0 accent-[var(--primary)]"
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate">{kb.name}</span>
+                            <span className="block text-xs text-muted-foreground">
+                              {kb.documentCount} 个文档 · {kb.totalChunks} 个片段
+                            </span>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </PopoverContent>
           </Popover>
 
           {/* Extended thinking */}
           <Tooltip label={composer.extendedThinking ? "深度思考：开" : "深度思考：关"}>
             <button
+              type="button"
               onClick={() =>
                 onComposerChange({ extendedThinking: !composer.extendedThinking })
               }
@@ -470,12 +530,16 @@ export function ChatInput({
           {/* 风格选择 */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <button className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+              <button
+                type="button"
+                aria-label={`回复风格：${currentStyle?.name ?? "标准"}`}
+                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
                 {currentStyle?.name ?? "标准"}
                 <ChevronDownIcon className="size-3" />
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-52">
+            <DropdownMenuContent align="end" className="max-h-[45dvh] w-52 overflow-y-auto">
               <DropdownMenuLabel>回复风格</DropdownMenuLabel>
               {styles.map((s) => (
                 <DropdownMenuItem
@@ -497,12 +561,16 @@ export function ChatInput({
           {/* 模型选择 */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <button className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent">
+              <button
+                type="button"
+                aria-label={`当前模型：${currentModel?.displayName ?? "未选择"}`}
+                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent"
+              >
                 {currentModel?.displayName}
                 <ChevronDownIcon className="size-3 text-muted-foreground" />
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-72">
+            <DropdownMenuContent align="end" className="max-h-[45dvh] w-72 overflow-y-auto">
               <DropdownMenuLabel>选择模型</DropdownMenuLabel>
               {/* 按 providerKind 分组展示 */}
               {Object.entries(
@@ -543,6 +611,7 @@ export function ChatInput({
                       {/* 设为默认 */}
                       {onSetDefaultModel && (
                         <button
+                          type="button"
                           onClick={(e) => {
                             e.stopPropagation();
                             onSetDefaultModel(m.id);
@@ -572,6 +641,7 @@ export function ChatInput({
           {/* 语音输入 */}
           <Tooltip label={recording ? "停止录音" : "语音输入"}>
             <button
+              type="button"
               onClick={toggleRecording}
               aria-label={recording ? "停止录音" : "语音输入"}
               className={cn(
@@ -589,6 +659,7 @@ export function ChatInput({
           {isStreaming ? (
             <Tooltip label="停止生成">
               <button
+                type="button"
                 onClick={onStop}
                 aria-label="停止生成"
                 className="rounded-full bg-foreground p-2 text-background transition-transform hover:scale-105 active:scale-95"
@@ -598,6 +669,7 @@ export function ChatInput({
             </Tooltip>
           ) : (
             <button
+              type="button"
               onClick={doSend}
               disabled={!canSend}
               aria-label="发送"
@@ -624,6 +696,7 @@ export function ChatInput({
         onOpenChange={(o) => !o && setEditingImage(null)}
         onEdited={(newUrl) => {
           if (editingImage) {
+            revokeUrl(editingImage);
             setImages((prev) =>
               prev.map((img) => (img.url === editingImage ? { ...img, url: newUrl, alt: "编辑后的图片" } : img))
             );
@@ -649,7 +722,11 @@ function ToolToggleRow({
     <label className="flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-2 transition-colors hover:bg-accent">
       <Icon className="size-4 text-muted-foreground" />
       <span className="flex-1 text-sm">{label}</span>
-      <Switch checked={checked} onCheckedChange={onChange} />
+      <Switch
+        aria-label={checked ? `关闭${label}` : `开启${label}`}
+        checked={checked}
+        onCheckedChange={onChange}
+      />
     </label>
   );
 }

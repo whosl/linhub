@@ -131,6 +131,8 @@ export const projects = pgTable("projects", {
   description: text("description"),
   instructions: text("instructions"),
   color: text("color"),
+  /** 项目级默认模型（新建会话时回退用） */
+  modelId: text("model_id"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
@@ -228,6 +230,10 @@ export const memories = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     content: text("content").notNull(),
     sourceConversationId: text("source_conversation_id"),
+    /** 项目级记忆：只在该项目内注入/检索；null=全局记忆 */
+    projectId: text("project_id").references(() => projects.id, {
+      onDelete: "cascade",
+    }),
     embedding: vector("embedding", { dimensions: 1536 }),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
@@ -443,9 +449,31 @@ export const settings = pgTable("settings", {
   defaultChatModelId: text("default_chat_model_id"),
   visionHelperModelId: text("vision_helper_model_id"),
   embeddingModelId: text("embedding_model_id"),
+
+  // ---- 引擎配置（文本/生图/TTS/ASR/搜索各自独立） ----
+  // 旧字段保留兼容：mimo* / tavily* 在新字段为空时回退使用
   tavilyApiKeyEncrypted: text("tavily_api_key_encrypted"),
   mimoApiKeyEncrypted: text("mimo_api_key_encrypted"),
   mimoTtsVoice: text("mimo_tts_voice"),
+
+  /** 图像生成引擎 */
+  imageGenBaseUrl: text("image_gen_base_url"),
+  imageGenApiKeyEncrypted: text("image_gen_api_key_encrypted"),
+  imageGenModel: text("image_gen_model"),
+
+  /** 语音合成 (TTS) 引擎 */
+  ttsBaseUrl: text("tts_base_url"),
+  ttsApiKeyEncrypted: text("tts_api_key_encrypted"),
+  ttsModel: text("tts_model"),
+
+  /** 语音识别 (ASR) 引擎 */
+  asrBaseUrl: text("asr_base_url"),
+  asrApiKeyEncrypted: text("asr_api_key_encrypted"),
+  asrModel: text("asr_model"),
+
+  /** 联网搜索引擎 */
+  searchBaseUrl: text("search_base_url"),
+
   skillMarketRequiresReview: boolean("skill_market_requires_review")
     .notNull()
     .default(true),

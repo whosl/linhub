@@ -7,7 +7,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AuthShell } from "@/components/auth/auth-shell";
-import { signUp } from "@/lib/auth-client";
+import { signUp, withAuthTimeout } from "@/lib/auth-client";
 import { toast } from "sonner";
 
 export default function RegisterPage() {
@@ -21,17 +21,24 @@ export default function RegisterPage() {
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    const { error } = await signUp.email({ email, password, name });
-    setLoading(false);
-    if (error) {
-      toast.error(error.message ?? "注册失败");
-      return;
+    try {
+      const { error } = await withAuthTimeout(
+        signUp.email({ email, password, name })
+      );
+      if (error) {
+        toast.error(error.message ?? "注册失败");
+        return;
+      }
+      toast.success("注册成功！");
+      // 注册即登录，同样要先清掉「未登录」时缓存的 null 再跳转。
+      queryClient.removeQueries({ queryKey: ["current-user"] });
+      router.push("/");
+      router.refresh();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "注册失败");
+    } finally {
+      setLoading(false);
     }
-    toast.success("注册成功！");
-    // 注册即登录，同样要先清掉「未登录」时缓存的 null 再跳转。
-    queryClient.removeQueries({ queryKey: ["current-user"] });
-    router.push("/");
-    router.refresh();
   };
 
   return (

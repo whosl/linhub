@@ -125,10 +125,13 @@ export async function POST(
       .set({ updatedAt: new Date() })
       .where(eq(schema.knowledgeBases.id, kbId));
   } catch (e) {
-    await db
-      .update(schema.kbDocuments)
-      .set({ status: "error" })
-      .where(eq(schema.kbDocuments.id, docId));
+    await db.transaction(async (tx) => {
+      await tx.delete(schema.kbChunks).where(eq(schema.kbChunks.documentId, docId));
+      await tx
+        .update(schema.kbDocuments)
+        .set({ status: "error", chunkCount: 0 })
+        .where(eq(schema.kbDocuments.id, docId));
+    });
     const [doc] = await db
       .select()
       .from(schema.kbDocuments)

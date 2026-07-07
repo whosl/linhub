@@ -16,7 +16,7 @@ export async function GET() {
   const rows = await db
     .select({
       project: schema.projects,
-      conversationCount: sql<number>`(select count(*)::int from conversations c where c.project_id = projects.id)`,
+      conversationCount: sql<number>`(select count(*)::int from conversations c where c.project_id = projects.id and c.archived = false)`,
     })
     .from(schema.projects)
     .where(eq(schema.projects.ownerId, session.user.id))
@@ -47,6 +47,7 @@ export async function POST(req: NextRequest) {
     description?: string;
     instructions?: string;
     color?: string;
+    modelId?: string;
   };
   if (!body.name?.trim()) return Response.json({ error: "名称不能为空" }, { status: 400 });
 
@@ -66,6 +67,7 @@ export async function POST(req: NextRequest) {
         description: body.description,
         instructions: body.instructions,
         color: body.color,
+        modelId: body.modelId || null,
         updatedAt: new Date(),
       })
       .where(eq(schema.projects.id, body.id));
@@ -77,6 +79,7 @@ export async function POST(req: NextRequest) {
       description: body.description,
       instructions: body.instructions,
       color: body.color,
+      modelId: body.modelId || null,
     });
   }
   const [row] = await db.select().from(schema.projects).where(eq(schema.projects.id, id));

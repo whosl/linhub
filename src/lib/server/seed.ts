@@ -2,17 +2,28 @@ import { eq } from "drizzle-orm";
 import { db, schema } from "./db";
 
 let seeded = false;
+let seedInFlight: Promise<void> | null = null;
 
 /** 幂等初始化：内置风格、默认供应商与模型、全局设置、默认套餐 */
 export async function ensureSeeded() {
   if (seeded) return;
-  seeded = true;
+  if (seedInFlight) return seedInFlight;
 
+  seedInFlight = seedDatabase().finally(() => {
+    seedInFlight = null;
+  });
+  return seedInFlight;
+}
+
+async function seedDatabase() {
   const [existingSettings] = await db
     .select({ id: schema.settings.id })
     .from(schema.settings)
     .limit(1);
-  if (existingSettings) return;
+  if (existingSettings) {
+    seeded = true;
+    return;
+  }
 
   await db.transaction(async (tx) => {
     await tx.insert(schema.settings).values({ id: "global" }).onConflictDoNothing();
@@ -34,6 +45,7 @@ export async function ensureSeeded() {
       { id: "pv-zhipu", kind: "zhipu" as const, name: "智谱 GLM" },
       { id: "pv-deepseek", kind: "deepseek" as const, name: "DeepSeek" },
       { id: "pv-xiaomi", kind: "xiaomi" as const, name: "Xiaomi MiMo" },
+      { id: "pv-xiaomi-token-plan", kind: "xiaomi-token-plan" as const, name: "Xiaomi MiMo Token Plan" },
     ];
     await tx.insert(schema.providers).values(providers).onConflictDoNothing();
 
@@ -149,6 +161,7 @@ export async function ensureSeeded() {
       ])
       .onConflictDoNothing();
   });
+  seeded = true;
 }
 
 /** 供应商是否已配置密钥（决定聊天走真实模型还是提示配置） */

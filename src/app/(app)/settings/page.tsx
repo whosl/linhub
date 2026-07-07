@@ -12,7 +12,7 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import { getDataService } from "@/lib/data";
-import type { McpServer } from "@/lib/types";
+import type { ChatStyle, McpServer, MemoryEntry } from "@/lib/types";
 import { formatRelativeTime } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input, Textarea } from "@/components/ui/input";
@@ -31,6 +31,7 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -43,7 +44,7 @@ export default function SettingsPage() {
     <PageContainer>
       <PageHeader title="设置" description="账户、记忆、回复风格与连接器" />
       <Tabs defaultValue="account">
-        <TabsList>
+        <TabsList className="mb-1">
           <TabsTrigger value="account">账户</TabsTrigger>
           <TabsTrigger value="memory">记忆</TabsTrigger>
           <TabsTrigger value="styles">回复风格</TabsTrigger>
@@ -90,13 +91,13 @@ function AccountTab() {
 
   return (
     <div className="space-y-4">
-      <Card className="flex items-center gap-4 p-5">
+      <Card className="flex flex-wrap items-center gap-4 p-5">
         <Avatar name={user.name} src={user.avatarUrl} className="size-14 text-xl" />
-        <div className="flex-1">
-          <p className="font-medium">{user.name}</p>
-          <p className="text-sm text-muted-foreground">{user.email}</p>
+        <div className="min-w-0 flex-1">
+          <p className="truncate font-medium">{user.name}</p>
+          <p className="truncate text-sm text-muted-foreground">{user.email}</p>
         </div>
-        {user.role === "admin" && <Badge>管理员</Badge>}
+        {user.role === "admin" && <Badge className="shrink-0">管理员</Badge>}
       </Card>
 
       <Card className="space-y-4 p-5">
@@ -104,8 +105,12 @@ function AccountTab() {
           <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
             昵称
           </label>
-          <div className="flex gap-2">
-            <Input value={name} onChange={(e) => setName(e.target.value)} />
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="min-w-0 flex-1"
+            />
             <Button onClick={save} disabled={!name.trim() || name === user.name}>
               保存
             </Button>
@@ -148,6 +153,8 @@ function AccountTab() {
 function MemoryTab() {
   const queryClient = useQueryClient();
   const [newMemory, setNewMemory] = React.useState("");
+  const [deleteTarget, setDeleteTarget] = React.useState<MemoryEntry | null>(null);
+  const [deleting, setDeleting] = React.useState(false);
   const { data: memories = [] } = useQuery({
     queryKey: ["memories"],
     queryFn: () => getDataService().listMemories(),
@@ -161,9 +168,19 @@ function MemoryTab() {
     toast.success("记忆已添加");
   };
 
-  const remove = async (id: string) => {
-    await getDataService().deleteMemory(id);
-    queryClient.invalidateQueries({ queryKey: ["memories"] });
+  const remove = async () => {
+    if (!deleteTarget || deleting) return;
+    setDeleting(true);
+    try {
+      await getDataService().deleteMemory(deleteTarget.id);
+      queryClient.invalidateQueries({ queryKey: ["memories"] });
+      setDeleteTarget(null);
+      toast.success("记忆已删除");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "删除失败");
+    } finally {
+      setDeleting(false);
+    }
   };
 
   return (
@@ -171,12 +188,13 @@ function MemoryTab() {
       <p className="text-sm text-muted-foreground">
         模型会在对话中自动记录关于你的偏好与事实，也会在新对话中回忆相关内容。你可以随时删除任何一条。
       </p>
-      <div className="flex gap-2">
+      <div className="flex flex-col gap-2 sm:flex-row">
         <Input
           value={newMemory}
           onChange={(e) => setNewMemory(e.target.value)}
           placeholder="手动添加一条记忆，例如：我偏好简洁的回答"
           onKeyDown={(e) => e.key === "Enter" && add()}
+          className="min-w-0 flex-1"
         />
         <Button onClick={add} disabled={!newMemory.trim()}>
           <PlusIcon /> 添加
@@ -200,7 +218,9 @@ function MemoryTab() {
                 </p>
               </div>
               <button
-                onClick={() => remove(m.id)}
+                type="button"
+                aria-label={`删除记忆「${m.content.slice(0, 32)}」`}
+                onClick={() => setDeleteTarget(m)}
                 className="rounded-md p-1.5 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
               >
                 <Trash2Icon className="size-4" />
@@ -209,6 +229,16 @@ function MemoryTab() {
           ))}
         </div>
       )}
+      <DeleteConfirmDialog
+        open={!!deleteTarget}
+        title="删除记忆"
+        description={`将删除这条记忆：「${deleteTarget?.content ?? ""}」。此操作不可撤销。`}
+        deleting={deleting}
+        onOpenChange={(open) => {
+          if (!open && !deleting) setDeleteTarget(null);
+        }}
+        onConfirm={remove}
+      />
     </div>
   );
 }
@@ -219,6 +249,8 @@ function StylesTab() {
   const queryClient = useQueryClient();
   const [editorOpen, setEditorOpen] = React.useState(false);
   const [form, setForm] = React.useState({ name: "", description: "", prompt: "" });
+  const [deleteTarget, setDeleteTarget] = React.useState<ChatStyle | null>(null);
+  const [deleting, setDeleting] = React.useState(false);
   const { data: styles = [] } = useQuery({
     queryKey: ["styles"],
     queryFn: () => getDataService().listStyles(),
@@ -232,18 +264,28 @@ function StylesTab() {
     toast.success("风格已创建");
   };
 
-  const remove = async (id: string) => {
-    await getDataService().deleteStyle(id);
-    queryClient.invalidateQueries({ queryKey: ["styles"] });
+  const remove = async () => {
+    if (!deleteTarget || deleting) return;
+    setDeleting(true);
+    try {
+      await getDataService().deleteStyle(deleteTarget.id);
+      queryClient.invalidateQueries({ queryKey: ["styles"] });
+      setDeleteTarget(null);
+      toast.success("风格已删除");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "删除失败");
+    } finally {
+      setDeleting(false);
+    }
   };
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <p className="text-sm text-muted-foreground">
           风格决定回复的语气与详略，可在输入框随时切换。
         </p>
-        <Button size="sm" onClick={() => setEditorOpen(true)}>
+        <Button size="sm" onClick={() => setEditorOpen(true)} className="self-start">
           <PlusIcon /> 自定义风格
         </Button>
       </div>
@@ -256,7 +298,9 @@ function StylesTab() {
                 <Badge variant="outline">内置</Badge>
               ) : (
                 <button
-                  onClick={() => remove(s.id)}
+                  type="button"
+                  aria-label={`删除回复风格「${s.name}」`}
+                  onClick={() => setDeleteTarget(s)}
                   className="rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
                 >
                   <Trash2Icon className="size-3.5" />
@@ -301,6 +345,16 @@ function StylesTab() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <DeleteConfirmDialog
+        open={!!deleteTarget}
+        title="删除回复风格"
+        description={`将删除回复风格「${deleteTarget?.name ?? ""}」。此操作不可撤销。`}
+        deleting={deleting}
+        onOpenChange={(open) => {
+          if (!open && !deleting) setDeleteTarget(null);
+        }}
+        onConfirm={remove}
+      />
     </div>
   );
 }
@@ -311,6 +365,8 @@ function McpTab() {
   const queryClient = useQueryClient();
   const [addOpen, setAddOpen] = React.useState(false);
   const [testing, setTesting] = React.useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = React.useState<McpServer | null>(null);
+  const [deleting, setDeleting] = React.useState(false);
   const [form, setForm] = React.useState({
     name: "",
     url: "",
@@ -339,9 +395,19 @@ function McpTab() {
     else toast.error(result.error ?? "连接失败");
   };
 
-  const remove = async (id: string) => {
-    await getDataService().deleteMcpServer(id);
-    queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+  const remove = async () => {
+    if (!deleteTarget || deleting) return;
+    setDeleting(true);
+    try {
+      await getDataService().deleteMcpServer(deleteTarget.id);
+      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+      setDeleteTarget(null);
+      toast.success("MCP 服务器已删除");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "删除失败");
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const toggle = async (server: McpServer) => {
@@ -351,11 +417,11 @@ function McpTab() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <p className="text-sm text-muted-foreground">
           添加你自己的 MCP 服务器，其工具仅对你可用，可在对话工具面板中启停。
         </p>
-        <Button size="sm" onClick={() => setAddOpen(true)}>
+        <Button size="sm" onClick={() => setAddOpen(true)} className="self-start">
           <PlusIcon /> 添加服务器
         </Button>
       </div>
@@ -370,9 +436,9 @@ function McpTab() {
         <div className="space-y-2">
           {servers.map((s) => (
             <Card key={s.id} className="group p-4">
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3">
                 <PlugIcon className="size-4 shrink-0 text-primary" />
-                <div className="min-w-0 flex-1">
+                <div className="min-w-0 flex-1 basis-48">
                   <p className="flex items-center gap-2 text-sm font-medium">
                     {s.name}
                     {s.status === "connected" && (
@@ -381,25 +447,33 @@ function McpTab() {
                   </p>
                   <p className="truncate text-xs text-muted-foreground">{s.url}</p>
                 </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => test(s.id)}
-                  disabled={testing === s.id}
-                >
-                  {testing === s.id ? (
-                    <Loader2Icon className="animate-spin" />
-                  ) : (
-                    "测试连接"
-                  )}
-                </Button>
-                <Switch checked={s.enabled} onCheckedChange={() => toggle(s)} />
-                <button
-                  onClick={() => remove(s.id)}
-                  className="rounded-md p-1.5 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
-                >
-                  <Trash2Icon className="size-4" />
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => test(s.id)}
+                    disabled={testing === s.id}
+                  >
+                    {testing === s.id ? (
+                      <Loader2Icon className="animate-spin" />
+                    ) : (
+                      "测试连接"
+                    )}
+                  </Button>
+                  <Switch
+                    checked={s.enabled}
+                    onCheckedChange={() => toggle(s)}
+                    aria-label={`${s.enabled ? "停用" : "启用"} MCP 服务器「${s.name}」`}
+                  />
+                  <button
+                    type="button"
+                    aria-label={`删除 MCP 服务器「${s.name}」`}
+                    onClick={() => setDeleteTarget(s)}
+                    className="rounded-md p-1.5 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
+                  >
+                    <Trash2Icon className="size-4" />
+                  </button>
+                </div>
               </div>
               {s.tools.length > 0 && (
                 <div className="mt-2.5 flex flex-wrap gap-1.5 pl-7">
@@ -452,6 +526,54 @@ function McpTab() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <DeleteConfirmDialog
+        open={!!deleteTarget}
+        title="删除 MCP 服务器"
+        description={`将删除 MCP 服务器「${deleteTarget?.name ?? ""}」。此操作不可撤销。`}
+        deleting={deleting}
+        onOpenChange={(open) => {
+          if (!open && !deleting) setDeleteTarget(null);
+        }}
+        onConfirm={remove}
+      />
     </div>
+  );
+}
+
+function DeleteConfirmDialog({
+  open,
+  title,
+  description,
+  deleting,
+  onOpenChange,
+  onConfirm,
+}: {
+  open: boolean;
+  title: string;
+  description: string;
+  deleting: boolean;
+  onOpenChange: (open: boolean) => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent aria-describedby="settings-delete-description">
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription id="settings-delete-description">
+            {description}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="ghost" disabled={deleting} onClick={() => onOpenChange(false)}>
+            取消
+          </Button>
+          <Button variant="destructive" disabled={deleting} onClick={onConfirm}>
+            {deleting ? <Loader2Icon className="animate-spin" /> : <Trash2Icon />}
+            删除
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

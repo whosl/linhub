@@ -4,7 +4,7 @@ import { getSession } from "@/lib/server/auth";
 import { ensureSeeded } from "@/lib/server/seed";
 
 export async function PATCH(req: Request) {
-  const session = await getSession();
+  const session = await getSession().catch(() => null);
   if (!session) return Response.json({ error: "unauthorized" }, { status: 401 });
   const patch = (await req.json()) as {
     name?: string;
@@ -27,8 +27,16 @@ export async function PATCH(req: Request) {
 }
 
 export async function GET() {
-  await ensureSeeded();
-  const session = await getSession();
+  let session;
+  try {
+    await ensureSeeded();
+    session = await getSession();
+  } catch {
+    return Response.json(
+      { error: "服务器暂时无法连接数据库，请稍后重试" },
+      { status: 503 }
+    );
+  }
   if (!session) return Response.json(null);
 
   const [user] = await db

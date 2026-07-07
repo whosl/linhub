@@ -44,8 +44,21 @@ const ModelCreateSchema = z.object({
   tier: z.enum(["free", "pro"]).default("free"),
   sortOrder: z.number().int().default(0),
 });
-const ModelPatchSchema = ModelCreateSchema.partial().extend({
+const ModelPatchSchema = z.object({
   id: z.string().min(1),
+  providerId: z.string().min(1).optional(),
+  slug: z.string().min(1).optional(),
+  displayName: z.string().min(1).optional(),
+  description: z.string().nullable().optional(),
+  capabilities: z.array(z.string()).optional(),
+  enabled: z.boolean().optional(),
+  inputPricePerM: z.number().int().nonnegative().optional(),
+  outputPricePerM: z.number().int().nonnegative().optional(),
+  pricePerImage: z.number().int().nonnegative().nullable().optional(),
+  contextWindow: z.number().int().positive().optional(),
+  maxOutputTokens: z.number().int().positive().nullable().optional(),
+  tier: z.enum(["free", "pro"]).optional(),
+  sortOrder: z.number().int().optional(),
 });
 const ModelUpsertSchema = z.union([ModelPatchSchema, ModelCreateSchema]);
 type ModelCreateInput = z.infer<typeof ModelCreateSchema>;

@@ -1,5 +1,7 @@
 import type {
   AppSettings,
+  EngineTestInput,
+  EngineTestResult,
   Artifact,
   ChatStyle,
   Conversation,
@@ -13,6 +15,7 @@ import type {
   Order,
   Plan,
   Project,
+  ProjectFile,
   Provider,
   RemoteModel,
   SendMessageInput,
@@ -21,6 +24,14 @@ import type {
   UsageRecord,
   User,
 } from "@/lib/types";
+
+export type ProjectPatch = Partial<{
+  name: string;
+  description: string | null;
+  instructions: string | null;
+  color: string | null;
+  modelId: string | null;
+}>;
 
 /**
  * 数据服务接口 — UI 只依赖此接口。
@@ -49,13 +60,18 @@ export interface DataService {
   listMessages(conversationId: string): Promise<Message[]>;
   updateConversation(
     id: string,
-    patch: Partial<Pick<Conversation, "title" | "pinned" | "archived" | "projectId" | "currentLeafId" | "modelId">>
+    patch: Partial<
+      Pick<Conversation, "title" | "pinned" | "archived" | "currentLeafId" | "modelId"> & {
+        projectId: string | null;
+      }
+    >
   ): Promise<Conversation>;
   deleteConversation(id: string): Promise<void>;
   searchConversations(query: string): Promise<Conversation[]>;
 
   // ---- 聊天（流式） ----
   sendMessage(input: SendMessageInput): AsyncIterable<StreamEvent>;
+  streamConversation(conversationId: string): AsyncIterable<StreamEvent>;
   stopGeneration(conversationId?: string): Promise<void>;
   regenerate(
     conversationId: string,
@@ -64,6 +80,11 @@ export interface DataService {
   ): AsyncIterable<StreamEvent>;
   setFeedback(messageId: string, feedback: "up" | "down" | null): Promise<void>;
   replaceMessageImage(messageId: string, oldUrl: string, newUrl: string): Promise<void>;
+  editImage(input: {
+    image: string;
+    mask?: string | null;
+    prompt: string;
+  }): Promise<{ url: string }>;
 
   // ---- Artifacts ----
   listArtifacts(conversationId: string): Promise<Artifact[]>;
@@ -74,8 +95,11 @@ export interface DataService {
   listProjects(): Promise<Project[]>;
   getProject(id: string): Promise<Project | null>;
   saveProject(p: Partial<Project> & { name: string }): Promise<Project>;
+  updateProject(id: string, patch: ProjectPatch): Promise<Project>;
   deleteProject(id: string): Promise<void>;
   listProjectConversations(projectId: string): Promise<Conversation[]>;
+  uploadProjectFile(projectId: string, file: File): Promise<ProjectFile>;
+  deleteProjectFile(fileId: string): Promise<void>;
 
   // ---- 记忆 ----
   listMemories(): Promise<MemoryEntry[]>;
@@ -130,7 +154,16 @@ export interface AdminService {
   /** 批量添加选中的远端模型，返回新增数量 */
   addRemoteModels(providerId: string, slugs: string[]): Promise<{ added: number }>;
   getSettings(): Promise<AppSettings>;
-  saveSettings(patch: Partial<AppSettings> & { tavilyApiKey?: string; mimoApiKey?: string }): Promise<AppSettings>;
+  saveSettings(
+    patch: Partial<AppSettings> & {
+      tavilyApiKey?: string;
+      mimoApiKey?: string;
+      imageGenApiKey?: string;
+      ttsApiKey?: string;
+      asrApiKey?: string;
+    }
+  ): Promise<AppSettings>;
+  testEngineConnection(input: EngineTestInput): Promise<EngineTestResult>;
   listUsers(): Promise<User[]>;
   grantBalance(userId: string, amountCents: number, note?: string): Promise<void>;
   listAllPlans(): Promise<Plan[]>;

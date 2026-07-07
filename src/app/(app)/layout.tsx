@@ -54,7 +54,13 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
               className="absolute left-3 top-3 z-20 hidden md:block"
             >
               <Tooltip label="展开侧栏" shortcut="⌘\">
-                <Button variant="ghost" size="icon-sm" onClick={toggleSidebar}>
+                <Button
+                  type="button"
+                  aria-label="展开侧栏"
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={toggleSidebar}
+                >
                   <PanelLeftIcon />
                 </Button>
               </Tooltip>
@@ -65,6 +71,8 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         {/* 移动端顶栏按钮 */}
         <div className="absolute left-3 top-3 z-20 md:hidden">
           <Button
+            type="button"
+            aria-label="打开侧栏"
             variant="ghost"
             size="icon-sm"
             onClick={() => setMobileSidebar(true)}

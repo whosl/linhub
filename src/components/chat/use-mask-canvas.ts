@@ -2,6 +2,34 @@
 
 import * as React from "react";
 
+type ImageSize = { w: number; h: number };
+
+export function fitImageSize(size: ImageSize, maxWidth: number, maxHeight: number) {
+  if (size.w <= 0 || size.h <= 0 || maxWidth <= 0 || maxHeight <= 0) {
+    return { w: 1, h: 1 };
+  }
+  const scale = Math.min(1, maxWidth / size.w, maxHeight / size.h);
+  return {
+    w: Math.max(1, Math.round(size.w * scale)),
+    h: Math.max(1, Math.round(size.h * scale)),
+  };
+}
+
+export function useViewportSize(enabled: boolean) {
+  const [size, setSize] = React.useState({ w: 0, h: 0 });
+
+  React.useEffect(() => {
+    if (!enabled) return;
+
+    const update = () => setSize({ w: window.innerWidth, h: window.innerHeight });
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, [enabled]);
+
+  return size;
+}
+
 /**
  * Mask 画布逻辑（供 ImageLightbox 和 ImageMaskEditor 共用）。
  * 双层 canvas：底层画原图、上层画笔涂抹。
@@ -23,9 +51,11 @@ export function useMaskCanvas(
   // 加载原图到底层 canvas
   React.useEffect(() => {
     if (!open) return;
+    let cancelled = false;
     const img = new Image();
     img.crossOrigin = "anonymous";
     img.onload = () => {
+      if (cancelled) return;
       const maxDim = 1024;
       let { width, height } = img;
       if (width > maxDim || height > maxDim) {
@@ -49,6 +79,9 @@ export function useMaskCanvas(
       hasDrawnRef.current = false;
     };
     img.src = imageUrl;
+    return () => {
+      cancelled = true;
+    };
   }, [open, imageUrl, baseCanvasRef, maskCanvasRef]);
 
   const getPos = (e: React.PointerEvent) => {

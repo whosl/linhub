@@ -1,10 +1,11 @@
 import { NextRequest } from "next/server";
 import { requireSession } from "@/lib/server/auth";
 import { rateLimit } from "@/lib/server/rate-limit";
-import { getMimoConfig } from "@/lib/server/voice";
+import { getAsrConfig } from "@/lib/server/engine-config";
 import { formatUpstreamError } from "@/lib/server/upstream-error";
 
 export const maxDuration = 120;
+const ASR_TIMEOUT_MS = 60_000;
 
 /**
  * MiMo ASR（mimo-v2.5-asr）。
@@ -34,7 +35,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const { apiKey, baseURL } = await getMimoConfig();
+    const { apiKey, baseURL, model } = await getAsrConfig();
 
     // 音频转 base64（MiMo ASR 要求 input_audio 格式）
     const audioBuffer = Buffer.from(await audio.arrayBuffer());
@@ -50,7 +51,7 @@ export async function POST(req: NextRequest) {
         "api-key": apiKey,
       },
       body: JSON.stringify({
-        model: "mimo-v2.5-asr",
+        model,
         messages: [
           {
             role: "user",
@@ -64,6 +65,7 @@ export async function POST(req: NextRequest) {
           },
         ],
       }),
+      signal: AbortSignal.timeout(ASR_TIMEOUT_MS),
     });
 
     if (!res.ok) {
@@ -80,8 +82,26 @@ export async function POST(req: NextRequest) {
     return Response.json({ text });
   } catch (e) {
     return Response.json(
-      { error: e instanceof Error ? e.message : "ASR 失败" },
-      { status: 500 }
+      {
+        error: isTimeoutError(e)
+          ? "ASR 服务响应超时，请稍后重试"
+          : e instanceof Error
+            ? e.message
+            : "ASR 失败",
+      },
+      { status: isTimeoutError(e) ? 504 : 500 }
     );
   }
+}
+
+function isTimeoutError(e: unknown) {
+  if (!e || typeof e !== "object") return false;
+  const maybeError = e as { name?: unknown; message?: unknown };
+  const name = typeof maybeError.name === "string" ? maybeError.name : "";
+  const message = typeof maybeError.message === "string" ? maybeError.message : "";
+  return (
+    name === "TimeoutError" ||
+    name === "AbortError" ||
+    /timeout|aborted/i.test(message)
+  );
 }

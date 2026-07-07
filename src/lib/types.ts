@@ -173,12 +173,19 @@ export interface FilePart {
   url?: string;
 }
 
+/** 内部元数据：记录本轮请求启用的工具，用于重新生成时恢复上下文；前端不渲染。 */
+export interface ToolConfigPart {
+  type: "tool-config";
+  tools: ChatToolToggles;
+}
+
 export type MessagePart =
   | TextPart
   | ReasoningPart
   | ToolCallPart
   | ImagePart
-  | FilePart;
+  | FilePart
+  | ToolConfigPart;
 
 export interface Message {
   id: string;
@@ -202,7 +209,7 @@ export interface Conversation {
   title: string;
   projectId?: string;
   skillId?: string;
-  modelId: string;
+  modelId?: string;
   styleId?: string;
   pinned: boolean;
   archived: boolean;
@@ -231,6 +238,7 @@ export interface Project {
   description?: string;
   instructions?: string;
   color?: string;
+  modelId?: string;
   createdAt: string;
   updatedAt: string;
   conversationCount: number;
@@ -427,6 +435,18 @@ export interface AppSettings {
   visionHelperModelId?: string;
   /** embedding 模型 */
   embeddingModelId?: string;
+  // ---- 引擎配置 ----
+  imageGenBaseUrl?: string;
+  imageGenApiKeyMasked?: string;
+  imageGenModel?: string;
+  ttsBaseUrl?: string;
+  ttsApiKeyMasked?: string;
+  ttsModel?: string;
+  asrBaseUrl?: string;
+  asrApiKeyMasked?: string;
+  asrModel?: string;
+  searchBaseUrl?: string;
+  // 旧字段（兼容）
   tavilyApiKeyMasked?: string;
   mimoApiKeyMasked?: string;
   mimoTtsVoice?: string;
@@ -434,6 +454,22 @@ export interface AppSettings {
   skillMarketRequiresReview: boolean;
   registrationEnabled: boolean;
 }
+
+export type EngineId = "image" | "tts" | "asr" | "search";
+
+export interface EngineTestInput {
+  engine: EngineId;
+  config: {
+    baseUrl?: string;
+    model?: string;
+    voice?: string;
+    apiKey?: string;
+  };
+}
+
+export type EngineTestResult =
+  | { ok: true; message: string }
+  | { ok: false; error: string };
 
 // ---------- 聊天发送与流式事件 ----------
 
@@ -448,6 +484,8 @@ export interface ChatToolToggles {
 }
 
 export interface SendMessageInput {
+  /** 客户端生成的本次请求 id；用于新会话拿到 conversationId 前停止后端生成。 */
+  clientGenerationId?: string;
   conversationId?: string;
   /** 编辑重发/分支时指定父消息 */
   parentId?: string | null;
@@ -455,7 +493,7 @@ export interface SendMessageInput {
   attachments?: FilePart[];
   images?: ImagePart[];
   quotedText?: string;
-  modelId: string;
+  modelId?: string;
   styleId?: string;
   extendedThinking: boolean;
   tools: ChatToolToggles;
@@ -468,6 +506,7 @@ export type StreamEvent =
   | { type: "conversation-created"; conversation: Conversation }
   | { type: "user-message"; message: Message }
   | { type: "assistant-start"; message: Message }
+  | { type: "assistant-snapshot"; message: Message }
   | { type: "reasoning-delta"; messageId: string; delta: string }
   | { type: "reasoning-done"; messageId: string; durationMs: number }
   | { type: "text-delta"; messageId: string; delta: string }

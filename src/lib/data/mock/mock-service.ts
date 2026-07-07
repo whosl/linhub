@@ -1,12 +1,14 @@
 import type {
   AdminService,
   DataService,
+  ProjectPatch,
 } from "@/lib/data/service";
 import type {
   AppSettings,
   Artifact,
   ChatStyle,
   Conversation,
+  EngineTestInput,
   KnowledgeBase,
   KnowledgeDocument,
   LedgerEntry,
@@ -17,6 +19,7 @@ import type {
   Order,
   Plan,
   Project,
+  ProjectFile,
   Provider,
   SendMessageInput,
   Skill,
@@ -163,12 +166,34 @@ class MockAdminService implements AdminService {
     await sleep(100);
     return { ...this.s.settings };
   }
-  async saveSettings(patch: Partial<AppSettings> & { tavilyApiKey?: string; mimoApiKey?: string }) {
+  async saveSettings(
+    patch: Partial<AppSettings> & {
+      tavilyApiKey?: string;
+      mimoApiKey?: string;
+      imageGenApiKey?: string;
+      ttsApiKey?: string;
+      asrApiKey?: string;
+    }
+  ) {
     await sleep(200);
     Object.assign(this.s.settings, patch);
     if (patch.tavilyApiKey) this.s.settings.tavilyApiKeyMasked = maskKey(patch.tavilyApiKey);
     if (patch.mimoApiKey) this.s.settings.mimoApiKeyMasked = maskKey(patch.mimoApiKey);
+    if (patch.imageGenApiKey)
+      this.s.settings.imageGenApiKeyMasked = maskKey(patch.imageGenApiKey);
+    if (patch.ttsApiKey) this.s.settings.ttsApiKeyMasked = maskKey(patch.ttsApiKey);
+    if (patch.asrApiKey) this.s.settings.asrApiKeyMasked = maskKey(patch.asrApiKey);
     return { ...this.s.settings };
+  }
+  async testEngineConnection(input: EngineTestInput) {
+    await sleep(500);
+    const labels: Record<EngineTestInput["engine"], string> = {
+      image: "图像生成",
+      tts: "TTS",
+      asr: "ASR",
+      search: "联网搜索",
+    };
+    return { ok: true as const, message: `${labels[input.engine]}连接成功（Mock）` };
   }
   async listUsers() {
     await sleep(120);
@@ -252,6 +277,16 @@ class MockStore {
 export class MockDataService implements DataService {
   private s = new MockStore();
   admin: AdminService = new MockAdminService(this.s);
+
+  private projectWithConversationCount(project: Project): Project {
+    return {
+      ...project,
+      conversationCount: this.s.conversations.filter(
+        (conversation) => conversation.projectId === project.id && !conversation.archived
+      ).length,
+      files: [...project.files],
+    };
+  }
 
   // ---- 用户 ----
   async getCurrentUser() {
@@ -346,11 +381,19 @@ export class MockDataService implements DataService {
   async *sendMessage(input: SendMessageInput): AsyncIterable<StreamEvent> {
     let conversation: Conversation;
     const isNew = !input.conversationId;
+    const effectiveModelId =
+      input.modelId ||
+      (input.projectId
+        ? this.s.projects.find((p) => p.id === input.projectId)?.modelId
+        : undefined) ||
+      this.s.user.defaultModelId ||
+      (this.s.models.find((m) => m.enabled && !m.capabilities.includes("image-generation"))?.id ??
+        "");
     if (isNew) {
       conversation = {
         id: `c-${uid()}`,
         title: "新对话",
-        modelId: input.modelId,
+        modelId: effectiveModelId,
         projectId: input.projectId,
         skillId: input.skillId,
         styleId: input.styleId,
@@ -388,7 +431,7 @@ export class MockDataService implements DataService {
     msgs.push(userMessage);
     yield { type: "user-message", message: { ...userMessage } };
 
-    yield* this.streamAssistant(conversation, userMessage.id, input.modelId, input.text, input.extendedThinking);
+    yield* this.streamAssistant(conversation, userMessage.id, effectiveModelId, input.text, input.extendedThinking);
 
     if (isNew) {
       await sleep(300);
@@ -489,12 +532,17 @@ export class MockDataService implements DataService {
       costCents: 4,
       createdAt: nowIso(),
     });
+    yield { type: "assistant-snapshot", message: { ...assistant } };
     yield { type: "done", messageId: assistant.id, usage: assistant.usage, status: finalStatus };
   }
 
   async stopGeneration(conversationId?: string) {
     // I11: 新会话用固定哨兵键登记，便于首条响应期间也能停止
     this.s.aborted.add(conversationId ?? "__new_conversation__");
+  }
+
+  async *streamConversation(): AsyncIterable<StreamEvent> {
+    // Mock 模式的生成只存在于当前 async generator；真实 API 才需要跨页面续接。
   }
 
   async *regenerate(
@@ -513,7 +561,12 @@ export class MockDataService implements DataService {
     yield* this.streamAssistant(
       conversation,
       target.parentId,
-      modelId ?? target.modelId ?? conversation.modelId,
+      modelId ??
+        target.modelId ??
+        conversation.modelId ??
+        this.s.user.defaultModelId ??
+        this.s.models.find((m) => m.enabled && !m.capabilities.includes("image-generation"))?.id ??
+        "",
       userText,
       true
     );
@@ -538,6 +591,12 @@ export class MockDataService implements DataService {
       );
     }
   }
+  async editImage(input: { image: string; mask?: string | null; prompt: string }) {
+    await sleep(600);
+    void input.mask;
+    void input.prompt;
+    return { url: input.image };
+  }
 
   // ---- Artifacts ----
   async listArtifacts(conversationId: string) {
@@ -559,11 +618,12 @@ export class MockDataService implements DataService {
   // ---- Projects ----
   async listProjects() {
     await sleep(100);
-    return [...this.s.projects];
+    return this.s.projects.map((project) => this.projectWithConversationCount(project));
   }
   async getProject(id: string) {
     await sleep(60);
-    return this.s.projects.find((p) => p.id === id) ?? null;
+    const project = this.s.projects.find((p) => p.id === id);
+    return project ? this.projectWithConversationCount(project) : null;
   }
   async saveProject(p: Partial<Project> & { name: string }) {
     await sleep(200);
@@ -584,7 +644,19 @@ export class MockDataService implements DataService {
       files: [],
     };
     this.s.projects.push(created);
-    return { ...created };
+    return this.projectWithConversationCount(created);
+  }
+  async updateProject(id: string, patch: ProjectPatch) {
+    await sleep(150);
+    const existing = this.s.projects.find((x) => x.id === id);
+    if (!existing) throw new Error("项目不存在");
+    if ("name" in patch && patch.name !== undefined) existing.name = patch.name;
+    if ("description" in patch) existing.description = patch.description ?? undefined;
+    if ("instructions" in patch) existing.instructions = patch.instructions ?? undefined;
+    if ("color" in patch) existing.color = patch.color ?? undefined;
+    if ("modelId" in patch) existing.modelId = patch.modelId ?? undefined;
+    existing.updatedAt = nowIso();
+    return this.projectWithConversationCount(existing);
   }
   async deleteProject(id: string) {
     await sleep(150);
@@ -595,7 +667,33 @@ export class MockDataService implements DataService {
   }
   async listProjectConversations(projectId: string) {
     await sleep(100);
-    return this.s.conversations.filter((c) => c.projectId === projectId);
+    return this.s.conversations.filter((c) => c.projectId === projectId && !c.archived);
+  }
+  async uploadProjectFile(projectId: string, file: File): Promise<ProjectFile> {
+    await sleep(300);
+    const project = this.s.projects.find((p) => p.id === projectId);
+    if (!project) throw new Error("项目不存在");
+    const created: ProjectFile = {
+      id: `att-${uid()}`,
+      name: file.name,
+      mimeType: file.type || "application/octet-stream",
+      size: file.size,
+      createdAt: nowIso(),
+    };
+    project.files = [created, ...project.files];
+    project.updatedAt = nowIso();
+    return { ...created };
+  }
+  async deleteProjectFile(fileId: string): Promise<void> {
+    await sleep(150);
+    for (const project of this.s.projects) {
+      const before = project.files.length;
+      project.files = project.files.filter((f) => f.id !== fileId);
+      if (project.files.length !== before) {
+        project.updatedAt = nowIso();
+        return;
+      }
+    }
   }
 
   // ---- 记忆 ----

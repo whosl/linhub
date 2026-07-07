@@ -38,5 +38,5 @@
     <line x1="500" y1="0" x2="480" y2="500"/>
     <line x1="700" y1="0" x2="720" y2="500"/>
   </g>
-  <text x="400" y="470" text-anchor="middle" font-family="monospace" font-size="13" fill="#8be9fd" opacity="0.6">mock image · gpt-image-2 ( P4 ¥e</text>
+  <text x="400" y="470" text-anchor="middle" font-family="monospace" font-size="13" fill="#8be9fd" opacity="0.65">mock image - gpt-image-2 / P4</text>
 </svg>

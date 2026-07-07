@@ -215,19 +215,25 @@ export function MessageItem({
         {!editing && (
           <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
             {branch && branch.total > 1 && <BranchSwitcher branch={branch} />}
-            <Tooltip label="编辑并重发">
-              <button
-                onClick={() => {
-                  setEditText(textContent);
-                  setEditing(true);
-                }}
-                className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-              >
-                <PencilIcon className="size-3.5" />
-              </button>
-            </Tooltip>
+            {onEditResend && (
+              <Tooltip label="编辑并重发">
+                <button
+                  type="button"
+                  aria-label="编辑并重发"
+                  onClick={() => {
+                    setEditText(textContent);
+                    setEditing(true);
+                  }}
+                  className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                >
+                  <PencilIcon className="size-3.5" />
+                </button>
+              </Tooltip>
+            )}
             <Tooltip label={copied ? "已复制" : "复制"}>
               <button
+                type="button"
+                aria-label={copied ? "已复制" : "复制"}
                 onClick={copy}
                 className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
               >
@@ -273,14 +279,18 @@ export function MessageItem({
         {message.parts.map((part, i) => {
           const isLast = i === message.parts.length - 1;
           switch (part.type) {
-            case "reasoning":
+            case "reasoning": {
+              const hasReasoningText = part.text.trim().length > 0;
+              if (!hasReasoningText && !isStreaming) return null;
               return (
                 <ReasoningBlock
                   key={i}
                   part={part}
                   isStreaming={isStreaming && isLast}
+                  keepOpen={isStreaming}
                 />
               );
+            }
             case "tool-call":
               // web 类已由上方 ToolCallsSummary 统一渲染，这里跳过
               if (isWebTool(part.toolName)) return null;

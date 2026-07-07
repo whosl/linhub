@@ -3,6 +3,13 @@ import { db, schema } from "@/lib/server/db";
 
 const uid = () => crypto.randomUUID().replace(/-/g, "").slice(0, 16);
 
+export interface SpendReservation {
+  amountCents: number;
+  quotaCents: number;
+  balanceCents: number;
+  subscriptionId?: string;
+}
+
 /** 计费/权限类错误（前端直接展示，不附加管理员排查提示） */
 export class BillingError extends Error {
   constructor(message: string) {
@@ -71,65 +78,232 @@ export async function recordUsage(
     outputTokens: number;
     imageCount?: number;
     costCents: number;
-  }
+  },
+  opts: {
+    /**
+     * 聊天流式响应在扣费前已经交付给用户；如果并发请求导致余额在
+     * 预检后被其他请求扣完，仍必须把本次用量入账，避免完整响应免费落库。
+     */
+    allowDebt?: boolean;
+  } = {}
 ) {
-  await db.transaction(async (tx) => {
-    await tx.insert(schema.usageRecords).values({
-      id: `ur-${uid()}`,
-      userId,
-      modelId: record.id,
-      modelName: record.displayName,
-      conversationId: conversationId ?? undefined,
-      inputTokens: usage.inputTokens,
-      outputTokens: usage.outputTokens,
-      imageCount: usage.imageCount ?? 0,
-      costCents: usage.costCents,
-    });
-    if (usage.costCents <= 0) return;
+  const run = () =>
+    db.transaction(async (tx) => {
+      await tx.insert(schema.usageRecords).values({
+        id: `ur-${uid()}`,
+        userId,
+        modelId: record.id,
+        modelName: record.displayName,
+        conversationId: conversationId ?? undefined,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        imageCount: usage.imageCount ?? 0,
+        costCents: usage.costCents,
+      });
+      if (usage.costCents <= 0) return;
 
-    // 1) 优先扣订阅额度：原子更新，LEAST 保证不超过剩余额度
-    let remaining = usage.costCents;
-    const [sub] = await tx
-      .select({
-        id: schema.subscriptions.id,
-        used: schema.subscriptions.usedQuotaCents,
-        expiresAt: schema.subscriptions.expiresAt,
-        quota: schema.plans.monthlyQuotaCents,
-      })
-      .from(schema.subscriptions)
-      .innerJoin(schema.plans, eq(schema.subscriptions.planId, schema.plans.id))
-      .where(eq(schema.subscriptions.userId, userId));
-    if (sub && sub.expiresAt > new Date()) {
-      const [updated] = await tx
+      // 1) 优先扣订阅额度：原子更新，LEAST 保证不超过剩余额度
+      let remaining = usage.costCents;
+      const [sub] = await tx
+        .select({
+          id: schema.subscriptions.id,
+          used: schema.subscriptions.usedQuotaCents,
+          expiresAt: schema.subscriptions.expiresAt,
+          quota: schema.plans.monthlyQuotaCents,
+        })
+        .from(schema.subscriptions)
+        .innerJoin(schema.plans, eq(schema.subscriptions.planId, schema.plans.id))
+        .where(eq(schema.subscriptions.userId, userId));
+      if (sub && sub.expiresAt > new Date()) {
+        const [updated] = await tx
+          .update(schema.subscriptions)
+          .set({
+            usedQuotaCents: sql`LEAST(${schema.subscriptions.usedQuotaCents} + ${remaining}, ${sub.quota})`,
+          })
+          .where(eq(schema.subscriptions.id, sub.id))
+          .returning({ used: schema.subscriptions.usedQuotaCents });
+        const fromQuota = (updated?.used ?? sub.used) - sub.used;
+        remaining -= Math.max(fromQuota, 0);
+      }
+
+      // 2) 剩余部分原子扣余额并记账
+      // 默认余额必须足额才扣；流式聊天已交付时 allowDebt 允许入账为欠费，
+      // 避免并发竞态把完整响应变成免费用量。
+      if (remaining > 0) {
+        const [updated] = await tx
+          .update(schema.users)
+          .set({ balanceCents: sql`${schema.users.balanceCents} - ${remaining}` })
+          .where(
+            opts.allowDebt
+              ? eq(schema.users.id, userId)
+              : and(eq(schema.users.id, userId), gte(schema.users.balanceCents, remaining))
+          )
+          .returning({ balance: schema.users.balanceCents });
+        if (!updated) throw new BillingError("余额不足，请先充值或订阅套餐");
+        await tx.insert(schema.ledger).values({
+          id: `lg-${uid()}`,
+          userId,
+          amountCents: -remaining,
+          balanceAfterCents: updated.balance,
+          reason: "usage",
+          description: `${record.displayName} ${usage.imageCount ? "生图" : "对话"}消费`,
+        });
+      }
+    }, { isolationLevel: "serializable" });
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await run();
+      return;
+    } catch (e) {
+      if (!isSerializationFailure(e) || attempt === 2) throw e;
+    }
+  }
+}
+
+/** 非流式付费操作（如生图）先原子预留额度，避免上游成功后才发现余额被并发扣光。 */
+export async function reserveSpend(
+  userId: string,
+  amountCents: number,
+  description = "预留消费"
+): Promise<SpendReservation> {
+  if (amountCents <= 0) {
+    return { amountCents: 0, quotaCents: 0, balanceCents: 0 };
+  }
+
+  const run = () =>
+    db.transaction(async (tx) => {
+      let remaining = amountCents;
+      let quotaCents = 0;
+      let subscriptionId: string | undefined;
+
+      const [sub] = await tx
+        .select({
+          id: schema.subscriptions.id,
+          used: schema.subscriptions.usedQuotaCents,
+          expiresAt: schema.subscriptions.expiresAt,
+          quota: schema.plans.monthlyQuotaCents,
+        })
+        .from(schema.subscriptions)
+        .innerJoin(schema.plans, eq(schema.subscriptions.planId, schema.plans.id))
+        .where(eq(schema.subscriptions.userId, userId));
+
+      if (sub && sub.expiresAt > new Date()) {
+        const [updated] = await tx
+          .update(schema.subscriptions)
+          .set({
+            usedQuotaCents: sql`LEAST(${schema.subscriptions.usedQuotaCents} + ${remaining}, ${sub.quota})`,
+          })
+          .where(eq(schema.subscriptions.id, sub.id))
+          .returning({ used: schema.subscriptions.usedQuotaCents });
+        quotaCents = Math.max((updated?.used ?? sub.used) - sub.used, 0);
+        remaining -= quotaCents;
+        if (quotaCents > 0) subscriptionId = sub.id;
+      }
+
+      let balanceCents = 0;
+      if (remaining > 0) {
+        const [updated] = await tx
+          .update(schema.users)
+          .set({ balanceCents: sql`${schema.users.balanceCents} - ${remaining}` })
+          .where(and(eq(schema.users.id, userId), gte(schema.users.balanceCents, remaining)))
+          .returning({ balance: schema.users.balanceCents });
+        if (!updated) throw new BillingError("余额不足，请先充值或订阅套餐");
+        balanceCents = remaining;
+        await tx.insert(schema.ledger).values({
+          id: `lg-${uid()}`,
+          userId,
+          amountCents: -balanceCents,
+          balanceAfterCents: updated.balance,
+          reason: "usage",
+          description,
+        });
+      }
+
+      return {
+        amountCents,
+        quotaCents,
+        balanceCents,
+        subscriptionId,
+      };
+    }, { isolationLevel: "serializable" });
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await run();
+    } catch (e) {
+      if (!isSerializationFailure(e) || attempt === 2) throw e;
+    }
+  }
+  throw new BillingError("余额不足，请先充值或订阅套餐");
+}
+
+/** 预留成功但上游失败时退款；只回滚额度/余额，不生成 usage record。 */
+export async function refundSpendReservation(
+  userId: string,
+  reservation: SpendReservation,
+  description = "消费失败退款"
+) {
+  if (reservation.amountCents <= 0) return;
+  await db.transaction(async (tx) => {
+    if (reservation.quotaCents > 0 && reservation.subscriptionId) {
+      await tx
         .update(schema.subscriptions)
         .set({
-          usedQuotaCents: sql`LEAST(${schema.subscriptions.usedQuotaCents} + ${remaining}, ${sub.quota})`,
+          usedQuotaCents: sql`GREATEST(${schema.subscriptions.usedQuotaCents} - ${reservation.quotaCents}, 0)`,
         })
-        .where(eq(schema.subscriptions.id, sub.id))
-        .returning({ used: schema.subscriptions.usedQuotaCents });
-      const fromQuota = (updated?.used ?? sub.used) - sub.used;
-      remaining -= Math.max(fromQuota, 0);
+        .where(eq(schema.subscriptions.id, reservation.subscriptionId));
     }
-
-    // 2) 剩余部分原子扣余额并记账
-    // C2: 余额必须足额才扣；否则回滚 usageRecords，避免免费透支或账本金额失真。
-    if (remaining > 0) {
+    if (reservation.balanceCents > 0) {
       const [updated] = await tx
         .update(schema.users)
-        .set({ balanceCents: sql`${schema.users.balanceCents} - ${remaining}` })
-        .where(
-          and(eq(schema.users.id, userId), gte(schema.users.balanceCents, remaining))
-        )
+        .set({
+          balanceCents: sql`${schema.users.balanceCents} + ${reservation.balanceCents}`,
+        })
+        .where(eq(schema.users.id, userId))
         .returning({ balance: schema.users.balanceCents });
-      if (!updated) throw new BillingError("余额不足，请先充值或订阅套餐");
       await tx.insert(schema.ledger).values({
         id: `lg-${uid()}`,
         userId,
-        amountCents: -remaining,
+        amountCents: reservation.balanceCents,
         balanceAfterCents: updated?.balance ?? 0,
-        reason: "usage",
-        description: `${record.displayName} ${usage.imageCount ? "生图" : "对话"}消费`,
+        reason: "refund",
+        description,
       });
     }
-  }, { isolationLevel: "serializable" });
+  });
+}
+
+/** 预留消费已成功交付后，补记 usage record；扣费已由 reserveSpend 完成。 */
+export async function recordReservedUsage(
+  userId: string,
+  record: typeof schema.models.$inferSelect,
+  conversationId: string | null,
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    imageCount?: number;
+    costCents: number;
+  }
+) {
+  await db.insert(schema.usageRecords).values({
+    id: `ur-${uid()}`,
+    userId,
+    modelId: record.id,
+    modelName: record.displayName,
+    conversationId: conversationId ?? undefined,
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    imageCount: usage.imageCount ?? 0,
+    costCents: usage.costCents,
+  });
+}
+
+function isSerializationFailure(e: unknown) {
+  return (
+    !!e &&
+    typeof e === "object" &&
+    "code" in e &&
+    (e as { code?: unknown }).code === "40001"
+  );
 }

@@ -1,10 +1,11 @@
 import { NextRequest } from "next/server";
 import { requireSession } from "@/lib/server/auth";
 import { rateLimit } from "@/lib/server/rate-limit";
-import { getMimoConfig } from "@/lib/server/voice";
+import { getTtsConfig } from "@/lib/server/engine-config";
 import { formatUpstreamError } from "@/lib/server/upstream-error";
 
 export const maxDuration = 120;
+const TTS_TIMEOUT_MS = 45_000;
 
 /**
  * MiMo TTS（mimo-v2.5-tts）。
@@ -29,7 +30,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const { apiKey, baseURL, voice } = await getMimoConfig();
+    const { apiKey, baseURL, model, voice } = await getTtsConfig();
     const res = await fetch(`${baseURL}/chat/completions`, {
       method: "POST",
       headers: {
@@ -37,7 +38,7 @@ export async function POST(req: NextRequest) {
         "api-key": apiKey,
       },
       body: JSON.stringify({
-        model: "mimo-v2.5-tts",
+        model,
         messages: [
           // user 消息：风格控制（留空 = 默认风格）
           { role: "user", content: "" },
@@ -49,6 +50,7 @@ export async function POST(req: NextRequest) {
           voice: voice || "冰糖",
         },
       }),
+      signal: AbortSignal.timeout(TTS_TIMEOUT_MS),
     });
 
     if (!res.ok) {
@@ -77,8 +79,26 @@ export async function POST(req: NextRequest) {
     });
   } catch (e) {
     return Response.json(
-      { error: e instanceof Error ? e.message : "TTS 失败" },
-      { status: 500 }
+      {
+        error: isTimeoutError(e)
+          ? "TTS 服务响应超时，请稍后重试"
+          : e instanceof Error
+            ? e.message
+            : "TTS 失败",
+      },
+      { status: isTimeoutError(e) ? 504 : 500 }
     );
   }
+}
+
+function isTimeoutError(e: unknown) {
+  if (!e || typeof e !== "object") return false;
+  const maybeError = e as { name?: unknown; message?: unknown };
+  const name = typeof maybeError.name === "string" ? maybeError.name : "";
+  const message = typeof maybeError.message === "string" ? maybeError.message : "";
+  return (
+    name === "TimeoutError" ||
+    name === "AbortError" ||
+    /timeout|aborted/i.test(message)
+  );
 }

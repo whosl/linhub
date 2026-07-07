@@ -2,10 +2,14 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createDeepSeek } from "@ai-sdk/deepseek";
-import type { LanguageModel } from "ai";
+import { wrapLanguageModel, type LanguageModel } from "ai";
 import { eq } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 import { decryptSecret } from "@/lib/server/crypto";
+import {
+  openaiReasoningMiddleware,
+  sanitizeOpenAIChatStreamFetch,
+} from "./openai-reasoning-middleware";
 
 export interface ResolvedModel {
   model: LanguageModel;
@@ -52,13 +56,39 @@ export async function resolveModel(modelId: string): Promise<ResolvedModel> {
   const storeEnabled = provider.storeEnabled ?? true;
 
   switch (provider.kind) {
-    case "openai":
+    case "openai": {
+      // 推理模型（capabilities 含 reasoning）：官方 OpenAI 优先走默认
+      // Responses API，以便 AI SDK 接收 reasoning summary。OpenAI 兼容中转常只在
+      // Chat Completions 用 delta.reasoning/reasoning_content 回传思考过程，
+      // 因此中转路径套一层 middleware 桥接成标准 reasoning 流事件。
+      // 同时部分网关的 tool_calls 增量 delta 带 type/id/name 空串（见下），
+      // 用 sanitizeOpenAIChatStreamFetch 在 fetch 层清洗 SSE，避免 zod 校验失败。
+      // 官方 OpenAI + store 开启时优先保留默认 Responses API；AI SDK 会处理
+      // reasoning summary。只有 OpenAI 兼容中转/关闭 store 的推理模型才强制 chat。
+      const isReasoningModel = (record.capabilities as string[]).includes("reasoning");
+      const shouldUseChatCompletionsForReasoning =
+        isReasoningModel && (Boolean(baseURL) || !storeEnabled);
+      if (shouldUseChatCompletionsForReasoning) {
+        const client = createOpenAI({ apiKey, baseURL, fetch: sanitizeOpenAIChatStreamFetch() });
+        const baseModel = client.chat(record.slug);
+        return {
+          model: wrapLanguageModel({
+            model: baseModel,
+            middleware: openaiReasoningMiddleware(),
+          }),
+          record,
+          provider,
+          storeEnabled,
+        };
+      }
+      const client = createOpenAI({ apiKey, baseURL });
       return {
-        model: createOpenAI({ apiKey, baseURL })(record.slug),
+        model: client(record.slug),
         record,
         provider,
         storeEnabled,
       };
+    }
     case "anthropic":
       return {
         model: createAnthropic({ apiKey, baseURL })(record.slug),

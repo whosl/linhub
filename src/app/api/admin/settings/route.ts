@@ -21,6 +21,18 @@ function toUi(s: typeof schema.settings.$inferSelect) {
     defaultChatModelId: s.defaultChatModelId ?? undefined,
     visionHelperModelId: s.visionHelperModelId ?? undefined,
     embeddingModelId: s.embeddingModelId ?? undefined,
+    // 引擎配置
+    imageGenBaseUrl: s.imageGenBaseUrl ?? undefined,
+    imageGenApiKeyMasked: safeMask(s.imageGenApiKeyEncrypted),
+    imageGenModel: s.imageGenModel ?? undefined,
+    ttsBaseUrl: s.ttsBaseUrl ?? undefined,
+    ttsApiKeyMasked: safeMask(s.ttsApiKeyEncrypted ?? s.mimoApiKeyEncrypted),
+    ttsModel: s.ttsModel ?? undefined,
+    asrBaseUrl: s.asrBaseUrl ?? undefined,
+    asrApiKeyMasked: safeMask(s.asrApiKeyEncrypted ?? s.mimoApiKeyEncrypted),
+    asrModel: s.asrModel ?? undefined,
+    searchBaseUrl: s.searchBaseUrl ?? undefined,
+    // 旧字段（兼容）
     tavilyApiKeyMasked: safeMask(s.tavilyApiKeyEncrypted),
     mimoApiKeyMasked: safeMask(s.mimoApiKeyEncrypted),
     mimoTtsVoice: s.mimoTtsVoice ?? undefined,
@@ -62,6 +74,27 @@ export async function POST(req: NextRequest) {
     patch.tavilyApiKeyEncrypted = encryptSecret(body.tavilyApiKey);
   if (typeof body.mimoApiKey === "string" && body.mimoApiKey)
     patch.mimoApiKeyEncrypted = encryptSecret(body.mimoApiKey);
+
+  // ---- 引擎配置 ----
+  if (typeof body.imageGenBaseUrl === "string")
+    patch.imageGenBaseUrl = body.imageGenBaseUrl || null;
+  if (typeof body.imageGenModel === "string")
+    patch.imageGenModel = body.imageGenModel || null;
+  if (typeof body.imageGenApiKey === "string" && body.imageGenApiKey)
+    patch.imageGenApiKeyEncrypted = encryptSecret(body.imageGenApiKey);
+
+  if (typeof body.ttsBaseUrl === "string") patch.ttsBaseUrl = body.ttsBaseUrl || null;
+  if (typeof body.ttsModel === "string") patch.ttsModel = body.ttsModel || null;
+  if (typeof body.ttsApiKey === "string" && body.ttsApiKey)
+    patch.ttsApiKeyEncrypted = encryptSecret(body.ttsApiKey);
+
+  if (typeof body.asrBaseUrl === "string") patch.asrBaseUrl = body.asrBaseUrl || null;
+  if (typeof body.asrModel === "string") patch.asrModel = body.asrModel || null;
+  if (typeof body.asrApiKey === "string" && body.asrApiKey)
+    patch.asrApiKeyEncrypted = encryptSecret(body.asrApiKey);
+
+  if (typeof body.searchBaseUrl === "string")
+    patch.searchBaseUrl = body.searchBaseUrl || null;
 
   await db
     .update(schema.settings)

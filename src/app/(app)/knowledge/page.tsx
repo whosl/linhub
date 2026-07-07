@@ -20,12 +20,26 @@ import { Badge, Card, EmptyState } from "@/components/ui/misc";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 import { PageContainer, PageHeader } from "@/components/shell/page-header";
 import { toast } from "sonner";
+
+type DeleteTarget =
+  | {
+      kind: "document";
+      kbId: string;
+      docId: string;
+      name: string;
+    }
+  | {
+      kind: "knowledge-base";
+      kbId: string;
+      name: string;
+    };
 
 export default function KnowledgePage() {
   const queryClient = useQueryClient();
@@ -35,6 +49,10 @@ export default function KnowledgePage() {
   const [description, setDescription] = React.useState("");
   const [uploading, setUploading] = React.useState(false);
   const [dragActive, setDragActive] = React.useState(false);
+  const [deleteTarget, setDeleteTarget] = React.useState<DeleteTarget | null>(
+    null
+  );
+  const [deleting, setDeleting] = React.useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   const { data: kbs = [] } = useQuery({
@@ -114,19 +132,51 @@ export default function KnowledgePage() {
     if (!uploading) fileInputRef.current?.click();
   };
 
-  const removeDoc = async (docId: string) => {
+  const requestRemoveDoc = (docId: string) => {
     if (!selected) return;
-    await getDataService().deleteDocument(selected.id, docId);
-    queryClient.invalidateQueries({ queryKey: ["kb-documents", selected.id] });
-    queryClient.invalidateQueries({ queryKey: ["knowledge-bases"] });
+    const doc = documents.find((d) => d.id === docId);
+    setDeleteTarget({
+      kind: "document",
+      kbId: selected.id,
+      docId,
+      name: doc?.name ?? "未命名文档",
+    });
   };
 
-  const removeKb = async (kb: KnowledgeBase) => {
-    if (!window.confirm(`删除知识库「${kb.name}」及其全部文档？`)) return;
-    await getDataService().deleteKnowledgeBase(kb.id);
-    queryClient.invalidateQueries({ queryKey: ["knowledge-bases"] });
-    if (selected?.id === kb.id) setSelected(null);
-    toast.success("已删除");
+  const requestRemoveKb = (kb: KnowledgeBase) => {
+    setDeleteTarget({
+      kind: "knowledge-base",
+      kbId: kb.id,
+      name: kb.name,
+    });
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTarget || deleting) return;
+    setDeleting(true);
+    try {
+      if (deleteTarget.kind === "document") {
+        await getDataService().deleteDocument(
+          deleteTarget.kbId,
+          deleteTarget.docId
+        );
+        queryClient.invalidateQueries({
+          queryKey: ["kb-documents", deleteTarget.kbId],
+        });
+        queryClient.invalidateQueries({ queryKey: ["knowledge-bases"] });
+        toast.success("文档已删除");
+      } else {
+        await getDataService().deleteKnowledgeBase(deleteTarget.kbId);
+        queryClient.invalidateQueries({ queryKey: ["knowledge-bases"] });
+        if (selected?.id === deleteTarget.kbId) setSelected(null);
+        toast.success("已删除");
+      }
+      setDeleteTarget(null);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "删除失败");
+    } finally {
+      setDeleting(false);
+    }
   };
 
   return (
@@ -162,8 +212,12 @@ export default function KnowledgePage() {
                 transition={{ delay: i * 0.04 }}
                 onClick={() => setSelected(kb)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") setSelected(kb);
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    setSelected(kb);
+                  }
                 }}
+                aria-label={`选择知识库「${kb.name}」`}
                 className={cn(
                   "group w-full cursor-pointer rounded-2xl border bg-card p-4 text-left transition-all hover:border-primary/40",
                   selected?.id === kb.id && "border-primary/60 ring-1 ring-primary/30"
@@ -172,9 +226,11 @@ export default function KnowledgePage() {
                 <div className="flex items-start justify-between">
                   <BookOpenIcon className="mb-2 size-5 text-primary" />
                   <button
+                    type="button"
+                    aria-label={`删除知识库「${kb.name}」`}
                     onClick={(e) => {
                       e.stopPropagation();
-                      removeKb(kb);
+                      requestRemoveKb(kb);
                     }}
                     className="rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
                   >
@@ -249,7 +305,7 @@ export default function KnowledgePage() {
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {documents.map((doc) => (
+                    {documents.map((doc, docIndex) => (
                       <div
                         key={doc.id}
                         className="group flex items-center gap-3 rounded-xl border px-3.5 py-3"
@@ -272,7 +328,9 @@ export default function KnowledgePage() {
                           <Badge variant="success">就绪</Badge>
                         )}
                         <button
-                          onClick={() => removeDoc(doc.id)}
+                          type="button"
+                          aria-label={`删除第 ${docIndex + 1} 个文档「${doc.name}」`}
+                          onClick={() => requestRemoveDoc(doc.id)}
                           className="rounded-md p-1.5 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
                         >
                           <Trash2Icon className="size-4" />
@@ -311,6 +369,49 @@ export default function KnowledgePage() {
             </Button>
             <Button onClick={create} disabled={!name.trim()}>
               创建
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!deleteTarget}
+        onOpenChange={(open) => {
+          if (!open && !deleting) setDeleteTarget(null);
+        }}
+      >
+        <DialogContent aria-describedby="delete-confirm-description">
+          <DialogHeader>
+            <DialogTitle>
+              {deleteTarget?.kind === "knowledge-base"
+                ? "删除知识库"
+                : "删除文档"}
+            </DialogTitle>
+            <DialogDescription id="delete-confirm-description">
+              {deleteTarget?.kind === "knowledge-base"
+                ? `将删除知识库「${deleteTarget.name}」及其全部文档，此操作不可撤销。`
+                : `将删除文档「${deleteTarget?.name ?? ""}」，此操作不可撤销。`}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              disabled={deleting}
+              onClick={() => setDeleteTarget(null)}
+            >
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deleting}
+              onClick={confirmDelete}
+            >
+              {deleting ? (
+                <Loader2Icon className="animate-spin" />
+              ) : (
+                <Trash2Icon />
+              )}
+              删除
             </Button>
           </DialogFooter>
         </DialogContent>

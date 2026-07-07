@@ -8,6 +8,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArchiveIcon,
   BookOpenIcon,
+  ChevronDownIcon,
   FolderIcon,
   MessageSquarePlusIcon,
   MoreHorizontalIcon,
@@ -20,10 +21,20 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import { getDataService } from "@/lib/data";
-import type { Conversation } from "@/lib/types";
+import type { Conversation, Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Tooltip } from "@/components/ui/tooltip";
+import { Input } from "@/components/ui/input";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -33,6 +44,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useUiStore } from "@/stores/ui-store";
 import { UserMenu } from "./user-menu";
+import { ProjectEditDialog } from "./project-edit-dialog";
 import { toast } from "sonner";
 
 const NAV_ITEMS = [
@@ -55,19 +67,35 @@ export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const queryClient = useQueryClient();
-  const { sidebarCollapsed, toggleSidebar, setSearchOpen, mobileSidebarOpen, setMobileSidebar } =
+  const { sidebarCollapsed, toggleSidebar, setSearchOpen, mobileSidebarOpen, setMobileSidebar, setEditingProjectId, collapsedProjects, toggleProjectCollapsed } =
     useUiStore();
+  const [renameTarget, setRenameTarget] = React.useState<Conversation | null>(null);
+  const [renameTitle, setRenameTitle] = React.useState("");
+  const [deleteTarget, setDeleteTarget] = React.useState<Conversation | null>(null);
+  const [conversationBusy, setConversationBusy] = React.useState(false);
 
   const { data: conversations = [] } = useQuery({
     queryKey: ["conversations"],
     queryFn: () => getDataService().listConversations(),
+  });
+  const { data: projects = [] } = useQuery({
+    queryKey: ["projects"],
+    queryFn: () => getDataService().listProjects(),
   });
 
   const active = conversations.filter((c) => !c.archived);
   const pinned = active.filter((c) => c.pinned);
   const recent = active.filter((c) => !c.pinned);
 
-  const grouped = recent.reduce<Record<string, Conversation[]>>((acc, c) => {
+  // 按项目分组：项目内会话 + 无项目会话
+  const projectConvs = recent.filter((c) => c.projectId);
+  const noProjectConvs = recent.filter((c) => !c.projectId);
+  const projectGroups = projects.map((p) => ({
+    project: p,
+    conversations: projectConvs.filter((c) => c.projectId === p.id),
+  })).filter((g) => g.conversations.length > 0);
+
+  const grouped = noProjectConvs.reduce<Record<string, Conversation[]>>((acc, c) => {
     (acc[groupLabel(c)] ??= []).push(c);
     return acc;
   }, {});
@@ -81,16 +109,73 @@ export function Sidebar() {
     queryClient.invalidateQueries({ queryKey: ["conversations"] });
   };
 
+  const invalidateProjectConversationQueries = (projectId?: string | null) => {
+    if (!projectId) return;
+    queryClient.invalidateQueries({ queryKey: ["projects"] });
+    queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+    queryClient.invalidateQueries({ queryKey: ["project-conversations", projectId] });
+  };
+
   const handleDelete = async (c: Conversation) => {
     await getDataService().deleteConversation(c.id);
     queryClient.invalidateQueries({ queryKey: ["conversations"] });
+    invalidateProjectConversationQueries(c.projectId);
     toast.success("会话已删除");
     if (pathname === `/chat/${c.id}`) router.push("/");
   };
 
-  const handleRename = async (c: Conversation) => {
-    const title = window.prompt("重命名会话", c.title);
-    if (title && title.trim()) await mutateConversation(c.id, { title: title.trim() });
+  const handleArchive = async (c: Conversation) => {
+    await mutateConversation(c.id, { archived: true });
+    invalidateProjectConversationQueries(c.projectId);
+    toast.success("会话已归档");
+    if (pathname === `/chat/${c.id}`) router.push("/");
+  };
+
+  const handleMoveToProject = async (c: Conversation, projectId: string | null) => {
+    await mutateConversation(c.id, { projectId });
+    queryClient.invalidateQueries({ queryKey: ["projects"] });
+    if (c.projectId) {
+      queryClient.invalidateQueries({ queryKey: ["project", c.projectId] });
+      queryClient.invalidateQueries({ queryKey: ["project-conversations", c.projectId] });
+    }
+    if (projectId) {
+      queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+      queryClient.invalidateQueries({ queryKey: ["project-conversations", projectId] });
+    }
+    toast.success(projectId ? "已移动到项目" : "已移出项目");
+  };
+
+  const handleRename = (c: Conversation) => {
+    setRenameTarget(c);
+    setRenameTitle(c.title);
+  };
+
+  const confirmRename = async () => {
+    if (!renameTarget) return;
+    const title = renameTitle.trim();
+    if (!title) return;
+    setConversationBusy(true);
+    try {
+      if (title !== renameTarget.title) {
+        await mutateConversation(renameTarget.id, { title });
+        invalidateProjectConversationQueries(renameTarget.projectId);
+        toast.success("会话已重命名");
+      }
+      setRenameTarget(null);
+    } finally {
+      setConversationBusy(false);
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    setConversationBusy(true);
+    try {
+      await handleDelete(deleteTarget);
+      setDeleteTarget(null);
+    } finally {
+      setConversationBusy(false);
+    }
   };
 
   const content = (
@@ -108,6 +193,8 @@ export function Sidebar() {
         </Link>
         <Tooltip label="收起侧栏" shortcut="⌘\">
           <Button
+            type="button"
+            aria-label="收起侧栏"
             variant="ghost"
             size="icon-sm"
             className="text-sidebar-foreground"
@@ -131,6 +218,7 @@ export function Sidebar() {
           </kbd>
         </Link>
         <button
+          type="button"
           onClick={() => setSearchOpen(true)}
           className="flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm text-sidebar-foreground transition-colors hover:bg-sidebar-accent"
         >
@@ -161,11 +249,31 @@ export function Sidebar() {
             conversations={pinned}
             pathname={pathname}
             onTogglePin={(c) => mutateConversation(c.id, { pinned: !c.pinned })}
-            onArchive={(c) => mutateConversation(c.id, { archived: true })}
+            onArchive={handleArchive}
             onRename={handleRename}
-            onDelete={handleDelete}
+            onDelete={setDeleteTarget}
+            projects={projects}
+            onMoveToProject={handleMoveToProject}
           />
         )}
+        {/* 项目分组（可折叠文件夹） */}
+        {projectGroups.map(({ project: p, conversations: pConvs }) => (
+          <ProjectGroup
+            key={`proj-${p.id}`}
+            project={p}
+            conversations={pConvs}
+            pathname={pathname}
+            collapsed={collapsedProjects.has(p.id)}
+            onToggleCollapse={() => toggleProjectCollapsed(p.id)}
+            onEdit={() => setEditingProjectId(p.id)}
+            onTogglePin={(c) => mutateConversation(c.id, { pinned: !c.pinned })}
+            onArchive={handleArchive}
+            onRename={handleRename}
+            onDelete={setDeleteTarget}
+            projects={projects}
+            onMoveToProject={handleMoveToProject}
+          />
+        ))}
         {groupOrder.map(
           (g) =>
             grouped[g] && (
@@ -175,9 +283,11 @@ export function Sidebar() {
                 conversations={grouped[g]}
                 pathname={pathname}
                 onTogglePin={(c) => mutateConversation(c.id, { pinned: !c.pinned })}
-                onArchive={(c) => mutateConversation(c.id, { archived: true })}
+                onArchive={handleArchive}
                 onRename={handleRename}
-                onDelete={handleDelete}
+                onDelete={setDeleteTarget}
+                projects={projects}
+                onMoveToProject={handleMoveToProject}
               />
             )
         )}
@@ -228,6 +338,67 @@ export function Sidebar() {
           </>
         )}
       </AnimatePresence>
+
+      <ProjectEditDialog />
+      <Dialog
+        open={!!renameTarget}
+        onOpenChange={(open) => {
+          if (!open && !conversationBusy) setRenameTarget(null);
+        }}
+      >
+        <DialogContent aria-describedby="sidebar-rename-description">
+          <DialogHeader>
+            <DialogTitle>重命名会话</DialogTitle>
+            <DialogDescription id="sidebar-rename-description">
+              为这个会话设置一个更容易识别的名称。
+            </DialogDescription>
+          </DialogHeader>
+          <Input
+            value={renameTitle}
+            onChange={(event) => setRenameTitle(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void confirmRename();
+              }
+            }}
+            autoFocus
+          />
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={conversationBusy}
+              onClick={() => setRenameTarget(null)}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              disabled={conversationBusy || !renameTitle.trim()}
+              onClick={() => void confirmRename()}
+            >
+              {conversationBusy ? "保存中..." : "保存"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <ConfirmDialog
+        open={!!deleteTarget}
+        onOpenChange={(open) => {
+          if (!open && !conversationBusy) setDeleteTarget(null);
+        }}
+        title="删除会话"
+        description={
+          deleteTarget
+            ? `确定删除会话「${deleteTarget.title}」？删除后无法撤销。`
+            : "确定删除这个会话？删除后无法撤销。"
+        }
+        confirmLabel="删除"
+        destructive
+        loading={conversationBusy}
+        onConfirm={confirmDelete}
+      />
     </>
   );
 }
@@ -240,6 +411,8 @@ function ConversationGroup({
   onArchive,
   onRename,
   onDelete,
+  projects,
+  onMoveToProject,
 }: {
   label: string;
   conversations: Conversation[];
@@ -248,6 +421,8 @@ function ConversationGroup({
   onArchive: (c: Conversation) => void;
   onRename: (c: Conversation) => void;
   onDelete: (c: Conversation) => void;
+  projects: { id: string; name: string; color?: string }[];
+  onMoveToProject: (c: Conversation, projectId: string | null) => void;
 }) {
   return (
     <div className="mb-3">
@@ -279,6 +454,8 @@ function ConversationGroup({
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <button
+                  type="button"
+                  aria-label={`会话「${c.title}」更多操作`}
                   className={cn(
                     "mr-1 rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-border focus:opacity-100 group-hover:opacity-100",
                     isActive && "opacity-100"
@@ -305,6 +482,26 @@ function ConversationGroup({
                 <DropdownMenuItem onClick={() => onArchive(c)}>
                   <ArchiveIcon /> 归档
                 </DropdownMenuItem>
+                {projects.length > 0 && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <p className="px-2 py-1 text-[11px] font-medium text-muted-foreground">移动到项目</p>
+                    {c.projectId && (
+                      <DropdownMenuItem onClick={() => onMoveToProject(c, null)}>
+                        移出项目
+                      </DropdownMenuItem>
+                    )}
+                    {projects
+                      .filter((p) => p.id !== c.projectId)
+                      .slice(0, 8)
+                      .map((p) => (
+                        <DropdownMenuItem key={p.id} onClick={() => onMoveToProject(c, p.id)}>
+                          <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: p.color ?? "#C96442" }} />
+                          {p.name}
+                        </DropdownMenuItem>
+                      ))}
+                  </>
+                )}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem variant="destructive" onClick={() => onDelete(c)}>
                   <Trash2Icon /> 删除
@@ -314,6 +511,156 @@ function ConversationGroup({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/** 项目分组：可折叠文件夹 + ⋯ 菜单（编辑/新对话/删除） */
+function ProjectGroup({
+  project,
+  conversations,
+  pathname,
+  collapsed,
+  onToggleCollapse,
+  onEdit,
+  onTogglePin,
+  onArchive,
+  onRename,
+  onDelete,
+  projects,
+  onMoveToProject,
+}: {
+  project: Project;
+  conversations: Conversation[];
+  pathname: string;
+  collapsed: boolean;
+  onToggleCollapse: () => void;
+  onEdit: () => void;
+  onTogglePin: (c: Conversation) => void;
+  onArchive: (c: Conversation) => void;
+  onRename: (c: Conversation) => void;
+  onDelete: (c: Conversation) => void;
+  projects: { id: string; name: string; color?: string }[];
+  onMoveToProject: (c: Conversation, projectId: string | null) => void;
+}) {
+  return (
+    <div className="mb-1">
+      {/* 项目标题行 */}
+      <div className="group/proj flex items-center rounded-lg transition-colors hover:bg-sidebar-accent">
+        <button
+          type="button"
+          onClick={onToggleCollapse}
+          aria-expanded={!collapsed}
+          aria-label={`${collapsed ? "展开" : "收起"}项目「${project.name}」`}
+          className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1.5 text-sm text-sidebar-foreground"
+        >
+          <FolderIcon className="size-4 shrink-0 text-muted-foreground" />
+          <span className="truncate">{project.name}</span>
+          <ChevronDownIcon
+            className={cn(
+              "ml-auto size-3.5 shrink-0 text-muted-foreground transition-transform",
+              collapsed && "-rotate-90"
+            )}
+          />
+        </button>
+        {/* ⋯ 菜单 */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              aria-label={`项目「${project.name}」更多操作`}
+              className="mr-1 rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-border focus:opacity-100 group-hover/proj:opacity-100"
+            >
+              <MoreHorizontalIcon className="size-4" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" side="right">
+            <DropdownMenuItem onClick={onEdit}>
+              <PencilIcon /> 编辑项目
+            </DropdownMenuItem>
+            <DropdownMenuItem asChild>
+              <Link href={`/?project=${project.id}`}>
+                <MessageSquarePlusIcon className="size-4" /> 在项目中新对话
+              </Link>
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+
+      {/* 展开的对话列表 */}
+      {!collapsed && conversations.length > 0 && (
+        <div className="ml-3 border-l border-sidebar-border pl-1">
+          {conversations.map((c) => {
+            const isActive = pathname === `/chat/${c.id}`;
+            return (
+              <div
+                key={c.id}
+                className={cn(
+                  "group relative flex items-center rounded-lg transition-colors hover:bg-sidebar-accent",
+                  isActive && "bg-sidebar-accent"
+                )}
+              >
+                <Link
+                  href={`/chat/${c.id}`}
+                  className={cn(
+                    "flex-1 truncate px-2 py-1.5 text-sm text-sidebar-foreground",
+                    isActive && "font-medium text-foreground"
+                  )}
+                >
+                  {c.pinned && <PinIcon className="mr-1.5 inline size-3 text-muted-foreground" />}
+                  {c.title}
+                </Link>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      type="button"
+                      aria-label={`会话「${c.title}」更多操作`}
+                      className={cn(
+                        "mr-1 rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-border focus:opacity-100 group-hover:opacity-100",
+                        isActive && "opacity-100"
+                      )}
+                    >
+                      <MoreHorizontalIcon className="size-4" />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" side="right">
+                    <DropdownMenuItem onClick={() => onRename(c)}>
+                      <PencilIcon /> 重命名
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => onTogglePin(c)}>
+                      {c.pinned ? <><PinOffIcon /> 取消置顶</> : <><PinIcon /> 置顶</>}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => onArchive(c)}>
+                      <ArchiveIcon /> 归档
+                    </DropdownMenuItem>
+                    {projects.length > 0 && (
+                      <>
+                        <DropdownMenuSeparator />
+                        <p className="px-2 py-1 text-[11px] font-medium text-muted-foreground">移动到项目</p>
+                        {c.projectId && (
+                          <DropdownMenuItem onClick={() => onMoveToProject(c, null)}>
+                            移出项目
+                          </DropdownMenuItem>
+                        )}
+                        {projects.filter((p) => p.id !== c.projectId).slice(0, 8).map((p) => (
+                          <DropdownMenuItem key={p.id} onClick={() => onMoveToProject(c, p.id)}>
+                            <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: p.color ?? "#C96442" }} />
+                            {p.name}
+                          </DropdownMenuItem>
+                        ))}
+                      </>
+                    )}
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem variant="destructive" onClick={() => onDelete(c)}>
+                      <Trash2Icon /> 删除
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
