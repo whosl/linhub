@@ -540,8 +540,8 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
                 onOpenArtifact={openArtifactById}
                 onImageEdited={
                   conversationId
-                    ? (oldUrl, newUrl) =>
-                        void replaceMessageImage(conversationId, m.id, oldUrl, newUrl)
+                    ? (oldUrl, newUrl, editPrompt) =>
+                        replaceMessageImage(conversationId, m.id, oldUrl, newUrl, editPrompt)
                     : undefined
                 }
               />

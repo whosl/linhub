@@ -10,7 +10,8 @@ import {
   XIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { toast } from "sonner";
+import { copyTextToClipboard } from "@/lib/clipboard";
+import { CopyFallbackDialog } from "@/components/ui/copy-fallback-dialog";
 import { codeToHtml } from "shiki";
 import { useTheme } from "next-themes";
 
@@ -26,6 +27,7 @@ export function CodeBlock({
   const { resolvedTheme } = useTheme();
   const [html, setHtml] = React.useState<string | null>(null);
   const [copied, setCopied] = React.useState(false);
+  const [manualCopyText, setManualCopyText] = React.useState<string | null>(null);
   const lines = code.split("\n").length;
   const collapsible = lines > COLLAPSE_THRESHOLD;
   const [collapsed, setCollapsed] = React.useState(collapsible);
@@ -54,13 +56,12 @@ export function CodeBlock({
   }, [code, language, resolvedTheme]);
 
   const copy = async () => {
-    // M5: 非安全上下文下 writeText 会 reject
     try {
-      await navigator.clipboard.writeText(code);
+      await copyTextToClipboard(code);
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
-      toast.error("复制失败，请手动选择代码");
+      setManualCopyText(code);
     }
   };
 
@@ -186,6 +187,10 @@ export function CodeBlock({
           {collapsed ? `展开全部 ${lines} 行` : "收起"}
         </button>
       )}
+      <CopyFallbackDialog
+        text={manualCopyText}
+        onClose={() => setManualCopyText(null)}
+      />
     </div>
   );
 }

@@ -99,11 +99,23 @@ export async function POST(
     const chunks = chunkText(text);
     if (chunks.length === 0) throw new Error("文档内容为空");
 
-    // 分批 embedding（每批 64）
+    // 分批 embedding（每批 64）。embedding 服务不可用时仍保存文本分块，
+    // search_knowledge 会自动降级到关键词检索，避免用户上传文档直接失败。
     const BATCH = 64;
     for (let i = 0; i < chunks.length; i += BATCH) {
       const batch = chunks.slice(i, i + BATCH);
-      const embeddings = await embedTexts(batch);
+      let embeddings: number[][] | null = null;
+      try {
+        const result = await embedTexts(batch);
+        if (
+          result.length === batch.length &&
+          result.every((embedding) => embedding.length === 1536)
+        ) {
+          embeddings = result;
+        }
+      } catch (e) {
+        console.warn("知识库 embedding 失败，已降级为关键词检索", e);
+      }
       await db.insert(schema.kbChunks).values(
         batch.map((content, j) => ({
           id: `chk-${uid()}`,
@@ -111,7 +123,7 @@ export async function POST(
           knowledgeBaseId: kbId,
           chunkIndex: i + j,
           content,
-          embedding: embeddings[j],
+          ...(embeddings?.[j] ? { embedding: embeddings[j] } : {}),
         }))
       );
     }

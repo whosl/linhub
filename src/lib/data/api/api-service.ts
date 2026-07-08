@@ -374,10 +374,15 @@ export class ApiDataService implements DataService {
       body: JSON.stringify({ feedback }),
     });
   }
-  async replaceMessageImage(messageId: string, oldUrl: string, newUrl: string) {
+  async replaceMessageImage(
+    messageId: string,
+    oldUrl: string,
+    newUrl: string,
+    editPrompt?: string
+  ) {
     await fetchJson(`/api/messages/${messageId}/image`, {
       method: "PATCH",
-      body: JSON.stringify({ oldUrl, newUrl }),
+      body: JSON.stringify({ oldUrl, newUrl, editPrompt }),
     });
   }
   async editImage(input: { image: string; mask?: string | null; prompt: string }) {

@@ -4,6 +4,8 @@ import { z } from "zod";
 import { db, schema } from "@/lib/server/db";
 import { requireSession } from "@/lib/server/auth";
 import { isValidationResponse, parseBody } from "@/lib/server/validate";
+import { replaceMessageImageParts } from "@/lib/message-image";
+import type { MessagePart } from "@/lib/types";
 
 const LocalImagePathSchema = z
   .string()
@@ -13,6 +15,7 @@ const LocalImagePathSchema = z
 const ReplaceImageSchema = z.object({
   oldUrl: z.string().max(2048),
   newUrl: LocalImagePathSchema,
+  editPrompt: z.string().trim().max(500).optional(),
 });
 
 export async function PATCH(
@@ -41,14 +44,12 @@ export async function PATCH(
     .limit(1);
   if (!row) return Response.json({ error: "not found" }, { status: 404 });
 
-  let replaced = false;
-  const parts = (row.message.parts as Array<Record<string, unknown>>).map((part) => {
-    if (part.type === "image" && part.url === body.oldUrl) {
-      replaced = true;
-      return { ...part, url: body.newUrl, alt: "编辑后的图片" };
-    }
-    return part;
-  });
+  const { parts, replaced } = replaceMessageImageParts(
+    row.message.parts as MessagePart[],
+    body.oldUrl,
+    body.newUrl,
+    body.editPrompt
+  );
   if (!replaced) return Response.json({ error: "图片不存在" }, { status: 404 });
 
   await db.transaction(async (tx) => {

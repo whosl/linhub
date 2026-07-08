@@ -1879,6 +1879,10 @@ async function streamAssistant(opts: {
   let tools: ToolSet = {};
   let closeMcp: (() => Promise<void>) | undefined;
   if (toggles?.webSearch) Object.assign(tools, buildWebTools());
+  if (toggles?.webSearch) {
+    system +=
+      "\n\n联网搜索规则：优先用少量高质量来源完成核查；一旦已有足够证据，必须停止继续调用搜索/读取工具并直接给出最终回答。";
+  }
   if (toggles?.codeRunner) Object.assign(tools, buildCodeTools());
   if (toggles?.imageGeneration)
     Object.assign(
@@ -1953,16 +1957,19 @@ async function streamAssistant(opts: {
       abortSignal: signal,
       ...(record.maxOutputTokens ? { maxOutputTokens: record.maxOutputTokens } : {}),
       ...(hasTools && modelSupportsTools
-        ? { tools, stopWhen: stepCountIs(8) }
+        ? { tools, stopWhen: stepCountIs(12) }
         : {}),
       ...(Object.keys(openaiProviderOptions).length > 0
         ? { providerOptions: { openai: openaiProviderOptions } }
         : {}),
     });
     streamResult = result;
+    let followupInputTokens = 0;
+    let followupOutputTokens = 0;
 
     let reasoningStart = 0;
     const toolParts = new Map<string, ToolCallPart>();
+    const fallbackToolResults: string[] = [];
     for await (const chunk of result.fullStream) {
       if (signal.aborted) {
         const abortError = new Error("Aborted");
@@ -2046,6 +2053,11 @@ async function streamAssistant(opts: {
       } else if (chunk.type === "tool-result") {
         const part = toolParts.get(chunk.toolCallId);
         if (part) {
+          const fallbackToolText = formatRawToolOutputForFallback(
+            part.toolName,
+            chunk.output
+          );
+          if (fallbackToolText) fallbackToolResults.push(fallbackToolText);
           part.state = "success";
           part.result = summarizeToolResult(chunk.output);
           emit({ type: "tool-call-end", messageId: assistantId, part });
@@ -2096,7 +2108,90 @@ async function streamAssistant(opts: {
       throw abortError;
     }
 
-    if (parts.length === 0) {
+    const hasVisibleOutput = parts.some(
+      (part) =>
+        (part.type === "text" && part.text.trim().length > 0) ||
+        part.type === "image"
+    );
+    const toolSummary = (
+      fallbackToolResults.length > 0
+        ? fallbackToolResults.join("\n\n")
+        : formatToolCallsAsText(
+            parts.filter((p): p is ToolCallPart => p.type === "tool-call")
+          )
+    ).slice(0, 12_000);
+    if (!hasVisibleOutput && toolSummary) {
+      try {
+        const fallbackMaxOutputTokens = Math.min(
+          record.maxOutputTokens ?? 1200,
+          1200
+        );
+        await assertCanSpend(
+          userId,
+          computeCostCents(record, {
+            inputTokens:
+              estimatePromptTokens(system, history) + Math.ceil(toolSummary.length / 4),
+            outputTokens: Math.min(fallbackMaxOutputTokens, 256),
+          })
+        );
+        const fallback = await generateText({
+          model,
+          system:
+            system +
+            "\n\n你现在不能再调用工具。必须基于已经获得的工具结果，直接给出用户可见的最终回答；如果证据不足，要明确说明。",
+          messages: [
+            ...history,
+            {
+              role: "assistant",
+              content: `我已经调用工具得到以下结果：\n\n${toolSummary}`,
+            },
+            {
+              role: "user",
+              content:
+                "请基于上述工具结果，直接回答我最新的问题。使用中文，保留关键来源名称或链接，不要再请求调用工具。",
+            },
+          ],
+          abortSignal: signal,
+          maxOutputTokens: fallbackMaxOutputTokens,
+          ...(Object.keys(openaiProviderOptions).length > 0
+            ? { providerOptions: { openai: openaiProviderOptions } }
+            : {}),
+        });
+        followupInputTokens = fallback.usage.inputTokens ?? 0;
+        followupOutputTokens = fallback.usage.outputTokens ?? 0;
+        const text = fallback.text.trim();
+        if (text.length > 0) {
+          if (signal.aborted) {
+            const abortError = new Error("Aborted");
+            abortError.name = "AbortError";
+            throw abortError;
+          }
+          appendDelta(parts, "text", text);
+          emit({ type: "text-delta", messageId: assistantId, delta: text });
+          await persistPartial(true);
+        }
+      } catch (e) {
+        if (signal.aborted || (e instanceof Error && e.name === "AbortError")) {
+          throw e;
+        }
+        if (e instanceof Error && e.name === "BillingError") {
+          status = "error";
+          const errorText = `⚠️ ${e.message}`;
+          appendDelta(parts, "text", errorText);
+          emit({ type: "text-delta", messageId: assistantId, delta: errorText });
+          await persistPartial(true);
+        }
+        // 兜底整理失败时仍给出可见状态，避免工具完成后出现空白回答。
+      }
+    }
+
+    const hasAnyVisibleOutput = parts.some(
+      (part) =>
+        (part.type === "text" && part.text.trim().length > 0) ||
+        part.type === "image"
+    );
+
+    if (parts.length === 0 || !hasAnyVisibleOutput) {
       status = "error";
       appendDelta(parts, "text", "⚠️ 模型没有返回内容，请重试。");
       emit({
@@ -2108,8 +2203,8 @@ async function streamAssistant(opts: {
     }
 
     const finalUsage = await result.usage;
-    const inputTokens = finalUsage.inputTokens ?? 0;
-    const outputTokens = finalUsage.outputTokens ?? 0;
+    const inputTokens = (finalUsage.inputTokens ?? 0) + followupInputTokens;
+    const outputTokens = (finalUsage.outputTokens ?? 0) + followupOutputTokens;
     usage = {
       inputTokens,
       outputTokens,
@@ -2251,7 +2346,10 @@ function formatToolCallsAsText(parts: ToolCallPart[]) {
         `- ${chunk.documentName ?? "知识库"}#${chunk.chunkIndex}: ${chunk.snippet}`
     );
     const sources = result.sources?.map(
-      (source) => `- ${source.title}: ${source.snippet ?? source.url}`
+      (source) =>
+        `- ${source.title}\n  URL: ${source.url}${
+          source.snippet ? `\n  摘要: ${source.snippet}` : ""
+        }`
     );
     const images = result.images?.map((url) => `- 图片: ${url}`);
     const text = result.text ? [`- ${result.text}`] : [];
@@ -2263,6 +2361,66 @@ function formatToolCallsAsText(parts: ToolCallPart[]) {
       : [];
   });
   return lines.join("\n\n");
+}
+
+function formatRawToolOutputForFallback(toolName: string, output: unknown) {
+  const detail = formatRawToolOutputDetail(output).slice(0, 4000);
+  return detail ? `工具「${toolName}」结果：\n${detail}` : "";
+}
+
+function formatRawToolOutputDetail(output: unknown): string {
+  if (!output || typeof output !== "object") return String(output ?? "");
+
+  const o = output as Record<string, unknown>;
+  const lines: string[] = [];
+  if (typeof o.answer === "string") lines.push(`回答：\n${o.answer}`);
+  if (typeof o.text === "string") lines.push(`文本：\n${o.text.slice(0, 2500)}`);
+  if (Array.isArray(o.sources)) {
+    const sourceLines = o.sources
+      .slice(0, 12)
+      .map(formatFallbackSource)
+      .filter(Boolean);
+    if (sourceLines.length > 0) lines.push(`来源：\n${sourceLines.join("\n")}`);
+  }
+  if (Array.isArray(o.chunks)) {
+    const chunkLines = o.chunks
+      .slice(0, 8)
+      .map(formatFallbackChunk)
+      .filter(Boolean);
+    if (chunkLines.length > 0) lines.push(`知识库片段：\n${chunkLines.join("\n")}`);
+  }
+  if (Array.isArray(o.images)) {
+    const images = o.images
+      .filter((url): url is string => typeof url === "string")
+      .slice(0, 4)
+      .map((url) => `- 图片：${url}`);
+    if (images.length > 0) lines.push(images.join("\n"));
+  }
+  if (lines.length > 0) return lines.join("\n\n");
+  return JSON.stringify(toJsonValue(output)).slice(0, 2500);
+}
+
+function formatFallbackSource(source: unknown) {
+  if (!source || typeof source !== "object") return "";
+  const s = source as Record<string, unknown>;
+  const title = typeof s.title === "string" ? s.title : "来源";
+  const url = typeof s.url === "string" ? s.url : "";
+  const snippet = typeof s.snippet === "string" ? s.snippet : "";
+  return `- ${title}${url ? `\n  URL: ${url}` : ""}${
+    snippet ? `\n  摘要: ${snippet}` : ""
+  }`;
+}
+
+function formatFallbackChunk(chunk: unknown) {
+  if (!chunk || typeof chunk !== "object") return "";
+  const c = chunk as Record<string, unknown>;
+  const name = typeof c.documentName === "string" ? c.documentName : "知识库";
+  const index =
+    typeof c.chunkIndex === "number" || typeof c.chunkIndex === "string"
+      ? `#${c.chunkIndex}`
+      : "";
+  const snippet = typeof c.snippet === "string" ? c.snippet : "";
+  return snippet ? `- ${name}${index}: ${snippet}` : "";
 }
 
 type JsonValue =

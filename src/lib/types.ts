@@ -215,6 +215,8 @@ export interface Conversation {
   archived: boolean;
   /** 当前选中的叶子消息（决定展示哪条分支） */
   currentLeafId?: string;
+  /** 搜索正文命中时，应打开的命中分支叶子；仅搜索结果返回。 */
+  searchMatchLeafId?: string;
   createdAt: string;
   updatedAt: string;
 }

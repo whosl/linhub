@@ -96,6 +96,7 @@ export function ChatInput({
   const [images, setImages] = React.useState<ImagePart[]>([]);
   const [files, setFiles] = React.useState<FilePart[]>([]);
   const [recording, setRecording] = React.useState(false);
+  const [modelMenuOpen, setModelMenuOpen] = React.useState(false);
   // 图片编辑器：editingIndex 指向 images 数组里要编辑的图
   const [editingImage, setEditingImage] = React.useState<string | null>(null);
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
@@ -351,25 +352,26 @@ export function ChatInput({
                   type="button"
                   onClick={() => setEditingImage(img.url)}
                   aria-label="编辑图片"
-                  className="absolute -left-1.5 -top-1.5 rounded-full bg-primary p-0.5 text-primary-foreground opacity-0 transition-opacity group-hover/att:opacity-100"
+                  className="absolute left-1 top-1 flex size-6 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm"
                 >
-                  <PencilIcon className="size-3" />
+                  <PencilIcon className="size-3.5" />
                 </button>
                 <button
                   type="button"
                   onClick={() => {
                     revokeUrl(img.url); // C4
+                    if (editingImage === img.url) setEditingImage(null);
                     setImages((prev) => prev.filter((_, j) => j !== i));
                   }}
                   aria-label="移除图片"
-                  className="absolute -right-1.5 -top-1.5 rounded-full bg-foreground p-0.5 text-background opacity-0 transition-opacity group-hover/att:opacity-100"
+                  className="absolute right-1 top-1 flex size-6 items-center justify-center rounded-full bg-foreground text-background shadow-sm"
                 >
-                  <XIcon className="size-3" />
+                  <XIcon className="size-3.5" />
                 </button>
               </div>
             ))}
             {files.map((f, i) => (
-              <div key={f.attachmentId} className="group/att relative flex items-center gap-2 rounded-xl border bg-muted/40 px-3 py-2">
+              <div key={f.attachmentId} className="group/att relative flex items-center gap-2 rounded-xl border bg-muted/40 px-3 py-2 pr-8">
                 <PaperclipIcon className="size-4 text-primary" />
                 <div>
                   <p className="max-w-36 truncate text-xs font-medium">{f.name}</p>
@@ -379,9 +381,9 @@ export function ChatInput({
                   type="button"
                   onClick={() => setFiles((prev) => prev.filter((_, j) => j !== i))}
                   aria-label="移除文件"
-                  className="absolute -right-1.5 -top-1.5 rounded-full bg-foreground p-0.5 text-background opacity-0 transition-opacity group-hover/att:opacity-100"
+                  className="absolute right-1 top-1 flex size-6 items-center justify-center rounded-full bg-foreground text-background shadow-sm"
                 >
-                  <XIcon className="size-3" />
+                  <XIcon className="size-3.5" />
                 </button>
               </div>
             ))}
@@ -533,10 +535,10 @@ export function ChatInput({
               <button
                 type="button"
                 aria-label={`回复风格：${currentStyle?.name ?? "标准"}`}
-                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                className="flex max-w-[5.5rem] items-center gap-1 whitespace-nowrap rounded-lg px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground sm:max-w-[10rem]"
               >
-                {currentStyle?.name ?? "标准"}
-                <ChevronDownIcon className="size-3" />
+                <span className="min-w-0 truncate">{currentStyle?.name ?? "标准"}</span>
+                <ChevronDownIcon className="size-3 shrink-0" />
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="max-h-[45dvh] w-52 overflow-y-auto">
@@ -559,15 +561,15 @@ export function ChatInput({
           </DropdownMenu>
 
           {/* 模型选择 */}
-          <DropdownMenu>
+          <DropdownMenu open={modelMenuOpen} onOpenChange={setModelMenuOpen}>
             <DropdownMenuTrigger asChild>
               <button
                 type="button"
                 aria-label={`当前模型：${currentModel?.displayName ?? "未选择"}`}
-                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent"
+                className="flex max-w-[4.5rem] items-center gap-1 whitespace-nowrap rounded-lg px-2 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent sm:max-w-[7rem]"
               >
-                {currentModel?.displayName}
-                <ChevronDownIcon className="size-3 text-muted-foreground" />
+                <span className="min-w-0 truncate">{currentModel?.displayName}</span>
+                <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground" />
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="max-h-[45dvh] w-72 overflow-y-auto">
@@ -587,7 +589,10 @@ export function ChatInput({
                   {group.map((m) => (
                     <DropdownMenuItem
                       key={m.id}
-                      onClick={() => onComposerChange({ modelId: m.id })}
+                      onClick={() => {
+                        onComposerChange({ modelId: m.id });
+                        setModelMenuOpen(false);
+                      }}
                     >
                       <span className="flex-1">
                         <span className="flex items-center gap-1.5 text-sm">

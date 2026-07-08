@@ -25,6 +25,8 @@ import { ToolCallCard } from "./tool-call-card";
 import { ToolCallsSummary, isWebTool } from "./tool-calls-summary";
 import { ImageLightbox } from "./image-lightbox";
 import { Tooltip } from "@/components/ui/tooltip";
+import { CopyFallbackDialog } from "@/components/ui/copy-fallback-dialog";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -63,11 +65,16 @@ export function MessageItem({
   onQuote?: (text: string) => void;
   onOpenArtifact?: (artifactId: string) => void;
   /** lightbox 编辑图片后，替换消息里的旧图（乐观更新） */
-  onImageEdited?: (oldUrl: string, newUrl: string) => void;
+  onImageEdited?: (
+    oldUrl: string,
+    newUrl: string,
+    editPrompt?: string
+  ) => void | Promise<void>;
 }) {
   const [copied, setCopied] = React.useState(false);
   const [editing, setEditing] = React.useState(false);
   const [editText, setEditText] = React.useState("");
+  const [manualCopyText, setManualCopyText] = React.useState<string | null>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
   const [selection, setSelection] = React.useState<{ text: string; x: number; y: number } | null>(null);
   const [lightbox, setLightbox] = React.useState<{ src: string; alt?: string } | null>(null);
@@ -78,13 +85,12 @@ export function MessageItem({
     .join("\n");
 
   const copy = async () => {
-    // M5: 非安全上下文（HTTP / 无 clipboard 权限的 iframe）下 writeText 会 reject
     try {
-      await navigator.clipboard.writeText(textContent);
+      await copyTextToClipboard(textContent);
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
-      toast.error("复制失败，请手动选择文本");
+      setManualCopyText(textContent);
     }
   };
 
@@ -120,12 +126,18 @@ export function MessageItem({
       onOpenChange={(o) => !o && setLightbox(null)}
       onEdited={
         onImageEdited && lightbox
-          ? (newUrl) => {
-              onImageEdited(lightbox.src, newUrl);
+          ? async (newUrl, editPrompt) => {
+              await onImageEdited(lightbox.src, newUrl, editPrompt);
               setLightbox(null);
             }
           : undefined
       }
+    />
+  );
+  const copyFallbackNode = (
+    <CopyFallbackDialog
+      text={manualCopyText}
+      onClose={() => setManualCopyText(null)}
     />
   );
 
@@ -242,6 +254,7 @@ export function MessageItem({
             </Tooltip>
           </div>
         )}
+        {copyFallbackNode}
         {lightboxNode}
       </motion.div>
     );
@@ -411,6 +424,7 @@ export function MessageItem({
         </div>
       )}
       {/* 图片全屏预览 */}
+      {copyFallbackNode}
       {lightboxNode}
     </motion.div>
   );

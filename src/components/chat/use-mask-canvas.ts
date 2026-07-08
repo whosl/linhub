@@ -4,11 +4,19 @@ import * as React from "react";
 
 type ImageSize = { w: number; h: number };
 
-export function fitImageSize(size: ImageSize, maxWidth: number, maxHeight: number) {
+export function fitImageSize(
+  size: ImageSize,
+  maxWidth: number,
+  maxHeight: number,
+  minWidth = 1,
+  minHeight = 1
+) {
   if (size.w <= 0 || size.h <= 0 || maxWidth <= 0 || maxHeight <= 0) {
     return { w: 1, h: 1 };
   }
-  const scale = Math.min(1, maxWidth / size.w, maxHeight / size.h);
+  const maxScale = Math.min(maxWidth / size.w, maxHeight / size.h);
+  const minScale = Math.max(1, minWidth / size.w, minHeight / size.h);
+  const scale = Math.min(maxScale, minScale);
   return {
     w: Math.max(1, Math.round(size.w * scale)),
     h: Math.max(1, Math.round(size.h * scale)),

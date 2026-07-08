@@ -79,7 +79,12 @@ export interface DataService {
     modelId?: string
   ): AsyncIterable<StreamEvent>;
   setFeedback(messageId: string, feedback: "up" | "down" | null): Promise<void>;
-  replaceMessageImage(messageId: string, oldUrl: string, newUrl: string): Promise<void>;
+  replaceMessageImage(
+    messageId: string,
+    oldUrl: string,
+    newUrl: string,
+    editPrompt?: string
+  ): Promise<void>;
   editImage(input: {
     image: string;
     mask?: string | null;

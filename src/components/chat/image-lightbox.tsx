@@ -52,7 +52,7 @@ export function ImageLightbox({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** 编辑成功，返回新图片 URL */
-  onEdited?: (newUrl: string) => void;
+  onEdited?: (newUrl: string, editPrompt: string) => void | Promise<void>;
 }) {
   const [mode, setMode] = React.useState<"preview" | "edit">("preview");
   const [zoom, setZoom] = React.useState(1);
@@ -79,10 +79,12 @@ export function ImageLightbox({
   const editCanvasSize = React.useMemo(
     () =>
       fitImageSize(
-        mask.imgSize,
-        viewport.w > 0 ? viewport.w * 0.92 : mask.imgSize.w,
-        viewport.h > 0 ? viewport.h * 0.75 : mask.imgSize.h
-      ),
+	        mask.imgSize,
+	        viewport.w > 0 ? viewport.w * 0.92 : mask.imgSize.w,
+	        viewport.h > 0 ? viewport.h * 0.75 : mask.imgSize.h,
+	        160,
+	        160
+	      ),
     [mask.imgSize, viewport]
   );
 
@@ -162,21 +164,30 @@ export function ImageLightbox({
   }, [open, src]);
 
   const handleDownload = async () => {
+    const filename = alt || src.split("/").pop() || "image.png";
     try {
       const res = await fetch(src);
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = alt || src.split("/").pop() || "image.png";
+      a.download = filename;
+      a.style.display = "none";
+      document.body.appendChild(a);
       a.click();
-      URL.revokeObjectURL(url);
+      window.setTimeout(() => {
+        URL.revokeObjectURL(url);
+        a.remove();
+      }, 1000);
     } catch {
       const a = document.createElement("a");
       a.href = src;
-      a.download = alt || src.split("/").pop() || "image.png";
+      a.download = filename;
       a.target = "_blank";
+      a.style.display = "none";
+      document.body.appendChild(a);
       a.click();
+      window.setTimeout(() => a.remove(), 1000);
     }
   };
 
@@ -199,7 +210,7 @@ export function ImageLightbox({
         mask: maskDataUrl,
         prompt: prompt.trim(),
       });
-      onEdited(data.url);
+      await onEdited(data.url, prompt.trim());
       onOpenChange(false);
       toast.success(maskDataUrl ? "局部编辑完成" : "全图编辑完成");
     } catch (e) {

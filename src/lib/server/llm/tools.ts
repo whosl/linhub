@@ -481,9 +481,10 @@ export function buildArtifactTools(conversationId: string): ToolSet {
       description: "更新一个已存在的 Artifact，生成新版本。",
       inputSchema: z.object({
         artifactId: z.string().describe("要更新的 artifact id"),
+        title: z.string().trim().min(1).max(120).optional().describe("可选：同步更新作品标题"),
         content: z.string().describe("更新后的完整内容"),
       }),
-      execute: async ({ artifactId, content }) => {
+      execute: async ({ artifactId, title, content }) => {
         // 只允许更新当前会话内的 artifact（防跨会话越权写）
         const scope = and(
           eq(schema.artifacts.id, artifactId),
@@ -492,9 +493,11 @@ export function buildArtifactTools(conversationId: string): ToolSet {
         const [existing] = await db.select().from(schema.artifacts).where(scope);
         if (!existing) throw new Error("Artifact 不存在");
         const nextVersion = existing.currentVersion + 1;
+        const nextTitle = title?.trim() || existing.title;
         await db
           .update(schema.artifacts)
           .set({
+            title: nextTitle,
             versions: [
               ...existing.versions,
               { version: nextVersion, content, createdAt: new Date().toISOString() },
@@ -505,8 +508,8 @@ export function buildArtifactTools(conversationId: string): ToolSet {
           .where(scope);
         return {
           artifactId,
-          artifactTitle: existing.title,
-          text: `已更新 Artifact「${existing.title}」到 v${nextVersion}`,
+          artifactTitle: nextTitle,
+          text: `已更新 Artifact「${nextTitle}」到 v${nextVersion}`,
         };
       },
     }),
@@ -637,43 +640,212 @@ export function buildKnowledgeTool(userId: string, kbIds: string[]): ToolSet {
         query: z.string().describe("检索问题或关键词"),
       }),
       execute: async ({ query }) => {
-        const { embedText } = await import("./embedding");
-        const queryEmbedding = await embedText(query);
-        const { cosineDistance, desc: descOp, sql: sqlOp, inArray } = await import("drizzle-orm");
-        const similarity = sqlOp<number>`1 - (${cosineDistance(schema.kbChunks.embedding, queryEmbedding)})`;
-        const rows = await db
-          .select({
-            documentId: schema.kbChunks.documentId,
-            chunkIndex: schema.kbChunks.chunkIndex,
-            content: schema.kbChunks.content,
-            similarity,
-            documentName: schema.kbDocuments.name,
-          })
-          .from(schema.kbChunks)
-          .innerJoin(schema.kbDocuments, eq(schema.kbChunks.documentId, schema.kbDocuments.id))
-          .innerJoin(
-            schema.knowledgeBases,
-            eq(schema.kbChunks.knowledgeBaseId, schema.knowledgeBases.id)
-          )
-          .where(
-            and(
-              inArray(schema.kbChunks.knowledgeBaseId, kbIds),
-              // 只允许检索当前用户自己的知识库（防 IDOR）
-              eq(schema.knowledgeBases.ownerId, userId),
-              eq(schema.kbDocuments.status, "ready")
+        const { and: andOp, cosineDistance, desc: descOp, inArray, isNotNull, or: orOp, sql: sqlOp } =
+          await import("drizzle-orm");
+        const normalize = (value: string) => value.trim().toLocaleLowerCase();
+        const escapeLikePattern = (value: string) =>
+          `%${value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_")}%`;
+        const stopWords = new Set([
+          "the",
+          "and",
+          "for",
+          "with",
+          "what",
+          "how",
+          "use",
+          "using",
+          "please",
+          "回答",
+          "必须",
+          "包含",
+          "使用",
+          "只用",
+          "挂载",
+          "文档",
+        ]);
+        const addTerm = (terms: Map<string, number>, rawTerm: string, weight: number) => {
+          const term = normalize(rawTerm);
+          if (!term || stopWords.has(term)) return;
+          terms.set(term, Math.max(terms.get(term) ?? 0, weight));
+        };
+        const collectKeywordTerms = () => {
+          const terms = new Map<string, number>();
+          query
+            .split(/[^\p{L}\p{N}]+/u)
+            .map((term) => term.trim())
+            .filter((term) => term.length >= 3 && term.length <= 32)
+            .forEach((term) => addTerm(terms, term, term.length >= 5 ? 3 : 2));
+          for (const match of query.matchAll(/[\p{Script=Han}]{2,}/gu)) {
+            const text = match[0];
+            if (text.length <= 4) {
+              addTerm(terms, text, 2);
+              continue;
+            }
+            for (let size = 2; size <= 3; size += 1) {
+              for (let i = 0; i <= text.length - size; i += 1) {
+                addTerm(terms, text.slice(i, i + size), size === 3 ? 2 : 1);
+              }
+            }
+          }
+          return Array.from(terms, ([term, weight]) => ({ term, weight })).slice(0, 18);
+        };
+        const keywordTerms = collectKeywordTerms();
+        const scoreKeywordHit = (content: string) => {
+          const text = normalize(content);
+          return keywordTerms.reduce(
+            (score, { term, weight }) => score + (text.includes(term) ? weight : 0),
+            0
+          );
+        };
+        const scope = andOp(
+          inArray(schema.kbChunks.knowledgeBaseId, kbIds),
+          // 只允许检索当前用户自己的知识库（防 IDOR）
+          eq(schema.knowledgeBases.ownerId, userId),
+          eq(schema.kbDocuments.status, "ready")
+        );
+        const keywordRows = async () => {
+          if (keywordTerms.length === 0) return [];
+          const clauses = keywordTerms.map(({ term }) => {
+            const pattern = escapeLikePattern(term);
+            return sqlOp`${schema.kbChunks.content} ilike ${pattern} escape '\\'`;
+          });
+          const keywordScore = sqlOp<number>`(${sqlOp.join(
+            keywordTerms.map(({ term, weight }) => {
+              const pattern = escapeLikePattern(term);
+              return sqlOp`case when ${schema.kbChunks.content} ilike ${pattern} escape '\\' then ${weight} else 0 end`;
+            }),
+            sqlOp` + `
+          )})`;
+          const rows = await db
+            .select({
+              documentId: schema.kbChunks.documentId,
+              chunkIndex: schema.kbChunks.chunkIndex,
+              content: schema.kbChunks.content,
+              documentName: schema.kbDocuments.name,
+              keywordScore,
+            })
+            .from(schema.kbChunks)
+            .innerJoin(
+              schema.kbDocuments,
+              andOp(
+                eq(schema.kbChunks.documentId, schema.kbDocuments.id),
+                eq(schema.kbChunks.knowledgeBaseId, schema.kbDocuments.knowledgeBaseId)
+              )
             )
-          )
-          .orderBy((t) => descOp(t.similarity))
-          .limit(6);
-        const hits = rows.filter((r) => r.similarity > 0.2);
+            .innerJoin(
+              schema.knowledgeBases,
+              eq(schema.kbChunks.knowledgeBaseId, schema.knowledgeBases.id)
+            )
+            .where(andOp(scope, orOp(...clauses)))
+            .orderBy((t) => [descOp(t.keywordScore), t.documentId, t.chunkIndex])
+            .limit(12);
+          return rows
+            .map((row) => ({
+              ...row,
+              keywordScore: Number(row.keywordScore) || scoreKeywordHit(row.content),
+            }))
+            .filter((row) => row.keywordScore >= 2)
+            .slice(0, 6)
+            .map((row) => ({
+              ...row,
+              similarity: Math.min(0.99, row.keywordScore / 10),
+            }));
+        };
+        const mergeHits = (
+          candidates: Array<{
+            documentId: string;
+            documentName: string | null;
+            chunkIndex: number;
+            content: string;
+            similarity?: number;
+          }>
+        ) => {
+          const byChunk = new Map<string, (typeof candidates)[number] & { similarity: number }>();
+          for (const candidate of candidates) {
+            const similarity = typeof candidate.similarity === "number" ? candidate.similarity : 0;
+            const key = `${candidate.documentId}:${candidate.chunkIndex}`;
+            const existing = byChunk.get(key);
+            if (!existing || similarity > existing.similarity) {
+              byChunk.set(key, { ...candidate, similarity });
+            }
+          }
+          return Array.from(byChunk.values())
+            .sort(
+              (a, b) =>
+                b.similarity - a.similarity ||
+                (a.documentName ?? "").localeCompare(b.documentName ?? "") ||
+                a.documentId.localeCompare(b.documentId) ||
+                a.chunkIndex - b.chunkIndex
+            )
+            .slice(0, 6);
+        };
+
+        let hits: Array<{
+          documentId: string;
+          documentName: string | null;
+          chunkIndex: number;
+          content: string;
+          similarity?: number;
+        }> = [];
+        let queryEmbedding: number[] | null = null;
+        try {
+          const { embedText } = await import("./embedding");
+          const embedding = await embedText(query);
+          if (embedding.length === 1536) {
+            queryEmbedding = embedding;
+          } else {
+            console.warn(
+              `知识库 query embedding 维度异常：${embedding.length}，已降级为关键词检索`
+            );
+          }
+        } catch (e) {
+          // embedding 不可用时退化为关键词检索。
+          console.warn("知识库 query embedding 失败，已降级为关键词检索", e);
+        }
+        if (queryEmbedding) {
+          try {
+            const similarity = sqlOp<number>`1 - (${cosineDistance(schema.kbChunks.embedding, queryEmbedding)})`;
+            const rows = await db
+              .select({
+                documentId: schema.kbChunks.documentId,
+                chunkIndex: schema.kbChunks.chunkIndex,
+                content: schema.kbChunks.content,
+                similarity,
+                documentName: schema.kbDocuments.name,
+              })
+              .from(schema.kbChunks)
+              .innerJoin(
+                schema.kbDocuments,
+                andOp(
+                  eq(schema.kbChunks.documentId, schema.kbDocuments.id),
+                  eq(schema.kbChunks.knowledgeBaseId, schema.kbDocuments.knowledgeBaseId)
+                )
+              )
+              .innerJoin(
+                schema.knowledgeBases,
+                eq(schema.kbChunks.knowledgeBaseId, schema.knowledgeBases.id)
+              )
+              .where(andOp(scope, isNotNull(schema.kbChunks.embedding)))
+              .orderBy((t) => descOp(t.similarity))
+              .limit(6);
+            hits = rows.filter((r) => r.similarity > 0.2);
+          } catch (e) {
+            console.warn("知识库向量检索失败，已降级为关键词检索", e);
+          }
+        }
+        hits = mergeHits([...hits, ...(await keywordRows())]);
         if (hits.length === 0) return { text: "知识库中没有找到相关内容" };
+
         return {
           chunks: hits.map((r) => ({
             documentId: r.documentId,
             documentName: r.documentName,
             chunkIndex: r.chunkIndex,
             snippet: r.content.slice(0, 300),
-            score: Math.round(r.similarity * 100) / 100,
+            score:
+              typeof r.similarity === "number"
+                ? Math.round(r.similarity * 100) / 100
+                : 0,
           })),
           text: hits
             .map((r, i) => `[${i + 1}] 《${r.documentName}》#${r.chunkIndex}:\n${r.content}`)

@@ -28,6 +28,7 @@ import type {
   UsageRecord,
   User,
 } from "@/lib/types";
+import { replaceMessageImageParts } from "@/lib/message-image";
 import {
   mockArtifacts,
   mockConversations,
@@ -579,17 +580,22 @@ export class MockDataService implements DataService {
       if (m) m.feedback = feedback ?? undefined;
     }
   }
-  async replaceMessageImage(messageId: string, oldUrl: string, newUrl: string) {
+  async replaceMessageImage(
+    messageId: string,
+    oldUrl: string,
+    newUrl: string,
+    editPrompt?: string
+  ) {
     await sleep(100);
     for (const msgs of Object.values(this.s.messages)) {
       const m = msgs.find((x) => x.id === messageId);
       if (!m) continue;
-      m.parts = m.parts.map((p) =>
-        p.type === "image" && p.url === oldUrl
-          ? { ...p, url: newUrl, alt: "编辑后的图片" }
-          : p
-      );
+      const replaced = replaceMessageImageParts(m.parts, oldUrl, newUrl, editPrompt);
+      if (!replaced.replaced) throw new Error("图片不存在");
+      m.parts = replaced.parts;
+      return;
     }
+    throw new Error("图片不存在");
   }
   async editImage(input: { image: string; mask?: string | null; prompt: string }) {
     await sleep(600);

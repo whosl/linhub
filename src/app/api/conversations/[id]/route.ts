@@ -83,7 +83,23 @@ export async function PATCH(
   if (typeof body.title === "string") patch.title = body.title.slice(0, 100);
   if (typeof body.pinned === "boolean") patch.pinned = body.pinned;
   if (typeof body.archived === "boolean") patch.archived = body.archived;
-  if (typeof body.currentLeafId === "string") patch.currentLeafId = body.currentLeafId;
+  if (
+    typeof body.currentLeafId === "string" &&
+    body.currentLeafId !== c.currentLeafId
+  ) {
+    const [message] = await db
+      .select({ id: schema.messages.id })
+      .from(schema.messages)
+      .where(
+        and(
+          eq(schema.messages.id, body.currentLeafId),
+          eq(schema.messages.conversationId, id)
+        )
+      )
+      .limit(1);
+    if (!message) return Response.json({ error: "分支不存在" }, { status: 400 });
+    patch.currentLeafId = body.currentLeafId;
+  }
   if (typeof body.modelId === "string") patch.modelId = body.modelId;
   if (body.projectId !== undefined) {
     if (body.projectId === null) {
@@ -102,6 +118,10 @@ export async function PATCH(
       if (!p) return Response.json({ error: "项目不存在" }, { status: 404 });
       patch.projectId = body.projectId;
     }
+  }
+
+  if (Object.keys(patch).length === 0) {
+    return Response.json({ ok: true });
   }
 
   await db

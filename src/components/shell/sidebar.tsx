@@ -84,6 +84,7 @@ export function Sidebar() {
   });
 
   const active = conversations.filter((c) => !c.archived);
+  const archived = conversations.filter((c) => c.archived);
   const pinned = active.filter((c) => c.pinned);
   const recent = active.filter((c) => !c.pinned);
 
@@ -129,6 +130,12 @@ export function Sidebar() {
     invalidateProjectConversationQueries(c.projectId);
     toast.success("会话已归档");
     if (pathname === `/chat/${c.id}`) router.push("/");
+  };
+
+  const handleUnarchive = async (c: Conversation) => {
+    await mutateConversation(c.id, { archived: false });
+    invalidateProjectConversationQueries(c.projectId);
+    toast.success("会话已取消归档");
   };
 
   const handleMoveToProject = async (c: Conversation, projectId: string | null) => {
@@ -178,7 +185,17 @@ export function Sidebar() {
     }
   };
 
-  const content = (
+  const renderContent = (mobile: boolean) => {
+    const sidebarButtonLabel = mobile ? "关闭侧栏" : "收起侧栏";
+    const handleSidebarButtonClick = () => {
+      if (mobile) {
+        setMobileSidebar(false);
+        return;
+      }
+      toggleSidebar();
+    };
+
+    return (
     <div className="flex h-full flex-col">
       {/* 顶部：logo 与折叠 */}
       <div className="flex items-center justify-between px-3 pt-3">
@@ -191,14 +208,14 @@ export function Sidebar() {
           </span>
           LinHub
         </Link>
-        <Tooltip label="收起侧栏" shortcut="⌘\">
+        <Tooltip label={sidebarButtonLabel} shortcut="⌘\">
           <Button
             type="button"
-            aria-label="收起侧栏"
+            aria-label={sidebarButtonLabel}
             variant="ghost"
             size="icon-sm"
             className="text-sidebar-foreground"
-            onClick={toggleSidebar}
+            onClick={handleSidebarButtonClick}
           >
             <PanelLeftIcon />
           </Button>
@@ -250,6 +267,7 @@ export function Sidebar() {
             pathname={pathname}
             onTogglePin={(c) => mutateConversation(c.id, { pinned: !c.pinned })}
             onArchive={handleArchive}
+            archiveLabel="归档"
             onRename={handleRename}
             onDelete={setDeleteTarget}
             projects={projects}
@@ -268,6 +286,7 @@ export function Sidebar() {
             onEdit={() => setEditingProjectId(p.id)}
             onTogglePin={(c) => mutateConversation(c.id, { pinned: !c.pinned })}
             onArchive={handleArchive}
+            archiveLabel="归档"
             onRename={handleRename}
             onDelete={setDeleteTarget}
             projects={projects}
@@ -284,12 +303,27 @@ export function Sidebar() {
                 pathname={pathname}
                 onTogglePin={(c) => mutateConversation(c.id, { pinned: !c.pinned })}
                 onArchive={handleArchive}
+                archiveLabel="归档"
                 onRename={handleRename}
                 onDelete={setDeleteTarget}
                 projects={projects}
                 onMoveToProject={handleMoveToProject}
               />
             )
+        )}
+        {archived.length > 0 && (
+          <ConversationGroup
+            label="已归档"
+            conversations={archived}
+            pathname={pathname}
+            onTogglePin={(c) => mutateConversation(c.id, { pinned: !c.pinned })}
+            onArchive={handleUnarchive}
+            archiveLabel="取消归档"
+            onRename={handleRename}
+            onDelete={setDeleteTarget}
+            projects={projects}
+            onMoveToProject={handleMoveToProject}
+          />
         )}
       </div>
 
@@ -298,7 +332,8 @@ export function Sidebar() {
         <UserMenu />
       </div>
     </div>
-  );
+    );
+  };
 
   return (
     <>
@@ -309,7 +344,7 @@ export function Sidebar() {
         transition={{ type: "spring", stiffness: 380, damping: 38 }}
         className="relative z-30 hidden h-full shrink-0 overflow-hidden border-r border-sidebar-border bg-sidebar md:block"
       >
-        <div className="h-full w-[272px]">{content}</div>
+        <div className="h-full w-[272px]">{renderContent(false)}</div>
       </motion.aside>
 
       {/* 移动端抽屉 */}
@@ -333,7 +368,7 @@ export function Sidebar() {
                 if ((e.target as HTMLElement).closest("a")) setMobileSidebar(false);
               }}
             >
-              {content}
+              {renderContent(true)}
             </motion.aside>
           </>
         )}
@@ -409,6 +444,7 @@ function ConversationGroup({
   pathname,
   onTogglePin,
   onArchive,
+  archiveLabel = "归档",
   onRename,
   onDelete,
   projects,
@@ -419,6 +455,7 @@ function ConversationGroup({
   pathname: string;
   onTogglePin: (c: Conversation) => void;
   onArchive: (c: Conversation) => void;
+  archiveLabel?: string;
   onRename: (c: Conversation) => void;
   onDelete: (c: Conversation) => void;
   projects: { id: string; name: string; color?: string }[];
@@ -480,7 +517,7 @@ function ConversationGroup({
                   )}
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => onArchive(c)}>
-                  <ArchiveIcon /> 归档
+                  <ArchiveIcon /> {archiveLabel}
                 </DropdownMenuItem>
                 {projects.length > 0 && (
                   <>
@@ -525,6 +562,7 @@ function ProjectGroup({
   onEdit,
   onTogglePin,
   onArchive,
+  archiveLabel = "归档",
   onRename,
   onDelete,
   projects,
@@ -538,6 +576,7 @@ function ProjectGroup({
   onEdit: () => void;
   onTogglePin: (c: Conversation) => void;
   onArchive: (c: Conversation) => void;
+  archiveLabel?: string;
   onRename: (c: Conversation) => void;
   onDelete: (c: Conversation) => void;
   projects: { id: string; name: string; color?: string }[];
@@ -631,7 +670,7 @@ function ProjectGroup({
                       {c.pinned ? <><PinOffIcon /> 取消置顶</> : <><PinIcon /> 置顶</>}
                     </DropdownMenuItem>
                     <DropdownMenuItem onClick={() => onArchive(c)}>
-                      <ArchiveIcon /> 归档
+                      <ArchiveIcon /> {archiveLabel}
                     </DropdownMenuItem>
                     {projects.length > 0 && (
                       <>

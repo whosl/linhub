@@ -2,6 +2,7 @@
 
 import { create } from "zustand";
 import { getDataService } from "@/lib/data";
+import { replaceMessageImageParts } from "@/lib/message-image";
 import type {
   Message,
   MessagePart,
@@ -53,7 +54,8 @@ interface ChatState {
     conversationId: string,
     messageId: string,
     oldUrl: string,
-    newUrl: string
+    newUrl: string,
+    editPrompt?: string
   ) => Promise<void>;
   clearRedirect: () => void;
 }
@@ -600,40 +602,36 @@ export const useChatStore = create<ChatState>((set, get) => {
       });
     },
 
-    replaceMessageImage: async (conversationId, messageId, oldUrl, newUrl) => {
+    replaceMessageImage: async (conversationId, messageId, oldUrl, newUrl, editPrompt) => {
+      const originalParts = get()
+        .sessions[conversationId]?.messages.find((m) => m.id === messageId)
+        ?.parts;
       updateSession(conversationId, (s) => ({
         ...s,
         messages: s.messages.map((m) =>
           m.id === messageId
             ? {
                 ...m,
-                parts: m.parts.map((p) =>
-                  p.type === "image" && p.url === oldUrl
-                    ? { ...p, url: newUrl }
-                    : p
-                ),
+                parts: replaceMessageImageParts(m.parts, oldUrl, newUrl, editPrompt).parts,
               }
             : m
         ),
       }));
       try {
-        await getDataService().replaceMessageImage(messageId, oldUrl, newUrl);
-      } catch {
+        await getDataService().replaceMessageImage(messageId, oldUrl, newUrl, editPrompt);
+      } catch (e) {
         updateSession(conversationId, (s) => ({
           ...s,
           messages: s.messages.map((m) =>
-            m.id === messageId
+            m.id === messageId && m.parts.some((p) => p.type === "image" && p.url === newUrl)
               ? {
                   ...m,
-                  parts: m.parts.map((p) =>
-                    p.type === "image" && p.url === newUrl
-                      ? { ...p, url: oldUrl }
-                      : p
-                  ),
+                  parts: originalParts ?? m.parts,
                 }
               : m
           ),
         }));
+        throw e;
       }
     },
 

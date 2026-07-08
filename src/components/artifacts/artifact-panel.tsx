@@ -13,6 +13,8 @@ import {
   XIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { copyTextToClipboard } from "@/lib/clipboard";
+import { CopyFallbackDialog } from "@/components/ui/copy-fallback-dialog";
 import type { Artifact } from "@/lib/types";
 import { getDataService } from "@/lib/data";
 import { CodeBlock } from "@/components/chat/markdown/code-block";
@@ -72,6 +74,35 @@ const KIND_LANGUAGE: Record<Artifact["kind"], string> = {
   mermaid: "mermaid",
 };
 
+const LANGUAGE_EXTENSION_ALIASES: Record<string, string> = {
+  javascript: "js",
+  typescript: "ts",
+  markdown: "md",
+  python: "py",
+  "c++": "cpp",
+  "c#": "cs",
+};
+
+export function getArtifactCodeLanguage(
+  artifact: Pick<Artifact, "kind" | "language">
+) {
+  return artifact.kind === "code"
+    ? artifact.language ?? KIND_LANGUAGE.code
+    : KIND_LANGUAGE[artifact.kind];
+}
+
+function safeFileExtension(raw: string | null | undefined, fallback = "txt") {
+  const normalized = raw?.trim().toLowerCase() ?? "";
+  const mimeTail = normalized.includes("/") ? normalized.split("/").pop() : normalized;
+  const aliased =
+    LANGUAGE_EXTENSION_ALIASES[normalized] ??
+    LANGUAGE_EXTENSION_ALIASES[mimeTail ?? ""] ??
+    mimeTail ??
+    "";
+  const cleaned = aliased.replace(/^\.+/, "").replace(/[^a-z0-9]+/g, "");
+  return cleaned.slice(0, 16) || fallback;
+}
+
 export function ArtifactPanel({
   artifact,
   onClose,
@@ -82,6 +113,7 @@ export function ArtifactPanel({
   const [tab, setTab] = React.useState<"preview" | "code">("preview");
   const [version, setVersion] = React.useState(artifact.currentVersion);
   const [copied, setCopied] = React.useState(false);
+  const [manualCopyText, setManualCopyText] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     Promise.resolve().then(() => setVersion(artifact.currentVersion));
@@ -94,18 +126,15 @@ export function ArtifactPanel({
   const previewable = ["html", "react", "svg", "markdown", "mermaid"].includes(
     artifact.kind
   );
-  const codeLanguage =
-    artifact.kind === "code"
-      ? artifact.language ?? KIND_LANGUAGE.code
-      : KIND_LANGUAGE[artifact.kind];
+  const codeLanguage = getArtifactCodeLanguage(artifact);
 
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(current.content);
+      await copyTextToClipboard(current.content);
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
-      toast.error("复制失败，请手动选择代码");
+      setManualCopyText(current.content);
     }
   };
 
@@ -119,13 +148,23 @@ export function ArtifactPanel({
             ? "svg"
             : artifact.kind === "markdown"
               ? "md"
-              : artifact.language ?? "txt";
+              : artifact.kind === "mermaid"
+                ? "mmd"
+                : safeFileExtension(artifact.language);
     const blob = new Blob([current.content], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `${artifact.title}.${ext}`;
+    const safeTitle =
+      artifact.title.trim().replace(/[\\/:*?"<>|]+/g, "_") || "artifact";
+    a.href = url;
+    a.download = `${safeTitle}.${ext}`;
+    a.style.display = "none";
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(a.href);
+    window.setTimeout(() => {
+      URL.revokeObjectURL(url);
+      a.remove();
+    }, 1000);
   };
 
   const share = async () => {
@@ -133,10 +172,11 @@ export function ArtifactPanel({
       const { shareToken } = await getDataService().shareArtifact(artifact.id);
       const url = `${location.origin}/share/artifact/${shareToken}`;
       try {
-        await navigator.clipboard.writeText(url);
+        await copyTextToClipboard(url);
         toast.success("分享链接已复制");
       } catch {
-        toast.error(`复制失败，请手动复制：${url}`);
+        setManualCopyText(url);
+        toast.info("已打开手动复制窗口");
       }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "生成分享链接失败");
@@ -145,15 +185,15 @@ export function ArtifactPanel({
 
   return (
     <motion.div
-      initial={{ x: 40, opacity: 0 }}
-      animate={{ x: 0, opacity: 1 }}
-      exit={{ x: 40, opacity: 0 }}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
       transition={{ type: "spring", stiffness: 320, damping: 34 }}
-      className="flex h-full min-w-0 flex-1 flex-col border-l bg-card"
+      className="flex h-full min-w-0 max-w-full flex-1 flex-col overflow-hidden border-l bg-card"
     >
       {/* 头部 */}
-      <div className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
-        <span className="min-w-0 flex-1 truncate text-sm font-medium">
+      <div className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-b px-3 py-2 sm:h-12 sm:flex-nowrap sm:py-0">
+        <span className="min-w-0 basis-full truncate text-sm font-medium sm:basis-auto sm:flex-1">
           {artifact.title}
         </span>
 
@@ -252,6 +292,10 @@ export function ArtifactPanel({
           </div>
         )}
       </div>
+      <CopyFallbackDialog
+        text={manualCopyText}
+        onClose={() => setManualCopyText(null)}
+      />
     </motion.div>
   );
 }

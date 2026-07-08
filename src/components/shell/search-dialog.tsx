@@ -7,11 +7,13 @@ import { MessageSquareIcon, SearchIcon } from "lucide-react";
 import { getDataService } from "@/lib/data";
 import { formatRelativeTime } from "@/lib/utils";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { useChatStore } from "@/stores/chat-store";
 import { useUiStore } from "@/stores/ui-store";
 
 export function SearchDialog() {
   const router = useRouter();
   const { searchOpen, setSearchOpen } = useUiStore();
+  const switchBranch = useChatStore((s) => s.switchBranch);
   const [query, setQuery] = React.useState("");
   // I19: 防抖——输入值与查询值分离，避免每次按键都发 /api/conversations 请求
   const [debouncedQuery, setDebouncedQuery] = React.useState("");
@@ -66,6 +68,12 @@ export function SearchDialog() {
                 key={c.id}
                 onClick={() => {
                   setSearchOpen(false);
+                  if (
+                    c.searchMatchLeafId &&
+                    c.searchMatchLeafId !== c.currentLeafId
+                  ) {
+                    switchBranch(c.id, c.searchMatchLeafId);
+                  }
                   router.push(`/chat/${c.id}`);
                 }}
                 className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-accent"
