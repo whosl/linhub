@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { db, schema } from "./db";
 import { ensureSkillRuntimeReady } from "./skill-runtime";
 
@@ -7,6 +7,7 @@ let seedInFlight: Promise<void> | null = null;
 
 /** 幂等初始化：内置风格、默认供应商与模型、全局设置、默认套餐 */
 export async function ensureSeeded() {
+  await ensureSettingsColumns();
   await ensureSkillRuntimeReady();
   if (seeded) return;
   if (seedInFlight) return seedInFlight;
@@ -18,6 +19,7 @@ export async function ensureSeeded() {
 }
 
 async function seedDatabase() {
+  await ensureSettingsColumns();
   await ensureSkillRuntimeReady();
   const [existingSettings] = await db
     .select({ id: schema.settings.id })
@@ -165,6 +167,13 @@ async function seedDatabase() {
       .onConflictDoNothing();
   });
   seeded = true;
+}
+
+async function ensureSettingsColumns() {
+  await db.execute(sql`
+    alter table if exists settings
+      add column if not exists tool_router_model_id text
+  `);
 }
 
 /** 供应商是否已配置密钥（决定聊天走真实模型还是提示配置） */

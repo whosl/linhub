@@ -953,6 +953,7 @@ export const mockLedger: LedgerEntry[] = [
 export const mockSettings: AppSettings = {
   siteName: "LinHub",
   visionHelperModelId: "m-gemini",
+  toolRouterModelId: "m-gemini",
   embeddingModelId: "m-glm",
   tavilyApiKeyMasked: "tvly-...8xKq",
   mimoApiKeyMasked: "mm-...t7Rd",

@@ -1425,6 +1425,7 @@ function SystemSettingsTab() {
   };
 
   const visionModels = models.filter((m) => m.capabilities.includes("vision"));
+  const chatModels = models.filter((m) => !m.capabilities.includes("image-generation"));
 
   const isDirty = (draft: EngineDraft, saved: Partial<EngineDraft>) =>
     (draft.baseUrl.trim() !== (saved.baseUrl ?? "").trim()) ||
@@ -1583,7 +1584,7 @@ function SystemSettingsTab() {
     <div className="space-y-4">
       <Card className="space-y-4 p-5">
         <p className="text-sm font-medium">辅助模型</p>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
           <div>
             <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
               辅助识图模型（供无视觉模型使用）
@@ -1592,6 +1593,19 @@ function SystemSettingsTab() {
               value={settings.visionHelperModelId}
               onValueChange={(v) => save({ visionHelperModelId: v })}
               options={visionModels.map((m) => ({ value: m.id, label: m.displayName }))}
+            />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+              智能工具路由模型
+            </label>
+            <Select
+              value={settings.toolRouterModelId ?? ""}
+              onValueChange={(v) => save({ toolRouterModelId: v })}
+              options={[
+                { value: "", label: "不使用辅助模型" },
+                ...chatModels.map((m) => ({ value: m.id, label: m.displayName })),
+              ]}
             />
           </div>
           <div>

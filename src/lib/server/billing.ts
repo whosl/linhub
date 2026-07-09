@@ -12,7 +12,8 @@ export type UsageCapability =
   | "asr"
   | "vision-helper"
   | "web-search"
-  | "spreadsheet-analysis";
+  | "spreadsheet-analysis"
+  | "tool-router";
 
 export interface SpendReservation {
   amountCents: number;

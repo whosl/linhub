@@ -439,6 +439,7 @@ export class MockDataService implements DataService {
         ...(input.images ?? []),
         ...(input.attachments ?? []),
         { type: "text", text: input.text },
+        { type: "tool-config", tools: input.tools },
       ],
       quotedText: input.quotedText,
       createdAt: nowIso(),

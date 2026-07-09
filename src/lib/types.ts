@@ -186,6 +186,8 @@ export interface MediaAsset {
   messageId?: string;
   projectId?: string;
   sourceTool?: string;
+  /** 解析/识图后的文本预览（文档、表格、PPT、代码等上传文件可用） */
+  extractedText?: string;
   createdAt: string;
 }
 
@@ -198,10 +200,14 @@ export interface FilePart {
   url?: string;
 }
 
-/** 内部元数据：记录本轮请求启用的工具，用于重新生成时恢复上下文；前端不渲染。 */
+/** 内部元数据：记录本轮请求启用的工具，用于重新生成时恢复上下文。 */
 export interface ToolConfigPart {
   type: "tool-config";
+  /** 本轮最终使用的工具计划；旧消息里这个字段就是用户发送时的开关。 */
   tools: ChatToolToggles;
+  /** 用户发送时的原始开关，用于区分“允许自动选择”和最终实际挂载。 */
+  originalTools?: ChatToolToggles;
+  routing?: ToolRoutingDecision;
 }
 
 export type MessagePart =
@@ -505,6 +511,8 @@ export interface AppSettings {
   defaultChatModelId?: string;
   /** 辅助识图模型 */
   visionHelperModelId?: string;
+  /** 智能工具路由模型 */
+  toolRouterModelId?: string;
   /** embedding 模型 */
   embeddingModelId?: string;
   // ---- 引擎配置 ----
@@ -546,15 +554,42 @@ export type EngineTestResult =
 // ---------- 聊天发送与流式事件 ----------
 
 export interface ChatToolToggles {
+  /** 开启后由服务端按本轮请求自动挑选实际挂载的工具/MCP/Skill。 */
+  autoRouting?: boolean;
   webSearch: boolean;
   imageGeneration: boolean;
   codeRunner: boolean;
-  /** 是否允许模型检索用户私有知识库；开启时空 knowledgeBaseIds 表示全部知识库 */
+  /**
+   * 是否允许模型检索用户私有知识库。
+   * 普通聊天中空 knowledgeBaseIds 表示全部知识库；项目聊天默认只使用项目文件和项目关联知识库。
+   */
   knowledgeSearch: boolean;
   /** 启用的 MCP server id */
   mcpServerIds: string[];
-  /** 限定检索的知识库范围；为空且 knowledgeSearch=true 时检索全部 */
+  /** 本轮额外限定/加入的知识库范围 */
   knowledgeBaseIds: string[];
+}
+
+export type RoutingBuiltin =
+  | "webSearch"
+  | "imageGeneration"
+  | "codeRunner"
+  | "knowledgeSearch"
+  | "spreadsheet"
+  | "vision"
+  | "artifacts"
+  | "memory"
+  | "pptx";
+
+export interface ToolRoutingDecision {
+  enabled: boolean;
+  source: "manual" | "rules" | "model" | "mixed";
+  finalTools: ChatToolToggles;
+  selectedBuiltins: RoutingBuiltin[];
+  selectedMcpServerIds: string[];
+  selectedSkillIds: string[];
+  labels: string[];
+  reasons: string[];
 }
 
 export interface SendMessageInput {
@@ -579,6 +614,7 @@ export interface SendMessageInput {
 export type StreamEvent =
   | { type: "conversation-created"; conversation: Conversation }
   | { type: "user-message"; message: Message }
+  | { type: "routing-decision"; messageId: string; decision: ToolRoutingDecision }
   | { type: "assistant-start"; message: Message }
   | { type: "assistant-snapshot"; message: Message }
   | { type: "reasoning-delta"; messageId: string; delta: string }

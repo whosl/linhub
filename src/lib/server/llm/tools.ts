@@ -5,7 +5,7 @@ import { and, eq, or, isNull } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 import { decryptSecret } from "@/lib/server/crypto";
 import { resolveImageSource } from "./image-source";
-import { getProviderBaseURL, resolveModel } from "./registry";
+import { getProviderBaseURL } from "./registry";
 import { formatUpstreamError } from "@/lib/server/upstream-error";
 import { getImageGenConfig, getSearchConfig } from "@/lib/server/engine-config";
 import { assertModelAccess } from "@/lib/server/billing";
@@ -1642,12 +1642,23 @@ export function buildVisionTool(userId: string, origin?: string): ToolSet {
         const { describeImageFromBuffer } = await import(
           "@/lib/server/vision-describe"
         );
-        const text = await describeImageFromBuffer(
-          userId,
-          buffer,
-          mime,
-          question ?? "详细描述这张图片的内容。"
-        );
+        let text: string;
+        try {
+          text = await describeImageFromBuffer(
+            userId,
+            buffer,
+            mime,
+            question ?? "详细描述这张图片的内容。"
+          );
+        } catch (e) {
+          const message = e instanceof Error ? e.message : "未知错误";
+          if (/Maximum call stack size exceeded/i.test(message)) {
+            throw new Error(
+              "辅助识图模型处理这张图片失败，请压缩图片或切换支持视觉输入的辅助识图模型。"
+            );
+          }
+          throw e;
+        }
         return { text };
       },
     }),
@@ -1989,7 +2000,7 @@ export function buildKnowledgeTool(userId: string, kbIds: string[]): ToolSet {
     search_knowledge: tool({
       description:
         kbIds.length > 0
-          ? "在用户私有知识库中检索相关内容。用户提到知识库、用户已上传的文档/报告/资料/附件或要求基于私有材料回答时，必须优先调用；回答引用检索结果时注明来源文档。"
+          ? "在当前限定的用户私有知识库范围中检索相关内容。用户提到知识库、用户已上传的文档/报告/资料/附件或要求基于私有材料回答时，必须优先调用；回答引用检索结果时注明来源文档。"
           : "在用户的所有私有知识库中检索相关内容。用户提到知识库、用户已上传的文档/报告/资料/附件或要求基于私有材料回答时，必须优先调用；不要用 web_search 或 search_memory 替代；回答引用检索结果时注明来源文档。",
       inputSchema: z.object({
         query: z.string().describe("检索问题或关键词"),

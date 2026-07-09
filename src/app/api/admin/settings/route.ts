@@ -20,6 +20,7 @@ function toUi(s: typeof schema.settings.$inferSelect) {
     siteName: s.siteName,
     defaultChatModelId: s.defaultChatModelId ?? undefined,
     visionHelperModelId: s.visionHelperModelId ?? undefined,
+    toolRouterModelId: s.toolRouterModelId ?? undefined,
     embeddingModelId: s.embeddingModelId ?? undefined,
     // 引擎配置
     imageGenBaseUrl: s.imageGenBaseUrl ?? undefined,
@@ -63,6 +64,8 @@ export async function POST(req: NextRequest) {
     patch.defaultChatModelId = body.defaultChatModelId || null;
   if (typeof body.visionHelperModelId === "string")
     patch.visionHelperModelId = body.visionHelperModelId;
+  if (typeof body.toolRouterModelId === "string")
+    patch.toolRouterModelId = body.toolRouterModelId || null;
   if (typeof body.embeddingModelId === "string")
     patch.embeddingModelId = body.embeddingModelId;
   if (typeof body.mimoTtsVoice === "string") patch.mimoTtsVoice = body.mimoTtsVoice;

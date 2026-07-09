@@ -564,6 +564,7 @@ export const settings = pgTable("settings", {
   /** 全局默认对话模型（管理员设置，用户未自定义时用这个） */
   defaultChatModelId: text("default_chat_model_id"),
   visionHelperModelId: text("vision_helper_model_id"),
+  toolRouterModelId: text("tool_router_model_id"),
   embeddingModelId: text("embedding_model_id"),
 
   // ---- 引擎配置（文本/生图/TTS/ASR/搜索各自独立） ----

@@ -173,6 +173,7 @@ export function mergeSkillToggles(
   skill: SkillRow | undefined
 ): ChatToolToggles {
   const merged: ChatToolToggles = {
+    autoRouting: base?.autoRouting ?? true,
     webSearch: base?.webSearch ?? false,
     imageGeneration: base?.imageGeneration ?? false,
     codeRunner: base?.codeRunner ?? false,

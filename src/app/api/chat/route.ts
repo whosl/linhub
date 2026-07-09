@@ -39,11 +39,17 @@ import {
   composeSkillPackPrompt,
   mergeSkillToggles,
 } from "@/lib/server/skill-runtime";
+import {
+  isVisionDirectedQuery,
+  persistToolRoutingDecision,
+  resolveToolRouting,
+} from "@/lib/server/llm/tool-router";
 import type {
   ChatToolToggles,
   ImagePart,
   Message as UiMessage,
   MessagePart,
+  RoutingBuiltin,
   SendMessageInput,
   StreamEvent,
   ToolCallPart,
@@ -582,9 +588,13 @@ function eventsAfterAssistantSnapshot(
     if (snapshotCoversProjection(snapshot, projection)) coveredUntil = index + 1;
   });
 
-  return events
+  const nonAssistantStateEvents = events.filter(
+    (event) => event.type === "routing-decision"
+  );
+  const replay = events
     .slice(coveredUntil)
     .filter((event) => shouldReplayLiveEventAfterSnapshot(task, event));
+  return [...nonAssistantStateEvents, ...replay];
 }
 
 function applyAssistantProjection(
@@ -609,6 +619,8 @@ function applyAssistantProjection(
       projection.status = event.message.status;
       projection.usage = event.message.usage;
       return true;
+    case "routing-decision":
+      return false;
     case "reasoning-delta":
     case "text-delta":
       if (event.messageId !== assistantId) return false;
@@ -773,6 +785,8 @@ function shouldReplayLiveEventAfterSnapshot(
     case "image":
     case "artifact":
       return event.messageId === task.assistantMessageId;
+    case "routing-decision":
+      return true;
     case "done":
       return event.messageId === task.assistantMessageId;
     case "error":
@@ -1399,7 +1413,9 @@ async function getMessageToolToggles(
     (p): p is Extract<MessagePart, { type: "tool-config" }> =>
       p.type === "tool-config"
   );
-  return normalizeChatToolToggles(part?.tools);
+  const restored = part?.routing?.finalTools ?? part?.tools;
+  const normalized = normalizeChatToolToggles(restored);
+  return normalized ? { ...normalized, autoRouting: false } : null;
 }
 
 function normalizeChatToolToggles(
@@ -1407,6 +1423,7 @@ function normalizeChatToolToggles(
 ): ChatToolToggles | null {
   if (!tools) return null;
   return {
+    autoRouting: tools.autoRouting ?? true,
     webSearch: tools.webSearch ?? false,
     imageGeneration: tools.imageGeneration ?? false,
     codeRunner: tools.codeRunner ?? false,
@@ -1418,6 +1435,7 @@ function normalizeChatToolToggles(
 
 function inferRegenerateToolToggles(parts: MessagePart[]): ChatToolToggles {
   const toggles: ChatToolToggles = {
+    autoRouting: false,
     webSearch: false,
     imageGeneration: false,
     codeRunner: false,
@@ -1445,6 +1463,42 @@ function inferRegenerateToolToggles(parts: MessagePart[]): ChatToolToggles {
     if (part.toolName === "search_knowledge") toggles.knowledgeSearch = true;
   }
   return toggles;
+}
+
+function builtinsFromEnabledPlan(plan: Record<RoutingBuiltin, boolean>) {
+  return (Object.keys(plan) as RoutingBuiltin[]).filter((name) => plan[name]);
+}
+
+function applySkillBuiltinPlan(
+  plan: Record<RoutingBuiltin, boolean>,
+  skill: typeof schema.skills.$inferSelect | undefined,
+  toggles: ChatToolToggles
+) {
+  if (!skill || skill.kind !== "pack") return;
+  const tools = new Set([
+    ...((skill.enabledTools ?? []) as string[]),
+    ...((skill.requiredTools ?? []) as string[]),
+  ]);
+  if (toggles.webSearch && (tools.has("web_search") || tools.has("web_read"))) {
+    plan.webSearch = true;
+  }
+  if (toggles.codeRunner && tools.has("run_code")) plan.codeRunner = true;
+  if (
+    toggles.imageGeneration &&
+    (tools.has("generate_image") || tools.has("edit_image"))
+  ) {
+    plan.imageGeneration = true;
+  }
+  if (toggles.knowledgeSearch && tools.has("search_knowledge")) {
+    plan.knowledgeSearch = true;
+  }
+  if (
+    skill.id === "skill-pptx-native" ||
+    Array.from(tools).some((tool) => tool.startsWith("pptx_"))
+  ) {
+    plan.pptx = true;
+    plan.artifacts = true;
+  }
 }
 
 /** 解析用户的有效默认模型 id：用户个人默认 → 全局默认 → 第一个可用模型 */
@@ -1508,6 +1562,12 @@ async function getSkillDefaultModelId(
 }
 
 type ResolvedChatModel = Awaited<ReturnType<typeof resolveModel>>;
+
+function shouldInlineVisionInput(resolved: ResolvedChatModel) {
+  // 原生 vision 模型一律尝试内联；网关对 data URL 的兼容由 sanitizeOpenAIChatStreamFetch 处理。
+  // analyze_image 仅在无视觉能力或内联解析失败时再挂载。
+  return (resolved.record.capabilities as string[]).includes("vision");
+}
 
 async function userHasProAccess(userId: string) {
   return (await getActiveSubscription(userId))?.plan.modelTier === "pro";
@@ -1803,9 +1863,14 @@ async function streamAssistant(opts: {
   const modelHasVision = resolvedChatModel
     ? (resolvedChatModel.record.capabilities as string[]).includes("vision")
     : false;
+  const modelCanReceiveInlineImages = resolvedChatModel
+    ? shouldInlineVisionInput(resolvedChatModel)
+    : false;
   const modelSupportsTools = resolvedChatModel
     ? (resolvedChatModel.record.capabilities as string[]).includes("tools")
     : false;
+  /** 内联解析失败（或缺视觉）时才需要挂 analyze_image 降级 */
+  let visionHelperNeeded = false;
 
   // 历史消息链（从 parentId 向上回溯）
   const all = await db
@@ -1870,20 +1935,27 @@ async function streamAssistant(opts: {
       const imageUrls = imageParts
         .map((img, i) => `图片${i + 1}: ${img.url}`)
         .join("\n");
-      const imageToolHint = `\n\n（用户上传的图片路径：\n${imageUrls}\n如果用户要求编辑、修改、换背景或调整图片，请调用 edit_image，并把对应路径作为 imageUrl。）`;
-      if (modelHasVision) {
+      const editImageHint = `\n\n（用户上传的图片路径：\n${imageUrls}\n如果用户要求编辑、修改、换背景或调整图片，请调用 edit_image，并把对应路径作为 imageUrl。）`;
+      if (modelCanReceiveInlineImages) {
         const resolvedImages = await Promise.all(
           imageParts.map((img) => tryResolveHistoryImageSource(img.url, origin))
         );
         const imageSrcs = resolvedImages.flatMap((result) =>
           result.ok ? [result.source] : []
         );
+        const failedImages = imageParts.filter((_, i) => !resolvedImages[i]?.ok);
         const imageErrors = resolvedImages.flatMap((result) =>
           result.ok ? [] : [result.message]
         );
+        if (failedImages.length > 0) {
+          visionHelperNeeded = true;
+        }
+        const failedPaths = failedImages
+          .map((img, i) => `图片${i + 1}: ${img.url}`)
+          .join("\n");
         const imageErrorText =
-          imageErrors.length > 0
-            ? `\n\n（有 ${imageErrors.length} 张图片无法读取：${Array.from(new Set(imageErrors)).join("；")}）`
+          failedImages.length > 0
+            ? `\n\n（有 ${failedImages.length} 张图片无法内联：${Array.from(new Set(imageErrors)).join("；")}。若需要读取这些图片，请调用 analyze_image，路径：\n${failedPaths}）`
             : "";
         if (imageSrcs.length > 0) {
           history.push({
@@ -1892,7 +1964,7 @@ async function streamAssistant(opts: {
               ...imageSrcs.map(toModelImageFilePart),
               {
                 type: "text" as const,
-                text: (text || "请看这张图片。") + imageErrorText + imageToolHint,
+                text: (text || "请看这张图片。") + imageErrorText + editImageHint,
               },
             ],
           });
@@ -1901,14 +1973,13 @@ async function streamAssistant(opts: {
             role: "user",
             content:
               (text || "用户上传了图片。") +
-              `\n\n（图片无法读取：${Array.from(new Set(imageErrors)).join("；") || "图片无效"}）` +
-              imageToolHint,
+              `\n\n（图片无法内联：${Array.from(new Set(imageErrors)).join("；") || "图片无效"}。请调用 analyze_image 读取：\n${imageUrls}）` +
+              editImageHint,
           });
         }
       } else {
-        // 无视觉能力：提示模型按用户意图调用 analyze_image 或 edit_image 工具
-        // 本地路径不拼 origin（网关下载不到 localhost），原样传给工具，
-        // analyze_image 工具内部会把本地路径转 base64 内联。
+        // 无视觉能力：提示调用 analyze_image / edit_image；本地路径原样传给工具。
+        visionHelperNeeded = true;
         history.push({
           role: "user",
           content: `${text}\n\n（用户上传了图片，你无法直接查看。若用户询问图片内容，请调用 analyze_image；若用户要求编辑图片，请调用 edit_image。图片路径：\n${imageUrls}）`,
@@ -1923,10 +1994,21 @@ async function streamAssistant(opts: {
       assistantImageContextIds.has(m.id)
     ) {
       const imageUrls = imageParts.map((img, i) => `图片${i + 1}: ${img.url}`).join("\n");
-      history.push({
-        role: "assistant",
-        content: `${text || "已生成图片。"}\n\n（助手生成的图片：\n${imageUrls}\n如用户需要分析这张图片的视觉细节，请调用 analyze_image 工具读取对应路径。）`,
-      });
+      // 助手生图未内联进多模态消息；无视觉，或用户本轮在追问视觉细节时，降级挂 analyze_image
+      const needHelperForAssistantImage =
+        !modelHasVision || isVisionDirectedQuery(currentUserText);
+      if (needHelperForAssistantImage) {
+        visionHelperNeeded = true;
+        history.push({
+          role: "assistant",
+          content: `${text || "已生成图片。"}\n\n（助手生成的图片：\n${imageUrls}\n如需分析视觉细节，请调用 analyze_image 读取对应路径。）`,
+        });
+      } else {
+        history.push({
+          role: "assistant",
+          content: `${text || "已生成图片。"}\n\n（助手生成的图片：\n${imageUrls}）`,
+        });
+      }
       continue;
     }
 
@@ -2038,6 +2120,40 @@ async function streamAssistant(opts: {
     }
   }
 
+  const routing = await resolveToolRouting({
+    userId,
+    conversationId,
+    userMessageId: parentId,
+    userText: currentUserText,
+    messageParts: (currentUserMessage?.parts as MessagePart[] | undefined) ?? [],
+    requestedTools: opts.toolToggles,
+    projectKnowledgeBaseIds,
+    isProjectConversation: !!conv?.projectId,
+    activeSkillId: activeSkill?.id,
+    signal,
+  });
+  if (signal.aborted) return;
+
+  let routedSkill: typeof schema.skills.$inferSelect | undefined;
+  if (!activeSkill && routing.selectedSkillIds.length > 0) {
+    const [skill] = await db
+      .select()
+      .from(schema.skills)
+      .where(
+        and(
+          eq(schema.skills.id, routing.selectedSkillIds[0]),
+          eq(schema.skills.kind, "pack"),
+          eq(schema.skills.reviewStatus, "approved"),
+          or(eq(schema.skills.ownerId, userId), eq(schema.skills.visibility, "public"))
+        )
+      )
+      .limit(1);
+    if (skill) {
+      routedSkill = skill;
+      system += `\n\n${composeSkillPackPrompt(skill)}`;
+    }
+  }
+
   // 项目：自定义指令 + 项目文件
   if (conv?.projectId) {
     const [project] = await db
@@ -2049,7 +2165,7 @@ async function streamAssistant(opts: {
     }
     if (projectKnowledgeBaseIds.length > 0) {
       system +=
-        "\n\n本项目已关联知识库；用户询问项目资料、项目文件、报告、文档或材料时，应优先调用 search_knowledge 检索这些关联知识库。";
+        "\n\n本项目已关联长期知识库。项目文件会直接作为项目资料提供；关联知识库需要通过 search_knowledge 按需检索。";
     }
     const projectFiles = await db
       .select({ name: schema.attachments.name, text: schema.attachments.extractedText })
@@ -2107,10 +2223,56 @@ async function streamAssistant(opts: {
     // Artifact 列表读取失败不阻塞聊天
   }
 
-  // 工具集：根据会话开关组装
-  const toggles = mergeSkillToggles(opts.toolToggles, activeSkill);
+  // 工具集：智能路由先收敛实际能力；手动模式保持旧行为。
+  let toggles = mergeSkillToggles(routing.finalTools, activeSkill);
+  const enabledBuiltins = { ...routing.enabledBuiltins };
+  applySkillBuiltinPlan(enabledBuiltins, activeSkill, toggles);
+  if (routedSkill) {
+    toggles = {
+      ...toggles,
+      knowledgeBaseIds: Array.from(
+        new Set([
+          ...(toggles.knowledgeBaseIds ?? []),
+          ...((routedSkill.knowledgeBaseIds ?? []) as string[]),
+        ])
+      ),
+    };
+  }
+  const effectiveRoutingDecision = {
+    ...routing.decision,
+    finalTools: toggles,
+    selectedBuiltins: builtinsFromEnabledPlan(enabledBuiltins),
+    selectedSkillIds: routedSkill
+      ? [routedSkill.id]
+      : routing.decision.selectedSkillIds,
+  };
+  try {
+    await persistToolRoutingDecision(
+      conversationId,
+      parentId,
+      opts.toolToggles,
+      effectiveRoutingDecision
+    );
+    if (effectiveRoutingDecision.labels.length > 0) {
+      emit({
+        type: "routing-decision",
+        messageId: parentId,
+        decision: effectiveRoutingDecision,
+      });
+    }
+  } catch {
+    // 路由展示信息落库失败不阻塞主对话。
+  }
+
   const knowledgeSearchEnabled = toggles?.knowledgeSearch ?? true;
-  const imageGenerationEnabled = toggles?.imageGeneration ?? false;
+  const imageGenerationEnabled = enabledBuiltins.imageGeneration;
+  const selectedKnowledgeBaseIds = toggles?.knowledgeBaseIds ?? [];
+  const effectiveKnowledgeBaseIds = Array.from(
+    new Set([...(projectKnowledgeBaseIds ?? []), ...selectedKnowledgeBaseIds])
+  );
+  const isProjectConversation = !!conv?.projectId;
+  const hasKnowledgeSearchScope =
+    !isProjectConversation || effectiveKnowledgeBaseIds.length > 0;
   if (toggles?.codeRunner) {
     system +=
       "\n\n工具选择规则：当用户要求运行、执行、验证代码，或明确要求调用代码运行工具时，必须先调用 run_code，等待工具结果后再给结论；不要在工具返回前猜测、手算、复述旧结果或用 web_search 代替本地代码运行。对 Excel/CSV 等表格的复杂聚合、筛选、统计，优先调用 analyze_spreadsheet；run_code 仅支持受限 JavaScript，不能 import pandas。";
@@ -2119,8 +2281,16 @@ async function streamAssistant(opts: {
       "\n\n代码运行规则：本轮用户要求运行、执行、验证代码，或明确要求调用代码运行工具，但用户已关闭代码运行。不要用 web_search、知识库或手算结果冒充运行结果；请说明当前无法调用代码运行工具，并提示用户开启代码运行后重试。可以给出代码片段供用户自行运行，但必须明确它尚未在 LinHub 中执行。";
   }
   if (knowledgeSearchEnabled && shouldPrioritizeKnowledgeTool) {
-    system +=
-      "\n\n知识库检索规则：本轮用户在询问知识库、项目资料、已上传文档、报告、资料或附件。必须先调用 search_knowledge 检索用户私有知识库；不要用 web_search 或 search_memory 替代。若检索无结果，再如实说明没有在知识库中找到；只有用户同时明确要求查公开网页时，才在知识库检索之后补充联网搜索。";
+    if (isProjectConversation && !hasKnowledgeSearchScope) {
+      system +=
+        "\n\n资料检索规则：本会话在项目内，但当前项目未关联知识库，且本轮未额外选择知识库。不要为了补位而检索全部知识库；若项目文件内容足够，请直接基于项目文件回答，否则说明当前项目没有可检索的知识库资料。";
+    } else if (isProjectConversation) {
+      system +=
+        "\n\n资料检索规则：本轮用户在询问知识库、项目资料、已上传文档、报告、资料或附件。项目文件内容已直接提供；若上下文不足或用户点名知识库，必须先调用 search_knowledge 检索项目关联或本轮选择的知识库。不要用 web_search 或 search_memory 替代私有资料检索。";
+    } else {
+      system +=
+        "\n\n知识库检索规则：本轮用户在询问知识库、已上传文档、报告、资料或附件。必须先调用 search_knowledge 检索用户私有知识库；不要用 web_search 或 search_memory 替代。若检索无结果，再如实说明没有在知识库中找到；只有用户同时明确要求查公开网页时，才在知识库检索之后补充联网搜索。";
+    }
   } else if (!knowledgeSearchEnabled && shouldPrioritizeKnowledgeTool) {
     system +=
       "\n\n知识库检索规则：本轮用户在询问知识库、项目资料、已上传文档、报告、资料或附件，但用户已关闭知识库检索。不要用 web_search 或 search_memory 替代私有知识库；请说明当前无法读取知识库，并提示用户开启知识库检索后重试。";
@@ -2135,37 +2305,44 @@ async function streamAssistant(opts: {
   const pendingImages: string[] = [];
   let tools: ToolSet = {};
   let closeMcp: (() => Promise<void>) | undefined;
-  if (toggles?.webSearch) Object.assign(tools, buildWebTools(userId));
-  if (toggles?.webSearch) {
+  if (enabledBuiltins.webSearch) Object.assign(tools, buildWebTools(userId));
+  if (enabledBuiltins.webSearch) {
     system +=
       "\n\n联网搜索规则：优先用少量高质量来源完成核查；一旦已有足够证据，必须停止继续调用搜索/读取工具并直接给出最终回答。";
   }
-  if (toggles?.codeRunner) Object.assign(tools, buildCodeTools());
-  Object.assign(tools, buildSpreadsheetTools(userId));
+  if (enabledBuiltins.codeRunner) Object.assign(tools, buildCodeTools());
+  if (enabledBuiltins.spreadsheet) Object.assign(tools, buildSpreadsheetTools(userId));
   if (imageGenerationEnabled)
     Object.assign(
       tools,
       buildImageTools(userId, (url) => pendingImages.push(url), origin)
     );
-  Object.assign(tools, buildVisionTool(userId, origin));
-  if (!(shouldPrioritizeImageGeneration && !imageGenerationEnabled)) {
+  // 原生 vision 且内联成功：不挂 analyze_image；无视觉或内联失败时再降级挂载
+  const mountVisionHelper =
+    enabledBuiltins.vision && (!modelHasVision || visionHelperNeeded);
+  if (mountVisionHelper) Object.assign(tools, buildVisionTool(userId, origin));
+  if (
+    enabledBuiltins.artifacts &&
+    !(shouldPrioritizeImageGeneration && !imageGenerationEnabled)
+  ) {
     Object.assign(tools, buildArtifactTools(conversationId));
   }
-  Object.assign(tools, buildMemoryTools(userId, conversationId, conv?.projectId));
-  if (knowledgeSearchEnabled) {
-    const effectiveKnowledgeBaseIds = Array.from(
-      new Set([...(projectKnowledgeBaseIds ?? []), ...((toggles?.knowledgeBaseIds ?? []))])
-    );
+  if (enabledBuiltins.memory) {
+    Object.assign(tools, buildMemoryTools(userId, conversationId, conv?.projectId));
+  }
+  if (enabledBuiltins.knowledgeSearch && knowledgeSearchEnabled && hasKnowledgeSearchScope) {
     Object.assign(tools, buildKnowledgeTool(userId, effectiveKnowledgeBaseIds));
   }
-  if (activeSkill?.kind === "pack") {
-    Object.assign(tools, buildSkillPackTools(activeSkill));
+  const toolSkill = activeSkill?.kind === "pack" ? activeSkill : routedSkill;
+  if (toolSkill?.kind === "pack") {
+    Object.assign(tools, buildSkillPackTools(toolSkill));
     const skillTools = new Set([
-      ...((activeSkill.enabledTools ?? []) as string[]),
-      ...((activeSkill.requiredTools ?? []) as string[]),
+      ...((toolSkill.enabledTools ?? []) as string[]),
+      ...((toolSkill.requiredTools ?? []) as string[]),
     ]);
     if (
-      activeSkill.id === "skill-pptx-native" ||
+      enabledBuiltins.pptx ||
+      toolSkill.id === "skill-pptx-native" ||
       skillTools.has("pptx_extract_text") ||
       skillTools.has("pptx_create_deck")
     ) {
@@ -2791,6 +2968,9 @@ function getErrorMessage(e: unknown) {
 }
 
 function formatChatErrorMessage(message: string) {
+  if (/Maximum call stack size exceeded/i.test(message)) {
+    return "图片/多模态请求处理失败：当前模型网关处理这张图片时异常。请压缩图片后重试，或切换支持视觉输入的模型/辅助识图模型。";
+  }
   if (/Cannot connect to API|Connect Timeout|fetch failed|ECONN|ETIMEDOUT|timeout/i.test(message)) {
     return "模型服务连接超时，请稍后重试或切换模型。";
   }
@@ -2804,7 +2984,12 @@ function shouldShowProviderConfigHint(message: string) {
   if (/Cannot connect to API|Connect Timeout|fetch failed|ECONN|ETIMEDOUT|timeout|rate limit|429/i.test(message)) {
     return false;
   }
-  return true;
+  if (/Maximum call stack size exceeded|invalid image|unsupported|validation|zod|tool|图片|文件|multimodal/i.test(message)) {
+    return false;
+  }
+  return /api key|unauthorized|forbidden|401|403|authentication|permission|no such model|model .*not found|供应商|未配置 API Key|模型不可用/i.test(
+    message
+  );
 }
 
 function appendDelta(
