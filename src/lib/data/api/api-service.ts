@@ -10,6 +10,7 @@ import type {
   KnowledgeDocument,
   LedgerEntry,
   McpServer,
+  MediaAsset,
   MemoryEntry,
   Message,
   Model,
@@ -225,6 +226,7 @@ export class ApiDataService implements DataService {
     return (await this.getConversation(id))!;
   }
   async deleteConversation(id: string) {
+    void this.stopGeneration(id).catch(() => null);
     await fetchJson(`/api/conversations/${id}`, { method: "DELETE" });
   }
   listConversationsSearch(query: string) {
@@ -313,22 +315,28 @@ export class ApiDataService implements DataService {
     // I11: conversationId 为空时停止新会话的 in-flight 流
     const key = conversationId ?? this.startingConversationId ?? "__new_conversation__";
     const serverConversationId = conversationId ?? this.startingConversationId;
-    if (serverConversationId) {
-      await fetchJson(
-        `/api/chat?conversationId=${encodeURIComponent(serverConversationId)}`,
-        { method: "DELETE" },
-        8_000
-      ).catch(() => null);
-    } else if (this.startingGenerationId) {
-      await fetchJson(
-        `/api/chat?clientGenerationId=${encodeURIComponent(this.startingGenerationId)}`,
-        { method: "DELETE" },
-        8_000
-      ).catch(() => null);
-    }
     this.abortControllersForKey(key);
     if (!conversationId) {
       this.abortControllersForKey("__new_conversation__");
+    }
+    try {
+      if (serverConversationId) {
+        await fetchJson(
+          `/api/chat?conversationId=${encodeURIComponent(serverConversationId)}`,
+          { method: "DELETE" },
+          8_000
+        );
+      } else if (this.startingGenerationId) {
+        await fetchJson(
+          `/api/chat?clientGenerationId=${encodeURIComponent(this.startingGenerationId)}`,
+          { method: "DELETE" },
+          8_000
+        );
+      }
+    } catch (e) {
+      console.warn("停止服务端生成失败，已先在本地停止流", e);
+    }
+    if (!conversationId) {
       this.startingConversationId = null;
       this.startingGenerationId = null;
     }
@@ -530,7 +538,7 @@ export class ApiDataService implements DataService {
       return null;
     }
   }
-  saveSkill(s: Partial<Skill> & { name: string }) {
+  saveSkill(s: Partial<Skill> & { name: string; shareToMarket?: boolean }) {
     return fetchJson<Skill>("/api/skills", {
       method: "POST",
       body: JSON.stringify(s),
@@ -538,6 +546,27 @@ export class ApiDataService implements DataService {
   }
   async deleteSkill(id: string) {
     await fetchJson(`/api/skills/${id}`, { method: "DELETE" });
+  }
+
+  // ---- 文件 / 媒体 ----
+  listMediaAssets(opts?: {
+    kind?: "upload" | "generated" | "edited" | "all";
+    q?: string;
+    cursor?: string;
+    limit?: number;
+  }) {
+    const params = new URLSearchParams();
+    if (opts?.kind && opts.kind !== "all") params.set("kind", opts.kind);
+    if (opts?.q) params.set("q", opts.q);
+    if (opts?.cursor) params.set("cursor", opts.cursor);
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    const qs = params.toString();
+    return fetchJson<{ items: MediaAsset[]; nextCursor?: string }>(
+      `/api/media${qs ? `?${qs}` : ""}`
+    );
+  }
+  async deleteMediaAsset(id: string) {
+    await fetchJson(`/api/media/${id}`, { method: "DELETE" });
   }
 
   // ---- MCP（已接真） ----

@@ -11,6 +11,7 @@ import {
   SearchIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { formatToolPreviewLabel } from "@/lib/chat-text";
 import type { ToolCallPart, WebSource } from "@/lib/types";
 
 /** web 类工具：结果以 sources 形式呈现，适合折叠 + 来源区 */
@@ -34,10 +35,10 @@ const WEB_VERB: Record<string, string> = {
 
 /** 从原始 JSON 片段里提取第一个字符串值，供参数生成中的实时预览 */
 function extractPreviewValue(raw: string): string | null {
-  const m = raw.match(/"([^"]+)"\s*:\s*"([^"]*)/);
-  if (m) return m[2] || null;
-  const m2 = raw.match(/:\s*"([^"]*)/);
-  return m2 ? m2[1] || null : null;
+  const m = raw.match(/"([^"]+)"\s*:\s*"((?:\\.|[^"\\])*)/);
+  if (m?.[2]) return formatToolPreviewLabel(m[2]) || null;
+  const m2 = raw.match(/:\s*"((?:\\.|[^"\\])*)/);
+  return m2?.[1] ? formatToolPreviewLabel(m2[1]) || null : null;
 }
 
 /** 把多条 web 工具调用的 sources 摊平 + 按 url 去重 */

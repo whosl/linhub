@@ -1,5 +1,10 @@
 import { NextRequest } from "next/server";
 import { requireSession } from "@/lib/server/auth";
+import { BillingError } from "@/lib/server/billing";
+import {
+  engineResource,
+  withAtomicBilling,
+} from "@/lib/server/billing/capabilities";
 import { rateLimit } from "@/lib/server/rate-limit";
 import { getTtsConfig } from "@/lib/server/engine-config";
 import { formatUpstreamError } from "@/lib/server/upstream-error";
@@ -30,47 +35,48 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const { apiKey, baseURL, model, voice } = await getTtsConfig();
-    const res = await fetch(`${baseURL}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "api-key": apiKey,
+    const audioBytes = await withAtomicBilling(
+      session.user.id,
+      {
+        capability: "tts",
+        resource: engineResource("tts"),
+        units: { requestCount: 1 },
       },
-      body: JSON.stringify({
-        model,
-        messages: [
-          // user 消息：风格控制（留空 = 默认风格）
-          { role: "user", content: "" },
-          // assistant 消息：要合成的文本（必须放这里）
-          { role: "assistant", content: text.slice(0, 4000) },
-        ],
-        audio: {
-          format: "mp3",
-          voice: voice || "冰糖",
-        },
-      }),
-      signal: AbortSignal.timeout(TTS_TIMEOUT_MS),
-    });
+      async () => {
+        const { apiKey, baseURL, model, voice } = await getTtsConfig();
+        const res = await fetch(`${baseURL}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "api-key": apiKey,
+          },
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: "user", content: "" },
+              { role: "assistant", content: text.slice(0, 4000) },
+            ],
+            audio: {
+              format: "mp3",
+              voice: voice || "冰糖",
+            },
+          }),
+          signal: AbortSignal.timeout(TTS_TIMEOUT_MS),
+        });
 
-    if (!res.ok) {
-      return Response.json(
-        { error: await formatUpstreamError(res, "TTS 服务不可用") },
-        { status: 502 }
-      );
-    }
+        if (!res.ok) {
+          throw new Error(await formatUpstreamError(res, "TTS 服务不可用"));
+        }
 
-    // 响应是 JSON，音频在 choices[0].message.audio.data（base64）
-    const data = (await res.json()) as {
-      choices?: { message?: { audio?: { data?: string } } }[];
-    };
-    const audioB64 = data.choices?.[0]?.message?.audio?.data;
-    if (!audioB64) {
-      return Response.json({ error: "TTS 未返回音频数据" }, { status: 502 });
-    }
+        const data = (await res.json()) as {
+          choices?: { message?: { audio?: { data?: string } } }[];
+        };
+        const audioB64 = data.choices?.[0]?.message?.audio?.data;
+        if (!audioB64) throw new Error("TTS 未返回音频数据");
+        return Buffer.from(audioB64, "base64");
+      }
+    );
 
-    // 解 base64 返回二进制流
-    const audioBytes = Buffer.from(audioB64, "base64");
     return new Response(audioBytes, {
       headers: {
         "Content-Type": "audio/mpeg",
@@ -78,6 +84,9 @@ export async function POST(req: NextRequest) {
       },
     });
   } catch (e) {
+    if (e instanceof BillingError) {
+      return Response.json({ error: e.message }, { status: 402 });
+    }
     return Response.json(
       {
         error: isTimeoutError(e)

@@ -2,6 +2,7 @@ import { asc, eq } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 import { requireSession } from "@/lib/server/auth";
 import { ensureSeeded } from "@/lib/server/seed";
+import { getActiveSubscription } from "@/lib/server/billing";
 
 export async function GET() {
   await ensureSeeded();
@@ -31,23 +32,28 @@ export async function GET() {
     .where(eq(schema.settings.id, "global"))
     .limit(1);
 
-  const chatModelRows = rows.filter(
+  const hasProAccess =
+    (await getActiveSubscription(userId))?.plan.modelTier === "pro";
+  const accessibleRows = rows.filter(
+    (r) => r.model.tier !== "pro" || hasProAccess
+  );
+  const defaultableChatModelRows = accessibleRows.filter(
     (r) => !(r.model.capabilities as string[]).includes("image-generation")
   );
-  const chatModelIds = chatModelRows.map((r) => r.model.id);
+  const defaultableChatModelIds = defaultableChatModelRows.map((r) => r.model.id);
   const defaultModelId =
-    (user?.defaultModelId && chatModelIds.includes(user.defaultModelId)
+    (user?.defaultModelId && defaultableChatModelIds.includes(user.defaultModelId)
       ? user.defaultModelId
       : undefined) ??
     (globalSettings?.defaultChatModelId &&
-      chatModelIds.includes(globalSettings.defaultChatModelId)
+      defaultableChatModelIds.includes(globalSettings.defaultChatModelId)
       ? globalSettings.defaultChatModelId
       : undefined) ??
-    chatModelIds[0];
+    defaultableChatModelIds[0];
 
   return Response.json({
     defaultModelId,
-    models: rows.map(({ model: m, providerKind }) => ({
+    models: accessibleRows.map(({ model: m, providerKind }) => ({
       id: m.id,
       providerId: m.providerId,
       providerKind,

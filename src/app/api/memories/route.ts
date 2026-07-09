@@ -44,7 +44,7 @@ export async function POST(req: NextRequest) {
   let embedding: number[] | null = null;
   try {
     const { embedText } = await import("@/lib/server/llm/embedding");
-    embedding = await embedText(body.content);
+    embedding = await embedText(body.content, { userId: session.user.id });
   } catch {
     // 未配置 embedding 时保存纯文本
   }

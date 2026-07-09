@@ -6,6 +6,7 @@ import {
   pgTable,
   text,
   timestamp,
+  uniqueIndex,
   vector,
 } from "drizzle-orm/pg-core";
 
@@ -209,6 +210,42 @@ export const skills = pgTable("skills", {
   emoji: text("emoji").notNull().default("🤖"),
   description: text("description").notNull().default(""),
   systemPrompt: text("system_prompt").notNull(),
+  kind: text("kind", { enum: ["prompt", "pack"] }).notNull().default("prompt"),
+  version: text("version").notNull().default("1.0.0"),
+  source: text("source").notNull().default("user"),
+  manifest: jsonb("manifest").$type<Record<string, unknown>>().notNull().default({}),
+  packagePath: text("package_path"),
+  requiredTools: jsonb("required_tools").$type<string[]>().notNull().default([]),
+  resourceRefs: jsonb("resource_refs")
+    .$type<
+      {
+        id: string;
+        name: string;
+        kind?: string;
+        description?: string;
+        path?: string;
+        mimeType?: string;
+        size?: number;
+        content?: string;
+      }[]
+    >()
+    .notNull()
+    .default([]),
+  scriptPolicy: jsonb("script_policy")
+    .$type<{
+      enabled: boolean;
+      allowedScripts?: string[];
+      timeoutMs?: number;
+      network?: boolean;
+    }>()
+    .notNull()
+    .default({ enabled: false }),
+  reviewStatus: text("review_status", {
+    enum: ["draft", "pending", "approved", "rejected"],
+  })
+    .notNull()
+    .default("approved"),
+  publishedAt: timestamp("published_at"),
   greeting: text("greeting"),
   defaultModelId: text("default_model_id"),
   enabledTools: jsonb("enabled_tools").$type<string[]>().notNull().default([]),
@@ -264,6 +301,11 @@ export const kbDocuments = pgTable("kb_documents", {
     .notNull()
     .default("processing"),
   chunkCount: integer("chunk_count").notNull().default(0),
+  /** pdf | docx | pptx | xlsx | csv | text | code | vision … */
+  extractMethod: text("extract_method"),
+  errorMessage: text("error_message"),
+  /** 原文件相对路径，供 analyze_spreadsheet 等工具重读 */
+  storagePath: text("storage_path"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
@@ -281,6 +323,24 @@ export const kbChunks = pgTable(
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (t) => [index("kb_chunks_kb_idx").on(t.knowledgeBaseId)]
+);
+
+export const projectKnowledgeBases = pgTable(
+  "project_knowledge_bases",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    knowledgeBaseId: text("knowledge_base_id")
+      .notNull()
+      .references(() => knowledgeBases.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("project_knowledge_bases_unique").on(t.projectId, t.knowledgeBaseId),
+    index("project_knowledge_bases_project_idx").on(t.projectId),
+  ]
 );
 
 // ---------- Artifacts / 项目文件 / 附件 ----------
@@ -322,6 +382,37 @@ export const attachments = pgTable("attachments", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
+/** 统一媒体资产：上传 / 生成 / 编辑，私有存储 + 鉴权读取 */
+export const mediaAssets = pgTable(
+  "media_assets",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: ["upload", "generated", "edited"] }).notNull(),
+    name: text("name").notNull(),
+    mimeType: text("mime_type").notNull(),
+    size: integer("size").notNull().default(0),
+    /** 私有相对路径：data/media/{ownerId}/{id}.ext */
+    storageKey: text("storage_key").notNull(),
+    conversationId: text("conversation_id").references(() => conversations.id, {
+      onDelete: "set null",
+    }),
+    messageId: text("message_id"),
+    projectId: text("project_id").references(() => projects.id, {
+      onDelete: "set null",
+    }),
+    sourceTool: text("source_tool"),
+    extractedText: text("extracted_text"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("media_owner_idx").on(t.ownerId, t.createdAt),
+    index("media_kind_idx").on(t.ownerId, t.kind),
+  ]
+);
+
 // ---------- MCP ----------
 
 export const mcpServers = pgTable("mcp_servers", {
@@ -335,6 +426,8 @@ export const mcpServers = pgTable("mcp_servers", {
     .default("streamable-http"),
   headersEncrypted: text("headers_encrypted"),
   enabled: boolean("enabled").notNull().default(true),
+  /** 全局 MCP 是否默认对用户开启（仍需用户偏好或聊天开关确认） */
+  defaultEnabled: boolean("default_enabled").notNull().default(false),
   status: text("status", { enum: ["connected", "error", "unknown"] })
     .notNull()
     .default("unknown"),
@@ -345,6 +438,23 @@ export const mcpServers = pgTable("mcp_servers", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
+/** 用户对 MCP 服务器的启用偏好（含全局服务器） */
+export const userMcpPreferences = pgTable(
+  "user_mcp_preferences",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    serverId: text("server_id")
+      .notNull()
+      .references(() => mcpServers.id, { onDelete: "cascade" }),
+    enabled: boolean("enabled").notNull().default(true),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("user_mcp_pref_unique").on(t.userId, t.serverId)]
+);
+
 // ---------- 计费 ----------
 
 export const usageRecords = pgTable(
@@ -354,6 +464,8 @@ export const usageRecords = pgTable(
     userId: text("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
+    /** chat | image | image-edit | embedding | tts | asr | vision-helper | web-search */
+    capability: text("capability").notNull().default("chat"),
     modelId: text("model_id").notNull(),
     modelName: text("model_name").notNull(),
     conversationId: text("conversation_id"),
@@ -397,18 +509,22 @@ export const plans = pgTable("plans", {
   enabled: boolean("enabled").notNull().default(true),
 });
 
-export const subscriptions = pgTable("subscriptions", {
-  id: text("id").primaryKey(),
-  userId: text("user_id")
-    .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
-  planId: text("plan_id")
-    .notNull()
-    .references(() => plans.id),
-  startedAt: timestamp("started_at").notNull().defaultNow(),
-  expiresAt: timestamp("expires_at").notNull(),
-  usedQuotaCents: integer("used_quota_cents").notNull().default(0),
-});
+export const subscriptions = pgTable(
+  "subscriptions",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    planId: text("plan_id")
+      .notNull()
+      .references(() => plans.id),
+    startedAt: timestamp("started_at").notNull().defaultNow(),
+    expiresAt: timestamp("expires_at").notNull(),
+    usedQuotaCents: integer("used_quota_cents").notNull().default(0),
+  },
+  (t) => [uniqueIndex("subscriptions_user_unique").on(t.userId)]
+);
 
 export const orders = pgTable("orders", {
   id: text("id").primaryKey(),
@@ -473,6 +589,17 @@ export const settings = pgTable("settings", {
 
   /** 联网搜索引擎 */
   searchBaseUrl: text("search_base_url"),
+
+  /** 引擎单价（分）：缺省见 billing/capabilities 默认值 */
+  ttsPriceCentsPerRequest: integer("tts_price_cents_per_request")
+    .notNull()
+    .default(2),
+  asrPriceCentsPerRequest: integer("asr_price_cents_per_request")
+    .notNull()
+    .default(3),
+  webSearchPriceCentsPerRequest: integer("web_search_price_cents_per_request")
+    .notNull()
+    .default(1),
 
   skillMarketRequiresReview: boolean("skill_market_requires_review")
     .notNull()

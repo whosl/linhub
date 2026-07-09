@@ -4,6 +4,7 @@ import * as React from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { BrainIcon, ChevronDownIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { stripHtmlComments } from "@/lib/chat-text";
 import type { ReasoningPart } from "@/lib/types";
 
 export function ReasoningBlock({
@@ -18,7 +19,8 @@ export function ReasoningBlock({
   keepOpen?: boolean;
 }) {
   const [open, setOpen] = React.useState(false);
-  const hasText = part.text.trim().length > 0;
+  const displayText = stripHtmlComments(part.text);
+  const hasText = displayText.length > 0;
 
   // 思考和正文仍在流式生成时保持展开；整条消息完成后自动收起。
   React.useEffect(() => {
@@ -55,7 +57,7 @@ export function ReasoningBlock({
             className="overflow-hidden"
           >
             <div className="mt-1 border-l-2 border-border pl-3.5 text-[13px] leading-relaxed text-muted-foreground whitespace-pre-wrap">
-              {part.text}
+              {displayText}
             </div>
           </motion.div>
         )}

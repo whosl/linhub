@@ -113,13 +113,19 @@ export async function resolveModel(modelId: string): Promise<ResolvedModel> {
     // 智谱与小米（含 token plan）走 OpenAI 兼容协议（chat completions）
     case "zhipu":
     case "xiaomi":
-    case "xiaomi-token-plan":
+    case "xiaomi-token-plan": {
+      const openAICompatibleClient = createOpenAI({
+        apiKey,
+        baseURL,
+        fetch: sanitizeOpenAIChatStreamFetch(),
+      });
       return {
-        model: createOpenAI({ apiKey, baseURL }).chat(record.slug),
+        model: openAICompatibleClient.chat(record.slug),
         record,
         provider,
         storeEnabled,
       };
+    }
     default:
       throw new Error(`未知供应商: ${provider.kind}`);
   }

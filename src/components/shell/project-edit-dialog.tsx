@@ -3,6 +3,7 @@
 import * as React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  BookOpenIcon,
   FileIcon,
   Loader2Icon,
   Trash2Icon,
@@ -27,6 +28,13 @@ type DeleteTarget =
   | { type: "file"; id: string; name: string }
   | { type: "project"; id: string; name: string };
 
+function formatUploadFailures(failures: string[]) {
+  const visible = failures.slice(0, 3).join("\n");
+  return failures.length > 3
+    ? `${visible}\n另有 ${failures.length - 3} 个失败`
+    : visible;
+}
+
 /** 项目编辑弹窗：从侧边栏 ⋯ 菜单打开，含改名/改色/指令/模型/文件管理 */
 export function ProjectEditDialog() {
   const { editingProjectId, setEditingProjectId } = useUiStore();
@@ -36,10 +44,14 @@ export function ProjectEditDialog() {
   const [color, setColor] = React.useState("#C96442");
   const [instructions, setInstructions] = React.useState("");
   const [uploading, setUploading] = React.useState(false);
+  const [mirrorKnowledgeBaseId, setMirrorKnowledgeBaseId] = React.useState("");
+  const [savingKnowledgeBaseId, setSavingKnowledgeBaseId] =
+    React.useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = React.useState<DeleteTarget | null>(null);
   const [deleting, setDeleting] = React.useState(false);
   const initializedProjectId = React.useRef<string | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const uploadInFlightRef = React.useRef(false);
 
   const { data: project } = useQuery({
     queryKey: ["project", editingProjectId],
@@ -49,6 +61,11 @@ export function ProjectEditDialog() {
   const { data: modelsData } = useQuery({
     queryKey: ["models"],
     queryFn: () => getDataService().listModelsWithDefault(),
+    enabled: !!editingProjectId,
+  });
+  const { data: knowledgeBases = [] } = useQuery({
+    queryKey: ["knowledge-bases"],
+    queryFn: () => getDataService().listKnowledgeBases(),
     enabled: !!editingProjectId,
   });
   const models = modelsData?.models ?? [];
@@ -89,24 +106,108 @@ export function ProjectEditDialog() {
     toast.success("默认模型已更新");
   };
 
+  const toggleKnowledgeBase = async (knowledgeBaseId: string, checked: boolean) => {
+    if (!project || savingKnowledgeBaseId) return;
+    const currentIds = project.knowledgeBaseIds ?? [];
+    const nextIds = checked
+      ? Array.from(new Set([...currentIds, knowledgeBaseId]))
+      : currentIds.filter((id) => id !== knowledgeBaseId);
+    setSavingKnowledgeBaseId(knowledgeBaseId);
+    try {
+      const saved = await getDataService().updateProject(project.id, {
+        knowledgeBaseIds: nextIds,
+      });
+      queryClient.setQueryData(["project", project.id], saved);
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
+      toast.success(checked ? "已关联知识库" : "已取消关联");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "更新失败");
+    } finally {
+      setSavingKnowledgeBaseId(null);
+    }
+  };
+
   const requestDeleteFile = (file: { id: string; name: string }) => {
     setDeleteTarget({ type: "file", id: file.id, name: file.name });
   };
 
   const uploadFiles = async (files: FileList | File[]) => {
-    if (!editingProjectId) return;
+    const projectId = editingProjectId;
+    if (!projectId || uploadInFlightRef.current) return;
     const list = Array.from(files);
-    if (list.length === 0 || uploading) return;
+    if (list.length === 0) return;
+    uploadInFlightRef.current = true;
     setUploading(true);
+    let successCount = 0;
+    let knowledgeSuccessCount = 0;
+    const failures: string[] = [];
+    const targetKnowledgeBaseId = mirrorKnowledgeBaseId;
     try {
       for (const file of list) {
-        await getDataService().uploadProjectFile(editingProjectId, file);
+        try {
+          await getDataService().uploadProjectFile(projectId, file);
+          successCount += 1;
+          if (targetKnowledgeBaseId) {
+            try {
+              await getDataService().uploadDocument(targetKnowledgeBaseId, file);
+              knowledgeSuccessCount += 1;
+            } catch (e) {
+              const message = e instanceof Error ? e.message : "加入知识库失败";
+              failures.push(`${file.name}：项目已保存，加入知识库失败：${message}`);
+            }
+          }
+        } catch (e) {
+          const message = e instanceof Error ? e.message : "上传失败";
+          failures.push(`${file.name}：${message}`);
+        }
       }
-      queryClient.invalidateQueries({ queryKey: ["project", editingProjectId] });
-      toast.success(list.length === 1 ? "文件已上传" : `已上传 ${list.length} 个文件`);
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "上传失败");
+      if (
+        targetKnowledgeBaseId &&
+        knowledgeSuccessCount > 0 &&
+        project &&
+        !(project.knowledgeBaseIds ?? []).includes(targetKnowledgeBaseId)
+      ) {
+        const saved = await getDataService().updateProject(projectId, {
+          knowledgeBaseIds: [
+            ...(project.knowledgeBaseIds ?? []),
+            targetKnowledgeBaseId,
+          ],
+        });
+        queryClient.setQueryData(["project", projectId], saved);
+      }
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["project", projectId] }),
+        queryClient.invalidateQueries({ queryKey: ["projects"] }),
+        targetKnowledgeBaseId
+          ? queryClient.invalidateQueries({
+              queryKey: ["kb-documents", targetKnowledgeBaseId],
+            })
+          : Promise.resolve(),
+        targetKnowledgeBaseId
+          ? queryClient.invalidateQueries({ queryKey: ["knowledge-bases"] })
+          : Promise.resolve(),
+      ]);
+      if (failures.length === 0) {
+        toast.success(
+          targetKnowledgeBaseId
+            ? successCount === 1
+              ? "资料已加入项目和知识库"
+              : `已加入 ${successCount} 个项目资料，并同步到知识库`
+            : successCount === 1
+              ? "资料已上传"
+              : `已上传 ${successCount} 个资料`
+        );
+      } else if (successCount > 0) {
+        toast.warning(`已上传 ${successCount} 个资料，${failures.length} 个失败`, {
+          description: formatUploadFailures(failures),
+        });
+      } else {
+        toast.error(`${failures.length} 个资料上传失败`, {
+          description: formatUploadFailures(failures),
+        });
+      }
     } finally {
+      uploadInFlightRef.current = false;
       setUploading(false);
     }
   };
@@ -141,6 +242,7 @@ export function ProjectEditDialog() {
 
   const open = !!editingProjectId && !!project;
   const chatModels = models.filter((m) => !m.capabilities.includes("image-generation"));
+  const mountedKnowledgeBaseIds = project?.knowledgeBaseIds ?? [];
 
   return (
     <>
@@ -201,11 +303,11 @@ export function ProjectEditDialog() {
               />
             </div>
 
-            {/* 文件 */}
+            {/* 资料 */}
             <div>
               <div className="mb-1.5 flex items-center justify-between">
                 <label className="text-xs font-medium text-muted-foreground">
-                  项目文件
+                  项目资料
                 </label>
                 <input
                   ref={fileInputRef}
@@ -232,9 +334,23 @@ export function ProjectEditDialog() {
                   上传
                 </button>
               </div>
+              {knowledgeBases.length > 0 && (
+                <Select
+                  value={mirrorKnowledgeBaseId}
+                  onValueChange={setMirrorKnowledgeBaseId}
+                  className="mb-2"
+                  options={[
+                    { value: "", label: "只加入项目资料" },
+                    ...knowledgeBases.map((kb) => ({
+                      value: kb.id,
+                      label: `同时加入知识库：${kb.name}`,
+                    })),
+                  ]}
+                />
+              )}
               <div className="space-y-1.5">
                 {project.files.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">暂无文件</p>
+                  <p className="text-xs text-muted-foreground">暂无项目资料</p>
                 ) : (
                   project.files.map((f) => (
                     <div
@@ -258,6 +374,57 @@ export function ProjectEditDialog() {
                   ))
                 )}
               </div>
+            </div>
+
+            <div>
+              <div className="mb-1.5 flex items-center justify-between">
+                <label className="text-xs font-medium text-muted-foreground">
+                  关联知识库
+                </label>
+                {mountedKnowledgeBaseIds.length > 0 && (
+                  <span className="text-[10px] text-muted-foreground">
+                    已关联 {mountedKnowledgeBaseIds.length} 个
+                  </span>
+                )}
+              </div>
+              {knowledgeBases.length === 0 ? (
+                <p className="text-xs text-muted-foreground">暂无可关联知识库</p>
+              ) : (
+                <div className="space-y-1.5">
+                  {knowledgeBases.map((kb) => {
+                    const checked = mountedKnowledgeBaseIds.includes(kb.id);
+                    const saving = savingKnowledgeBaseId === kb.id;
+                    return (
+                      <label
+                        key={kb.id}
+                        className="flex cursor-pointer items-start gap-2 rounded-lg border px-3 py-2 text-sm transition-colors hover:bg-accent"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={!!savingKnowledgeBaseId}
+                          onChange={(event) =>
+                            void toggleKnowledgeBase(kb.id, event.target.checked)
+                          }
+                          className="mt-0.5 size-4 shrink-0 accent-[var(--primary)]"
+                        />
+                        <BookOpenIcon className="mt-0.5 size-3.5 shrink-0 text-primary" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-xs font-medium">
+                            {kb.name}
+                          </span>
+                          <span className="block text-[10px] text-muted-foreground">
+                            {kb.documentCount} 个文档 · {kb.totalChunks} 个片段
+                          </span>
+                        </span>
+                        {saving && (
+                          <Loader2Icon className="mt-0.5 size-3.5 shrink-0 animate-spin text-muted-foreground" />
+                        )}
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {/* 底部操作 */}

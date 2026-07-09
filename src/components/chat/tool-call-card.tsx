@@ -9,6 +9,8 @@ import {
   CheckIcon,
   ChevronDownIcon,
   CodeIcon,
+  DownloadIcon,
+  FileTextIcon,
   GlobeIcon,
   ImageIcon,
   Loader2Icon,
@@ -19,6 +21,7 @@ import {
   WrenchIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { formatToolPreviewLabel } from "@/lib/chat-text";
 import type { ToolCallPart } from "@/lib/types";
 
 const TOOL_META: Record<string, { icon: React.ElementType; verb: string; label: (args: Record<string, unknown>) => string }> = {
@@ -36,6 +39,12 @@ const TOOL_META: Record<string, { icon: React.ElementType; verb: string; label: 
   search_knowledge: { icon: BookOpenIcon, verb: "检索", label: (a) => `检索知识库「${a.query ?? ""}」` },
   create_artifact: { icon: CodeIcon, verb: "创建作品", label: (a) => `创建作品「${a.title ?? ""}」` },
   update_artifact: { icon: CodeIcon, verb: "更新作品", label: (a) => `更新作品「${a.title ?? ""}」` },
+  list_skill_resources: { icon: BookOpenIcon, verb: "读取技能", label: () => "查看技能资源" },
+  read_skill_resource: { icon: BookOpenIcon, verb: "读取技能", label: (a) => `读取资源「${a.resourceId ?? ""}」` },
+  run_skill_script: { icon: CodeIcon, verb: "运行脚本", label: () => "运行技能脚本" },
+  pptx_extract_text: { icon: FileTextIcon, verb: "读取 PPT", label: () => "提取 PPT 内容" },
+  pptx_analyze_template: { icon: FileTextIcon, verb: "分析 PPT", label: () => "分析 PPT 模板" },
+  pptx_create_deck: { icon: FileTextIcon, verb: "生成 PPT", label: (a) => `生成 PPT「${a.title ?? ""}」` },
 };
 
 function shortUrl(url: string): string {
@@ -53,11 +62,11 @@ function shortUrl(url: string): string {
  */
 function extractPreviewValue(raw: string): string | null {
   // 匹配 "key":"value 片段，取 value 部分（可能未闭合）
-  const m = raw.match(/"([^"]+)"\s*:\s*"([^"]*)/);
-  if (m) return m[2] || null;
+  const m = raw.match(/"([^"]+)"\s*:\s*"((?:\\.|[^"\\])*)/);
+  if (m?.[2]) return formatToolPreviewLabel(m[2]) || null;
   // 兜底：匹配裸字符串值
-  const m2 = raw.match(/:\s*"([^"]*)/);
-  return m2 ? m2[1] || null : null;
+  const m2 = raw.match(/:\s*"((?:\\.|[^"\\])*)/);
+  return m2?.[1] ? formatToolPreviewLabel(m2[1]) || null : null;
 }
 
 export function ToolCallCard({
@@ -67,7 +76,7 @@ export function ToolCallCard({
   part: ToolCallPart;
   onOpenArtifact?: (artifactId: string) => void;
 }) {
-  const [open, setOpen] = React.useState(false);
+  const [manualOpen, setManualOpen] = React.useState<boolean | null>(null);
   const meta = TOOL_META[part.toolName] ?? {
     icon: WrenchIcon,
     verb: "调用",
@@ -79,8 +88,10 @@ export function ToolCallCard({
   const hasDetail =
     !!part.result?.sources?.length ||
     !!part.result?.chunks?.length ||
+    !!part.result?.attachments?.length ||
     !!part.result?.text ||
     !!part.errorMessage;
+  const detailOpen = hasDetail && (manualOpen ?? part.state === "error");
 
   // 工具参数生成中（tool-input-delta 阶段）：args 还没结构化，
   // 从原始 JSON 片段里提取引号内的字符串作为可读预览。
@@ -113,7 +124,7 @@ export function ToolCallCard({
   return (
     <div className="my-2 first:mt-0">
       <button
-        onClick={() => hasDetail && setOpen(!open)}
+        onClick={() => hasDetail && setManualOpen(!detailOpen)}
         className={cn(
           "flex w-full max-w-md items-center gap-2.5 rounded-xl border bg-card px-3 py-2 text-left text-[13px] transition-colors",
           hasDetail && "cursor-pointer hover:bg-accent/50",
@@ -138,12 +149,14 @@ export function ToolCallCard({
         </span>
         <span className="min-w-0 flex-1">
           <span className={cn("block truncate", part.state === "running" && "animate-thinking")}>
-            {isGenerating && previewText
-              ? // 参数生成中且有预览：显示实时关键词（搜索/阅读/检索等）
-                meta.label({ query: previewText, url: previewText, title: previewText })
-              : isGenerating
-                ? `${meta.verb}…`
-                : meta.label(part.args)}
+            {formatToolPreviewLabel(
+              isGenerating && previewText
+                ? // 参数生成中且有预览：显示实时关键词（搜索/阅读/检索等）
+                  meta.label({ query: previewText, url: previewText, title: previewText })
+                : isGenerating
+                  ? `${meta.verb}…`
+                  : meta.label(part.args)
+            )}
           </span>
           {part.state === "success" && part.result?.sources && (
             <span className="block text-xs text-muted-foreground">
@@ -155,6 +168,11 @@ export function ToolCallCard({
               命中 {part.result.chunks.length} 个片段
             </span>
           )}
+          {part.state === "success" && part.result?.attachments && (
+            <span className="block text-xs text-muted-foreground">
+              生成 {part.result.attachments.length} 个文件
+            </span>
+          )}
         </span>
         {part.state === "success" && !hasDetail && (
           <CheckIcon className="size-3.5 shrink-0 text-success" />
@@ -163,14 +181,14 @@ export function ToolCallCard({
           <ChevronDownIcon
             className={cn(
               "size-3.5 shrink-0 text-muted-foreground transition-transform duration-200",
-              open && "rotate-180"
+              detailOpen && "rotate-180"
             )}
           />
         )}
       </button>
 
       <AnimatePresence initial={false}>
-        {open && hasDetail && (
+        {detailOpen && (
           <motion.div
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: "auto", opacity: 1 }}
@@ -215,6 +233,19 @@ export function ToolCallCard({
                     {c.snippet}
                   </span>
                 </div>
+              ))}
+              {part.result?.attachments?.map((file) => (
+                <a
+                  key={file.id}
+                  href={file.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-2 rounded-lg border bg-card px-3 py-2 text-xs transition-colors hover:bg-accent/50"
+                >
+                  <FileTextIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                  <span className="min-w-0 flex-1 truncate font-medium">{file.name}</span>
+                  <DownloadIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                </a>
               ))}
               {part.result?.text && (
                 <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-lg border bg-muted/40 px-3 py-2 text-xs text-foreground">

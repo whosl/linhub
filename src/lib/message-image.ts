@@ -6,6 +6,13 @@ function isImageCaptionText(text: string) {
   const value = text.trim();
   if (!value) return false;
   if (value.startsWith(EDITED_IMAGE_CAPTION_PREFIX)) return true;
+  if (
+    /^(好了[，,]?\s*)?(?:(给你|为你)(画好了|画好)(?:[：:，,\s。！!]|$)|(已画好|已经画好)(?:[：:，,\s。！!]|这|一|该|本|$))/.test(
+      value
+    )
+  ) {
+    return true;
+  }
   return /^(已生成|已为你生成|已经生成|图片已生成).*(图|图片|图像|图标|插画|海报|照片)/.test(
     value
   );

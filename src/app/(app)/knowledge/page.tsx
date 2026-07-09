@@ -6,12 +6,14 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   BookOpenIcon,
   FileTextIcon,
+  ImageIcon,
   Loader2Icon,
   PlusIcon,
   Trash2Icon,
   UploadIcon,
 } from "lucide-react";
 import { getDataService } from "@/lib/data";
+import { FILE_ACCEPT, FILE_ACCEPT_LABEL } from "@/lib/file-types";
 import type { KnowledgeBase } from "@/lib/types";
 import { cn, formatBytes, formatRelativeTime } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -41,6 +43,13 @@ type DeleteTarget =
       name: string;
     };
 
+function formatUploadFailures(failures: string[]) {
+  const visible = failures.slice(0, 3).join("\n");
+  return failures.length > 3
+    ? `${visible}\n另有 ${failures.length - 3} 个失败`
+    : visible;
+}
+
 export default function KnowledgePage() {
   const queryClient = useQueryClient();
   const [selected, setSelected] = React.useState<KnowledgeBase | null>(null);
@@ -54,6 +63,7 @@ export default function KnowledgePage() {
   );
   const [deleting, setDeleting] = React.useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const uploadInFlightRef = React.useRef(false);
 
   const { data: kbs = [] } = useQuery({
     queryKey: ["knowledge-bases"],
@@ -83,20 +93,41 @@ export default function KnowledgePage() {
   };
 
   const upload = async (files: FileList | File[]) => {
-    if (!selected || uploading) return;
+    const selectedKb = selected;
+    if (!selectedKb || uploadInFlightRef.current) return;
     const list = Array.from(files);
     if (list.length === 0) return;
+    uploadInFlightRef.current = true;
     setUploading(true);
+    let successCount = 0;
+    const failures: string[] = [];
     try {
       for (const file of list) {
-        await getDataService().uploadDocument(selected.id, file);
+        try {
+          await getDataService().uploadDocument(selectedKb.id, file);
+          successCount += 1;
+        } catch (e) {
+          const message = e instanceof Error ? e.message : "上传失败";
+          failures.push(`${file.name}：${message}`);
+        }
       }
-      queryClient.invalidateQueries({ queryKey: ["kb-documents", selected.id] });
-      queryClient.invalidateQueries({ queryKey: ["knowledge-bases"] });
-      toast.success("文档已上传，正在解析…");
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "上传失败");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["kb-documents", selectedKb.id] }),
+        queryClient.invalidateQueries({ queryKey: ["knowledge-bases"] }),
+      ]);
+      if (failures.length === 0) {
+        toast.success("文档已上传，正在解析…");
+      } else if (successCount > 0) {
+        toast.warning(`已上传 ${successCount} 个文档，${failures.length} 个失败`, {
+          description: formatUploadFailures(failures),
+        });
+      } else {
+        toast.error(`${failures.length} 个文档上传失败`, {
+          description: formatUploadFailures(failures),
+        });
+      }
     } finally {
+      uploadInFlightRef.current = false;
       setUploading(false);
       setDragActive(false);
     }
@@ -183,7 +214,7 @@ export default function KnowledgePage() {
     <PageContainer wide>
       <PageHeader
         title="知识库"
-        description="上传文档，会话中挂载后模型可检索引用"
+        description="长期资料库，可被聊天、项目和技能挂载检索"
         action={
           <Button onClick={() => setCreateOpen(true)}>
             <PlusIcon /> 新建知识库
@@ -195,7 +226,7 @@ export default function KnowledgePage() {
         <EmptyState
           icon={<BookOpenIcon />}
           title="还没有知识库"
-          description="上传 PDF、Word、Markdown 文档，模型在对话中会自动检索并标注引用来源。"
+          description={`${FILE_ACCEPT_LABEL}，之后可在项目或聊天中作为资料源检索。`}
           action={<Button onClick={() => setCreateOpen(true)}>创建第一个知识库</Button>}
         />
       ) : (
@@ -269,7 +300,7 @@ export default function KnowledgePage() {
                   <div>
                     <h2 className="font-medium">{selected.name}</h2>
                     <p className="text-xs text-muted-foreground">
-                      支持 PDF / Word / Markdown / TXT
+                      {FILE_ACCEPT_LABEL}
                     </p>
                   </div>
                   <input
@@ -277,7 +308,7 @@ export default function KnowledgePage() {
                     type="file"
                     multiple
                     hidden
-                    accept=".pdf,.doc,.docx,.md,.txt"
+                    accept={FILE_ACCEPT}
                     onChange={(e) => {
                       if (e.target.files?.length) void upload(e.target.files);
                       e.target.value = "";
@@ -305,17 +336,26 @@ export default function KnowledgePage() {
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {documents.map((doc, docIndex) => (
+                    {documents.map((doc, docIndex) => {
+                      const isImage = doc.mimeType.startsWith("image/");
+                      return (
                       <div
                         key={doc.id}
                         className="group flex items-center gap-3 rounded-xl border px-3.5 py-3"
                       >
-                        <FileTextIcon className="size-5 shrink-0 text-primary" />
+                        {isImage ? (
+                          <ImageIcon className="size-5 shrink-0 text-primary" />
+                        ) : (
+                          <FileTextIcon className="size-5 shrink-0 text-primary" />
+                        )}
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-sm font-medium">{doc.name}</p>
                           <p className="text-xs text-muted-foreground">
                             {formatBytes(doc.size)} · {formatRelativeTime(doc.createdAt)}
                             {doc.status === "ready" && ` · ${doc.chunkCount} 个片段`}
+                            {doc.status === "error" && doc.errorMessage
+                              ? ` · ${doc.errorMessage}`
+                              : null}
                           </p>
                         </div>
                         {doc.status === "processing" ? (
@@ -323,7 +363,9 @@ export default function KnowledgePage() {
                             <Loader2Icon className="size-3 animate-spin" /> 解析中
                           </Badge>
                         ) : doc.status === "error" ? (
-                          <Badge variant="destructive">解析失败</Badge>
+                          <Badge variant="destructive" title={doc.errorMessage}>
+                            解析失败
+                          </Badge>
                         ) : (
                           <Badge variant="success">就绪</Badge>
                         )}
@@ -336,7 +378,8 @@ export default function KnowledgePage() {
                           <Trash2Icon className="size-4" />
                         </button>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </Card>

@@ -9,6 +9,7 @@ import {
   ArchiveIcon,
   BookOpenIcon,
   ChevronDownIcon,
+  FileIcon,
   FolderIcon,
   MessageSquarePlusIcon,
   MoreHorizontalIcon,
@@ -35,6 +36,7 @@ import {
 } from "@/components/ui/dialog";
 import { Tooltip } from "@/components/ui/tooltip";
 import { Input } from "@/components/ui/input";
+import { useChatStore } from "@/stores/chat-store";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -51,6 +53,7 @@ const NAV_ITEMS = [
   { href: "/projects", label: "项目", icon: FolderIcon },
   { href: "/skills", label: "技能", icon: SparklesIcon },
   { href: "/knowledge", label: "知识库", icon: BookOpenIcon },
+  { href: "/files", label: "文件", icon: FileIcon },
 ];
 
 function groupLabel(c: Conversation): string {
@@ -89,8 +92,13 @@ export function Sidebar() {
   const recent = active.filter((c) => !c.pinned);
 
   // 按项目分组：项目内会话 + 无项目会话
-  const projectConvs = recent.filter((c) => c.projectId);
-  const noProjectConvs = recent.filter((c) => !c.projectId);
+  const knownProjectIds = new Set(projects.map((p) => p.id));
+  const projectConvs = recent.filter(
+    (c) => c.projectId && knownProjectIds.has(c.projectId)
+  );
+  const noProjectConvs = recent.filter(
+    (c) => !c.projectId || !knownProjectIds.has(c.projectId)
+  );
   const projectGroups = projects.map((p) => ({
     project: p,
     conversations: projectConvs.filter((c) => c.projectId === p.id),
@@ -118,11 +126,21 @@ export function Sidebar() {
   };
 
   const handleDelete = async (c: Conversation) => {
+    const isCurrentConversation =
+      pathname === `/chat/${c.id}` ||
+      (typeof window !== "undefined" && window.location.pathname === `/chat/${c.id}`);
     await getDataService().deleteConversation(c.id);
+    useChatStore.getState().removeSession(c.id);
+    queryClient.setQueryData<Conversation[]>(["conversations"], (old) =>
+      old?.filter((conversation) => conversation.id !== c.id) ?? old
+    );
+    queryClient.removeQueries({ queryKey: ["conversation", c.id] });
+    queryClient.removeQueries({ queryKey: ["artifacts", c.id] });
+    queryClient.removeQueries({ queryKey: ["conversation-search"] });
     queryClient.invalidateQueries({ queryKey: ["conversations"] });
     invalidateProjectConversationQueries(c.projectId);
     toast.success("会话已删除");
-    if (pathname === `/chat/${c.id}`) router.push("/");
+    if (isCurrentConversation) router.replace("/");
   };
 
   const handleArchive = async (c: Conversation) => {

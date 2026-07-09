@@ -24,6 +24,7 @@ export async function GET(req: NextRequest) {
     rows.map((r) => ({
       id: r.id,
       userId: r.userId,
+      capability: r.capability,
       modelId: r.modelId,
       modelName: r.modelName,
       conversationId: r.conversationId ?? undefined,

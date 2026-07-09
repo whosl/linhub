@@ -10,6 +10,17 @@ import { AuthShell } from "@/components/auth/auth-shell";
 import { signIn, withAuthTimeout } from "@/lib/auth-client";
 import { toast } from "sonner";
 
+function loginErrorMessage(error: { code?: string; message?: string }) {
+  const message = error.message ?? "";
+  if (
+    error.code === "INVALID_EMAIL_OR_PASSWORD" ||
+    /invalid (email|password|credentials)|invalid email or password/i.test(message)
+  ) {
+    return "邮箱或密码错误";
+  }
+  return message || "邮箱或密码错误";
+}
+
 export default function LoginPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -19,11 +30,16 @@ export default function LoginPage() {
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const form = new FormData(e.currentTarget as HTMLFormElement);
+    const submittedEmail = String(form.get("email") ?? "").trim();
+    const submittedPassword = String(form.get("password") ?? "");
     setLoading(true);
     try {
-      const { error } = await withAuthTimeout(signIn.email({ email, password }));
+      const { error } = await withAuthTimeout(
+        signIn.email({ email: submittedEmail, password: submittedPassword })
+      );
       if (error) {
-        toast.error(error.message ?? "邮箱或密码错误");
+        toast.error(loginErrorMessage(error));
         return;
       }
       toast.success("欢迎回来！");
@@ -43,6 +59,7 @@ export default function LoginPage() {
     <AuthShell title="欢迎回来" subtitle="登录你的 LinHub 账户">
       <form onSubmit={submit} className="space-y-3">
         <Input
+          name="email"
           type="email"
           placeholder="邮箱"
           value={email}
@@ -51,6 +68,7 @@ export default function LoginPage() {
           autoFocus
         />
         <Input
+          name="password"
           type="password"
           placeholder="密码"
           value={password}

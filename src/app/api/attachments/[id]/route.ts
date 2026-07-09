@@ -1,5 +1,5 @@
 import { eq, and } from "drizzle-orm";
-import { unlink } from "node:fs/promises";
+import { readFile, unlink } from "node:fs/promises";
 import path from "node:path";
 import { db, schema } from "@/lib/server/db";
 import { requireSession } from "@/lib/server/auth";
@@ -17,6 +17,41 @@ function localAttachmentPath(storagePath: string) {
     return path.join(DATA_UPLOADS_DIR, filename);
   }
   return null;
+}
+
+/** 下载附件。鉴权：只能下载自己的附件。 */
+export async function GET(
+  _req: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const session = await requireSession().catch(() => null);
+  if (!session) return Response.json({ error: "请先登录" }, { status: 401 });
+  const { id } = await params;
+
+  const [att] = await db
+    .select({
+      id: schema.attachments.id,
+      name: schema.attachments.name,
+      mimeType: schema.attachments.mimeType,
+      storagePath: schema.attachments.storagePath,
+    })
+    .from(schema.attachments)
+    .where(and(eq(schema.attachments.id, id), eq(schema.attachments.ownerId, session.user.id)))
+    .limit(1);
+  if (!att) return Response.json({ error: "文件不存在" }, { status: 404 });
+
+  const filePath = localAttachmentPath(att.storagePath);
+  if (!filePath) return Response.json({ error: "文件路径不可读取" }, { status: 404 });
+  const data = await readFile(filePath).catch(() => null);
+  if (!data) return Response.json({ error: "文件不存在" }, { status: 404 });
+
+  return new Response(new Uint8Array(data), {
+    headers: {
+      "Content-Type": att.mimeType || "application/octet-stream",
+      "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(att.name)}`,
+      "Cache-Control": "private, max-age=60",
+    },
+  });
 }
 
 /** 删除附件（项目文件或对话附件）。鉴权：只能删自己的。 */

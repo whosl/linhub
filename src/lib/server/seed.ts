@@ -1,11 +1,13 @@
 import { eq } from "drizzle-orm";
 import { db, schema } from "./db";
+import { ensureSkillRuntimeReady } from "./skill-runtime";
 
 let seeded = false;
 let seedInFlight: Promise<void> | null = null;
 
 /** 幂等初始化：内置风格、默认供应商与模型、全局设置、默认套餐 */
 export async function ensureSeeded() {
+  await ensureSkillRuntimeReady();
   if (seeded) return;
   if (seedInFlight) return seedInFlight;
 
@@ -16,6 +18,7 @@ export async function ensureSeeded() {
 }
 
 async function seedDatabase() {
+  await ensureSkillRuntimeReady();
   const [existingSettings] = await db
     .select({ id: schema.settings.id })
     .from(schema.settings)

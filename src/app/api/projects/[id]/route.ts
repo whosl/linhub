@@ -1,7 +1,12 @@
 import { and, eq, sql } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 import { requireSession } from "@/lib/server/auth";
-import { projectToUi } from "../util";
+import {
+  assertOwnedKnowledgeBaseIds,
+  listProjectKnowledgeBases,
+  projectToUi,
+  replaceProjectKnowledgeBases,
+} from "../util";
 
 export async function GET(
   _req: Request,
@@ -28,7 +33,10 @@ export async function GET(
     .select()
     .from(schema.attachments)
     .where(eq(schema.attachments.projectId, id));
-  return Response.json(projectToUi(row.project, row.conversationCount, files));
+  const knowledgeBases = await listProjectKnowledgeBases(id, session.user.id);
+  return Response.json(
+    projectToUi(row.project, row.conversationCount, files, knowledgeBases)
+  );
 }
 
 export async function PATCH(
@@ -48,6 +56,7 @@ export async function PATCH(
     instructions?: string | null;
     color?: string | null;
     modelId?: string | null;
+    knowledgeBaseIds?: string[];
   };
   const [existing] = await db
     .select({ ownerId: schema.projects.ownerId })
@@ -55,6 +64,20 @@ export async function PATCH(
     .where(eq(schema.projects.id, id));
   if (!existing || existing.ownerId !== session.user.id) {
     return Response.json({ error: "不存在" }, { status: 404 });
+  }
+  let nextKnowledgeBaseIds: string[] | null = null;
+  if ("knowledgeBaseIds" in body) {
+    try {
+      nextKnowledgeBaseIds = await assertOwnedKnowledgeBaseIds(
+        session.user.id,
+        body.knowledgeBaseIds
+      );
+    } catch (e) {
+      return Response.json(
+        { error: e instanceof Error ? e.message : "知识库不存在" },
+        { status: 404 }
+      );
+    }
   }
 
   const patch: {
@@ -77,6 +100,9 @@ export async function PATCH(
   if ("modelId" in body) patch.modelId = body.modelId || null;
 
   await db.update(schema.projects).set(patch).where(eq(schema.projects.id, id));
+  if (nextKnowledgeBaseIds) {
+    await replaceProjectKnowledgeBases(id, session.user.id, nextKnowledgeBaseIds);
+  }
   const [row] = await db
     .select({
       project: schema.projects,
@@ -88,7 +114,10 @@ export async function PATCH(
     .select()
     .from(schema.attachments)
     .where(eq(schema.attachments.projectId, id));
-  return Response.json(projectToUi(row.project, row.conversationCount, files));
+  const knowledgeBases = await listProjectKnowledgeBases(id, session.user.id);
+  return Response.json(
+    projectToUi(row.project, row.conversationCount, files, knowledgeBases)
+  );
 }
 
 export async function DELETE(

@@ -165,17 +165,34 @@ function SkillGrid({
           <Card className="group flex h-full flex-col p-5 transition-all hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md">
             <div className="mb-2 flex items-start justify-between">
               <span className="text-3xl">{s.emoji}</span>
-              {s.visibility === "public" && <Badge variant="success">已公开</Badge>}
-              {s.visibility === "pending" && <Badge variant="warning">审核中</Badge>}
+              <div className="flex flex-wrap justify-end gap-1">
+                {s.kind === "pack" && <Badge variant="default">技能包</Badge>}
+                {s.visibility === "public" && <Badge variant="success">已公开</Badge>}
+                {s.visibility === "pending" && <Badge variant="warning">审核中</Badge>}
+              </div>
             </div>
             <h3 className="font-medium">{s.name}</h3>
             <p className="mt-1 line-clamp-2 flex-1 text-sm text-muted-foreground">
               {s.description}
             </p>
+            {s.kind === "pack" && (
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                {s.resourceRefs.length > 0 && <Badge variant="outline">含资源</Badge>}
+                {s.scriptPolicy.enabled && <Badge variant="outline">含脚本</Badge>}
+                {[
+                  ...s.requiredTools,
+                  ...s.enabledTools,
+                ].some((tool) => String(tool).startsWith("pptx_")) && (
+                  <Badge variant="outline">PPTX</Badge>
+                )}
+                <Badge variant="outline">v{s.version}</Badge>
+                {s.source && <Badge variant="outline">{s.source}</Badge>}
+              </div>
+            )}
             <div className="mt-3 flex items-center justify-between text-xs text-muted-foreground">
               <span>{s.usageCount} 次使用</span>
               <div className="flex gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-                {onEdit && (
+                {onEdit && s.kind !== "pack" && (
                   <button
                     type="button"
                     aria-label={`编辑技能「${s.name}」`}
@@ -185,7 +202,7 @@ function SkillGrid({
                     <PencilIcon className="size-3.5" />
                   </button>
                 )}
-                {onDelete && (
+                {onDelete && s.kind !== "pack" && (
                   <button
                     type="button"
                     aria-label={`删除技能「${s.name}」`}
@@ -260,11 +277,7 @@ function SkillEditor({
       systemPrompt: form.systemPrompt,
       greeting: form.greeting || undefined,
       defaultModelId: form.defaultModelId || undefined,
-      visibility: form.shareToMarket
-        ? skill?.visibility === "public"
-          ? "public"
-          : "pending"
-        : "private",
+      shareToMarket: form.shareToMarket,
     });
     toast.success(skill ? "技能已更新" : "技能已创建");
     onSaved();

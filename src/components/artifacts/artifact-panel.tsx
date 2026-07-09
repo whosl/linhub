@@ -288,6 +288,7 @@ export function ArtifactPanel({
             <CodeBlock
               language={codeLanguage}
               code={current.content}
+              showRunButton={artifact.kind !== "html"}
             />
           </div>
         )}

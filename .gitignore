@@ -20,6 +20,9 @@
 # runtime media
 /public/generated/
 /public/uploads/
+/data/uploads/
+/data/media/
+/data/kb-docs/
 
 # production
 /build

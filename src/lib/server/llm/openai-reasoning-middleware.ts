@@ -12,14 +12,18 @@ import type { JSONObject, LanguageModelV4StreamPart } from "@ai-sdk/provider";
  *    但 @ai-sdk/openai 的 chat model 不解析这些字段。
  *    （Responses 端点则完全不回 reasoning 事件。）
  *
- * 2. tool_calls 畸形增量 delta：参数增量 delta 本应只含 index + function.arguments，
+ * 2. inline 图片：AI SDK 7 的 OpenAI Chat 适配器会把 inline image data 转成
+ *    image_url.url = 裸 base64。官方/中转 Chat Completions 需要完整 data URL，
+ *    否则视觉请求会报 image_url 格式无效。
+ *
+ * 3. tool_calls 畸形增量 delta：参数增量 delta 本应只含 index + function.arguments，
  *    网关却把 type/id/name 都填成空串（如 {"type":"","id":"","name":""}）。
  *    @ai-sdk/openai 的 zod schema 要求 type === "function"，空串校验失败 → 整条流
  *    抛 { type: "error" }，前端 toast 报 type validation failed。
  *
  * 两层修复：
- * - sanitizeOpenAIChatStreamFetch：在 fetch 层清洗 SSE，删掉 tool_calls 里的空串字段
- *   （从源头修复，让 zod 校验通过）。
+ * - sanitizeOpenAIChatStreamFetch：在 fetch 层补齐 inline 图片 data URL，并清洗 SSE
+ *   中 tool_calls 的空串字段（从源头修复，让上游与 zod 校验都通过）。
  * - openaiReasoningMiddleware：在 stream 层把 reasoning_content 桥接成标准 reasoning 事件。
  */
 
@@ -40,7 +44,7 @@ type FetchLike = typeof globalThis.fetch;
  */
 export function sanitizeOpenAIChatStreamFetch(baseFetch: FetchLike = fetch): FetchLike {
   return async (input, init) => {
-    const res = await baseFetch(input, init);
+    const res = await baseFetch(input, sanitizeChatRequestInit(init));
     // 只处理 SSE 流；非流式 JSON 响应（如错误）原样返回。
     const contentType = res.headers.get("content-type") ?? "";
     if (!contentType.includes("event-stream") || !res.body) {
@@ -104,6 +108,82 @@ export function sanitizeOpenAIChatStreamFetch(baseFetch: FetchLike = fetch): Fet
       headers,
     });
   };
+}
+
+function sanitizeChatRequestInit(init: RequestInit | undefined): RequestInit | undefined {
+  if (!init || typeof init.body !== "string") return init;
+
+  const body = sanitizeChatRequestBody(init.body);
+  if (body === init.body) return init;
+  return { ...init, body };
+}
+
+function sanitizeChatRequestBody(body: string) {
+  let obj: unknown;
+  try {
+    obj = JSON.parse(body);
+  } catch {
+    return body;
+  }
+  if (!obj || typeof obj !== "object") return body;
+  const messages = (obj as { messages?: unknown }).messages;
+  if (!Array.isArray(messages)) return body;
+
+  let mutated = false;
+  for (const message of messages) {
+    if (!message || typeof message !== "object") continue;
+    const content = (message as { content?: unknown }).content;
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      if (!part || typeof part !== "object") continue;
+      const imageUrl = (part as { image_url?: unknown }).image_url;
+      if (!imageUrl || typeof imageUrl !== "object") continue;
+      const current = (imageUrl as { url?: unknown }).url;
+      if (typeof current !== "string") continue;
+      const patched = toImageDataUrl(current);
+      if (patched && patched !== current) {
+        (imageUrl as { url: string }).url = patched;
+        mutated = true;
+      }
+    }
+  }
+
+  return mutated ? JSON.stringify(obj) : body;
+}
+
+function toImageDataUrl(value: string) {
+  const input = value.trim();
+  if (!input || input.startsWith("data:image/") || /^https?:\/\//i.test(input)) {
+    return null;
+  }
+  if (!/^[A-Za-z0-9+/_=-]+$/.test(input)) return null;
+
+  const normalized = input.replace(/-/g, "+").replace(/_/g, "/");
+  const padded =
+    normalized + "=".repeat((4 - (normalized.length % 4 || 4)) % 4);
+  const header = Buffer.from(padded.slice(0, 64), "base64");
+
+  let mediaType: string | null = null;
+  if (
+    header.length >= 8 &&
+    header.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  ) {
+    mediaType = "image/png";
+  } else if (header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff) {
+    mediaType = "image/jpeg";
+  } else if (
+    header.subarray(0, 6).toString("latin1") === "GIF87a" ||
+    header.subarray(0, 6).toString("latin1") === "GIF89a"
+  ) {
+    mediaType = "image/gif";
+  } else if (
+    header.subarray(0, 4).toString("latin1") === "RIFF" &&
+    header.subarray(8, 12).toString("latin1") === "WEBP"
+  ) {
+    mediaType = "image/webp";
+  }
+
+  return mediaType ? `data:${mediaType};base64,${padded}` : null;
 }
 
 /** 解析单行 SSE data 的 JSON，清洗 tool_calls 后重新序列化。无法解析则原样返回。 */
@@ -293,9 +373,10 @@ function extractReasoningDelta(rawValue: unknown): {
 
 function toReasoningDelta(content: unknown): { present: boolean; delta?: string } {
   if (typeof content === "string") {
+    const cleaned = sanitizeReasoningDelta(content);
     return {
       present: true,
-      delta: content.length > 0 ? content : undefined,
+      delta: cleaned.length > 0 ? cleaned : undefined,
     };
   }
   if (Array.isArray(content)) {
@@ -314,9 +395,15 @@ function toReasoningDelta(content: unknown): { present: boolean; delta?: string 
         return "";
       })
       .join("");
-    return { present: true, delta: text.length > 0 ? text : undefined };
+    const cleaned = sanitizeReasoningDelta(text);
+    return { present: true, delta: cleaned.length > 0 ? cleaned : undefined };
   }
   return {
     present: true,
   };
+}
+
+/** 推理摘要里偶发出现的空 HTML 注释，入库前剥掉 */
+function sanitizeReasoningDelta(text: string): string {
+  return text.replace(/<!--[\s\S]*?-->/g, "");
 }

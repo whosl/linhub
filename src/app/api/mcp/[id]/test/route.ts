@@ -37,6 +37,9 @@ export async function POST(
   if (server.scope === "user" && server.ownerId !== session.user.id) {
     return Response.json({ error: "无权限" }, { status: 403 });
   }
+  if (server.scope === "global" && session.user.role !== "admin") {
+    return Response.json({ error: "无权限" }, { status: 403 });
+  }
 
   let client: { tools: () => Promise<Record<string, unknown>>; close: () => Promise<void> } | null =
     null;

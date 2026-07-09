@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useRouter } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircleIcon,
@@ -74,6 +75,53 @@ const PROVIDER_KINDS: { value: ProviderKind; label: string }[] = [
 ];
 
 export default function AdminPage() {
+  const router = useRouter();
+  const { data: user, isLoading, error, refetch } = useQuery({
+    queryKey: ["current-user"],
+    queryFn: () => getDataService().getCurrentUser(),
+    retry: false,
+  });
+
+  if (isLoading) {
+    return (
+      <PageContainer wide>
+        <div className="flex min-h-[45vh] items-center justify-center">
+          <Loader2Icon className="size-6 animate-spin text-muted-foreground" />
+        </div>
+      </PageContainer>
+    );
+  }
+
+  if (error) {
+    return (
+      <PageContainer wide>
+        <EmptyState
+          icon={<AlertCircleIcon />}
+          title="无法确认权限"
+          description="请检查服务器连接后重试。"
+          action={<Button onClick={() => void refetch()}>重试</Button>}
+        />
+      </PageContainer>
+    );
+  }
+
+  if (user?.role !== "admin") {
+    return (
+      <PageContainer wide>
+        <EmptyState
+          icon={<AlertCircleIcon />}
+          title="无权访问"
+          description="当前账号没有管理后台权限。"
+          action={
+            <Button variant="outline" onClick={() => router.replace("/")}>
+              返回首页
+            </Button>
+          }
+        />
+      </PageContainer>
+    );
+  }
+
   return (
     <PageContainer wide>
       <PageHeader

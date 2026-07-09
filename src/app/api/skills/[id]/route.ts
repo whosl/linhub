@@ -1,12 +1,14 @@
 import { and, eq, or } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 import { requireSession } from "@/lib/server/auth";
+import { ensureSeeded } from "@/lib/server/seed";
 import { skillToUi } from "../util";
 
 export async function GET(
   _req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  await ensureSeeded();
   let session;
   try {
     session = await requireSession();
@@ -32,6 +34,7 @@ export async function DELETE(
   _req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  await ensureSeeded();
   let session;
   try {
     session = await requireSession();

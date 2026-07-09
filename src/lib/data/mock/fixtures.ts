@@ -36,6 +36,7 @@ export const mockUser: User = {
   subscription: {
     planId: "plan-pro",
     planName: "Pro",
+    modelTier: "pro",
     startedAt: iso(10 * DAY),
     expiresAt: iso(-20 * DAY),
     usedQuotaCents: 2350,
@@ -188,6 +189,16 @@ export const mockProjects: Project[] = [
     description: "AI 聊天应用的产品规划与设计讨论",
     instructions: "你是资深产品设计顾问，回答时结合 ChatGPT/Claude 的最佳实践。",
     color: "#C96442",
+    knowledgeBaseIds: ["kb-1"],
+    knowledgeBases: [
+      {
+        id: "kb-1",
+        name: "技术文档库",
+        description: "个人收集的框架文档与最佳实践",
+        documentCount: 3,
+        totalChunks: 486,
+      },
+    ],
     createdAt: iso(8 * DAY),
     updatedAt: iso(2 * HOUR),
     conversationCount: 3,
@@ -201,6 +212,16 @@ export const mockProjects: Project[] = [
     name: "毕业论文",
     description: "分布式系统方向论文写作",
     color: "#6C9BD1",
+    knowledgeBaseIds: ["kb-2"],
+    knowledgeBases: [
+      {
+        id: "kb-2",
+        name: "论文资料",
+        description: "分布式系统相关论文",
+        documentCount: 2,
+        totalChunks: 210,
+      },
+    ],
     createdAt: iso(20 * DAY),
     updatedAt: iso(3 * DAY),
     conversationCount: 5,
@@ -748,8 +769,21 @@ export const mockDocuments: Record<string, KnowledgeDocument[]> = {
 
 // ---------- Skills ----------
 
+const mockSkillDefaults = {
+  kind: "prompt",
+  version: "1.0.0",
+  requiredTools: [],
+  resourceRefs: [],
+  scriptPolicy: { enabled: false },
+  reviewStatus: "approved",
+} satisfies Pick<
+  Skill,
+  "kind" | "version" | "requiredTools" | "resourceRefs" | "scriptPolicy" | "reviewStatus"
+>;
+
 export const mockSkills: Skill[] = [
   {
+    ...mockSkillDefaults,
     id: "skill-1",
     ownerId: "u-admin",
     name: "代码审查员",
@@ -766,6 +800,7 @@ export const mockSkills: Skill[] = [
     updatedAt: iso(2 * DAY),
   },
   {
+    ...mockSkillDefaults,
     id: "skill-2",
     ownerId: "u-admin",
     name: "中英互译",
@@ -781,6 +816,7 @@ export const mockSkills: Skill[] = [
     updatedAt: iso(8 * DAY),
   },
   {
+    ...mockSkillDefaults,
     id: "skill-3",
     ownerId: "u-2",
     name: "论文润色",
@@ -796,6 +832,8 @@ export const mockSkills: Skill[] = [
     updatedAt: iso(6 * DAY),
   },
   {
+    ...mockSkillDefaults,
+    reviewStatus: "pending",
     id: "skill-4",
     ownerId: "u-3",
     name: "小红书文案",

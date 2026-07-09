@@ -57,6 +57,7 @@ interface ChatState {
     newUrl: string,
     editPrompt?: string
   ) => Promise<void>;
+  removeSession: (conversationId: string) => void;
   clearRedirect: () => void;
 }
 
@@ -145,6 +146,13 @@ export const useChatStore = create<ChatState>((set, get) => {
   // 本标签页已经通过 POST/regenerate 持有同一任务的流时，不再额外 GET resume。
   // 否则新会话跳转后 ensureSession 会订阅同一个内存任务，delta 被应用两次。
   const localOwnedStreams = new Set<string>();
+  // 删除/重置会话时递增版本，旧异步流或加载 promise 只能写回同版本的会话。
+  const sessionVersions = new Map<string, number>();
+  const sessionVersion = (conversationId: string) =>
+    sessionVersions.get(conversationId) ?? 0;
+  const bumpSessionVersion = (conversationId: string) => {
+    sessionVersions.set(conversationId, sessionVersion(conversationId) + 1);
+  };
 
   /** 把 sessions 裁剪到 MAX_SESSIONS 以内，优先丢弃非流式的已加载会话 */
   const pruneSessions = (
@@ -170,9 +178,12 @@ export const useChatStore = create<ChatState>((set, get) => {
 
   const updateSession = (
     conversationId: string,
-    updater: (s: ChatSession) => ChatSession
+    updater: (s: ChatSession) => ChatSession,
+    expectedVersion = sessionVersion(conversationId)
   ) => {
+    if (sessionVersion(conversationId) !== expectedVersion) return;
     set((state) => {
+      if (sessionVersion(conversationId) !== expectedVersion) return state;
       const session = state.sessions[conversationId] ?? emptySession(conversationId);
       return {
         sessions: pruneSessions({
@@ -224,13 +235,19 @@ export const useChatStore = create<ChatState>((set, get) => {
     }, 0);
 
   /** 把流式事件应用到会话状态 */
-  const applyEvent = (conversationId: string, event: StreamEvent) => {
+  const applyEvent = (
+    conversationId: string,
+    event: StreamEvent,
+    expectedVersion = sessionVersion(conversationId)
+  ) => {
+    const update = (updater: (s: ChatSession) => ChatSession) =>
+      updateSession(conversationId, updater, expectedVersion);
     switch (event.type) {
       case "user-message":
       case "assistant-start":
       case "assistant-snapshot": {
         const message = event.message;
-        updateSession(conversationId, (s) => ({
+        update((s) => ({
           ...s,
           ...(event.type === "user-message"
             ? { currentLeafId: message.id }
@@ -244,7 +261,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       case "text-delta": {
         const partType = event.type === "reasoning-delta" ? "reasoning" : "text";
         if (partType === "reasoning" && event.delta.length === 0) break;
-        updateSession(conversationId, (s) => ({
+        update((s) => ({
           ...s,
           streamError: undefined,
           messages: s.messages.map((m) => {
@@ -265,7 +282,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         break;
       }
       case "reasoning-done": {
-        updateSession(conversationId, (s) => ({
+        update((s) => ({
           ...s,
           streamError: undefined,
           messages: s.messages.map((m) => {
@@ -279,7 +296,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         break;
       }
       case "tool-call-start": {
-        updateSession(conversationId, (s) => ({
+        update((s) => ({
           ...s,
           messages: s.messages.map((m) => {
             if (m.id !== event.messageId) return m;
@@ -303,7 +320,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         break;
       }
       case "tool-call-end": {
-        updateSession(conversationId, (s) => ({
+        update((s) => ({
           ...s,
           messages: s.messages.map((m) => {
             if (m.id !== event.messageId) return m;
@@ -330,7 +347,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         // tool-call-start 已在后端 emit 时建好 part，这里无需处理
         break;
       case "tool-input-delta": {
-        updateSession(conversationId, (s) => ({
+        update((s) => ({
           ...s,
           messages: s.messages.map((m) => {
             if (m.id !== event.messageId) return m;
@@ -350,7 +367,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         break;
       }
       case "image": {
-        updateSession(conversationId, (s) => ({
+        update((s) => ({
           ...s,
           messages: s.messages.map((m) =>
             m.id === event.messageId
@@ -366,7 +383,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         break;
       }
       case "done": {
-        updateSession(conversationId, (s) => ({
+        update((s) => ({
           ...s,
           ...(s.streamingMessageId === event.messageId
             ? { status: "idle" as const, streamingMessageId: undefined }
@@ -381,7 +398,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         break;
       }
       case "error": {
-        updateSession(conversationId, (s) => ({
+        update((s) => ({
           ...s,
           ...(event.messageId && s.streamingMessageId !== event.messageId
             ? {}
@@ -417,6 +434,19 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     clearRedirect: () => set({ pendingRedirect: null }),
 
+    removeSession: (conversationId) => {
+      bumpSessionVersion(conversationId);
+      ensureSessionInflight.delete(conversationId);
+      resumeSessionInflight.delete(conversationId);
+      localOwnedStreams.delete(conversationId);
+      set((state) => {
+        if (!state.sessions[conversationId]) return state;
+        const sessions = { ...state.sessions };
+        delete sessions[conversationId];
+        return { sessions };
+      });
+    },
+
     ensureSession: async (conversationId) => {
       const existing = get().sessions[conversationId];
       if (existing?.loaded) {
@@ -428,12 +458,14 @@ export const useChatStore = create<ChatState>((set, get) => {
       // 避免 StrictMode 双调用或快速导航发两份并行请求。
       const inflight = ensureSessionInflight.get(conversationId);
       if (inflight) return inflight;
+      const expectedVersion = sessionVersion(conversationId);
       const p = (async () => {
         try {
           const [conversation, messages] = await Promise.all([
             getDataService().getConversation(conversationId),
             getDataService().listMessages(conversationId),
           ]);
+          if (sessionVersion(conversationId) !== expectedVersion) return;
           const streamingMessage = messages.find(
             (m) => m.role === "assistant" && m.status === "streaming"
           );
@@ -450,11 +482,16 @@ export const useChatStore = create<ChatState>((set, get) => {
               conversation?.currentLeafId,
               messages
             ),
-          }));
+          }), expectedVersion);
           // 即使这次拉取尚未看到 streaming assistant，也尝试挂一次续接流。
           // 另一个浏览器可能正好在 assistant 行落库前打开会话；后端若有
           // chatTasks 活跃任务，会通过这个 GET 订阅后续事件，否则会立即空流返回。
-          if (!localOwnedStreams.has(conversationId)) void get().resume(conversationId);
+          if (
+            sessionVersion(conversationId) === expectedVersion &&
+            !localOwnedStreams.has(conversationId)
+          ) {
+            void get().resume(conversationId);
+          }
         } catch (e) {
           // 会话加载失败时不要形成浏览器 unhandled rejection；
           // 保留可重试状态，避免一次 503 被误判成“会话不存在”。
@@ -462,7 +499,7 @@ export const useChatStore = create<ChatState>((set, get) => {
             ...s,
             loaded: false,
             loadError: e instanceof Error ? e.message : "会话加载失败",
-          }));
+          }), expectedVersion);
         } finally {
           ensureSessionInflight.delete(conversationId);
         }
@@ -474,19 +511,23 @@ export const useChatStore = create<ChatState>((set, get) => {
     resume: async (conversationId) => {
       const existing = resumeSessionInflight.get(conversationId);
       if (existing) return existing;
+      const expectedVersion = sessionVersion(conversationId);
       const p = (async () => {
         try {
           for await (const event of getDataService().streamConversation(conversationId)) {
-            applyEvent(conversationId, event);
+            if (sessionVersion(conversationId) !== expectedVersion) break;
+            applyEvent(conversationId, event, expectedVersion);
           }
         } finally {
           resumeSessionInflight.delete(conversationId);
+          if (sessionVersion(conversationId) !== expectedVersion) return;
           // 流结束后拉一次最终状态，补齐刷新/跨浏览器期间可能错过的最后一批落库内容。
           try {
             const [conversation, messages] = await Promise.all([
               getDataService().getConversation(conversationId),
               getDataService().listMessages(conversationId),
             ]);
+            if (sessionVersion(conversationId) !== expectedVersion) return;
             const streamingMessage = messages.find(
               (m) => m.role === "assistant" && m.status === "streaming"
             );
@@ -503,7 +544,7 @@ export const useChatStore = create<ChatState>((set, get) => {
                 conversation?.currentLeafId,
                 messages
               ),
-            }));
+            }), expectedVersion);
           } catch {
             // 续接失败不覆盖当前可见内容。
           }
@@ -526,11 +567,13 @@ export const useChatStore = create<ChatState>((set, get) => {
       const isNewConversation = !input.conversationId;
       if (isNewConversation) set({ isStartingNew: true, startError: undefined });
       let conversationId = input.conversationId;
+      let expectedVersion = conversationId ? sessionVersion(conversationId) : 0;
       if (conversationId) localOwnedStreams.add(conversationId);
       try {
         for await (const event of getDataService().sendMessage(input)) {
           if (event.type === "conversation-created") {
             conversationId = event.conversation.id;
+            expectedVersion = sessionVersion(conversationId);
             localOwnedStreams.add(conversationId);
             set((state) => ({
               sessions: {
@@ -548,7 +591,10 @@ export const useChatStore = create<ChatState>((set, get) => {
             set({ startError: event.message });
             continue;
           }
-          if (conversationId) applyEvent(conversationId, event);
+          if (conversationId) {
+            if (sessionVersion(conversationId) !== expectedVersion) break;
+            applyEvent(conversationId, event, expectedVersion);
+          }
         }
       } finally {
         if (conversationId) localOwnedStreams.delete(conversationId);
@@ -582,13 +628,15 @@ export const useChatStore = create<ChatState>((set, get) => {
       const s = get().sessions[conversationId];
       if (s?.status === "streaming") return;
       localOwnedStreams.add(conversationId);
+      const expectedVersion = sessionVersion(conversationId);
       try {
         for await (const event of getDataService().regenerate(
           conversationId,
           assistantMessageId,
           modelId
         )) {
-          applyEvent(conversationId, event);
+          if (sessionVersion(conversationId) !== expectedVersion) break;
+          applyEvent(conversationId, event, expectedVersion);
         }
       } finally {
         localOwnedStreams.delete(conversationId);

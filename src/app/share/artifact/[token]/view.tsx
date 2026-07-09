@@ -61,6 +61,7 @@ export function SharedArtifactView({ artifact }: { artifact: Artifact }) {
             <CodeBlock
               language={getArtifactCodeLanguage(artifact)}
               code={current.content}
+              showRunButton={artifact.kind !== "html"}
             />
           </div>
         )}

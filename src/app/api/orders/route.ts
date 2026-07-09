@@ -28,6 +28,16 @@ export async function POST(req: NextRequest) {
   let description = "";
   let plan: typeof schema.plans.$inferSelect | undefined;
 
+  if (
+    process.env.PAYMENT_MOCK_ENABLED === "true" &&
+    process.env.NODE_ENV === "production"
+  ) {
+    return Response.json(
+      { error: "生产环境禁止使用 Mock 支付" },
+      { status: 503 }
+    );
+  }
+
   if (body.kind === "recharge") {
     // C1：mock 渠道创建即到账，未显式开启时禁止充值（生产必须接真实支付）
     if (process.env.PAYMENT_MOCK_ENABLED !== "true") {

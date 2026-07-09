@@ -20,10 +20,18 @@ export default function RegisterPage() {
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const form = new FormData(e.currentTarget as HTMLFormElement);
+    const submittedName = String(form.get("name") ?? "").trim();
+    const submittedEmail = String(form.get("email") ?? "").trim();
+    const submittedPassword = String(form.get("password") ?? "");
     setLoading(true);
     try {
       const { error } = await withAuthTimeout(
-        signUp.email({ email, password, name })
+        signUp.email({
+          email: submittedEmail,
+          password: submittedPassword,
+          name: submittedName,
+        })
       );
       if (error) {
         toast.error(error.message ?? "注册失败");
@@ -45,6 +53,7 @@ export default function RegisterPage() {
     <AuthShell title="创建账户" subtitle="第一个注册的用户将自动成为管理员">
       <form onSubmit={submit} className="space-y-3">
         <Input
+          name="name"
           placeholder="昵称"
           value={name}
           onChange={(e) => setName(e.target.value)}
@@ -52,6 +61,7 @@ export default function RegisterPage() {
           autoFocus
         />
         <Input
+          name="email"
           type="email"
           placeholder="邮箱"
           value={email}
@@ -59,6 +69,7 @@ export default function RegisterPage() {
           required
         />
         <Input
+          name="password"
           type="password"
           placeholder="密码（至少 8 位）"
           value={password}

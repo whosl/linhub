@@ -9,6 +9,7 @@ import type {
   KnowledgeDocument,
   LedgerEntry,
   McpServer,
+  MediaAsset,
   MemoryEntry,
   Message,
   Model,
@@ -31,6 +32,7 @@ export type ProjectPatch = Partial<{
   instructions: string | null;
   color: string | null;
   modelId: string | null;
+  knowledgeBaseIds: string[];
 }>;
 
 /**
@@ -123,8 +125,19 @@ export interface DataService {
   listMySkills(): Promise<Skill[]>;
   listMarketSkills(): Promise<Skill[]>;
   getSkill(id: string): Promise<Skill | null>;
-  saveSkill(s: Partial<Skill> & { name: string }): Promise<Skill>;
+  saveSkill(
+    s: Partial<Skill> & { name: string; shareToMarket?: boolean }
+  ): Promise<Skill>;
   deleteSkill(id: string): Promise<void>;
+
+  // ---- 文件 / 媒体 ----
+  listMediaAssets(opts?: {
+    kind?: "upload" | "generated" | "edited" | "all";
+    q?: string;
+    cursor?: string;
+    limit?: number;
+  }): Promise<{ items: MediaAsset[]; nextCursor?: string }>;
+  deleteMediaAsset(id: string): Promise<void>;
 
   // ---- MCP ----
   listMcpServers(scope: "global" | "user"): Promise<McpServer[]>;

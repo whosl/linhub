@@ -28,6 +28,7 @@ function mcpToUi(s: typeof schema.mcpServers.$inferSelect): McpServer {
     transport: s.transport,
     headersMasked,
     enabled: s.enabled,
+    defaultEnabled: s.defaultEnabled,
     status: s.status,
     tools: s.tools,
   };
@@ -82,6 +83,16 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: "名称与 URL 不能为空" }, { status: 400 });
   }
 
+  try {
+    const { assertSafeUrl } = await import("@/lib/server/net-guard");
+    await assertSafeUrl(body.url.trim());
+  } catch (e) {
+    return Response.json(
+      { error: e instanceof Error ? e.message : "URL 不安全" },
+      { status: 400 }
+    );
+  }
+
   const headersEncrypted =
     body.headers && Object.keys(body.headers).length > 0
       ? encryptSecret(JSON.stringify(body.headers))
@@ -126,6 +137,8 @@ export async function POST(req: NextRequest) {
     transport: body.transport ?? "streamable-http",
     headersEncrypted,
     enabled: body.enabled ?? true,
+    // 全局 MCP 默认不对用户自动开启，需用户勾选或管理员改 defaultEnabled
+    defaultEnabled: false,
   });
   const [row] = await db.select().from(schema.mcpServers).where(eq(schema.mcpServers.id, id));
   return Response.json(mcpToUi(row));

@@ -6,7 +6,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, type LanguageModel } from "ai";
 import { db, schema } from "@/lib/server/db";
 import { requireAdmin } from "@/lib/server/auth";
-import { getProviderBaseURL } from "@/lib/server/llm/registry";
+import { getProviderBaseURL, resolveModel } from "@/lib/server/llm/registry";
 import { decryptSecret } from "@/lib/server/crypto";
 import { formatUpstreamError } from "@/lib/server/upstream-error";
 
@@ -95,8 +95,11 @@ export async function POST(
       return Response.json({ ok: true, message: "图像模型测试成功（已生成 1 张测试图）" });
     }
 
-    // 文本模型：发极简 ping
-    const lm = buildLanguageModelForTest(model, provider, apiKey, baseURL);
+    // 文本模型：发极简 ping。已启用模型优先复用真实聊天解析路径，
+    // 避免 OpenAI reasoning / store / 中转 chat-completions 分流测试误报。
+    const lm = model.enabled
+      ? (await resolveModel(model.id)).model
+      : buildLanguageModelForTest(model, provider, apiKey, baseURL);
     const { usage } = await generateText({
       model: lm,
       prompt: "hi",

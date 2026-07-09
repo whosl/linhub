@@ -156,12 +156,37 @@ export interface ToolResultSummary {
   artifactId?: string;
   /** Artifact 展示标题 */
   artifactTitle?: string;
+  /** 工具产出的可下载附件 */
+  attachments?: {
+    id: string;
+    name: string;
+    mimeType: string;
+    size: number;
+    url: string;
+  }[];
 }
 
 export interface ImagePart {
   type: "image";
   url: string;
   alt?: string;
+  mediaAssetId?: string;
+}
+
+/** 统一媒体资产（上传 / 生成 / 编辑） */
+export interface MediaAsset {
+  id: string;
+  ownerId: string;
+  kind: "upload" | "generated" | "edited";
+  name: string;
+  mimeType: string;
+  size: number;
+  url: string;
+  conversationId?: string;
+  messageId?: string;
+  projectId?: string;
+  sourceTool?: string;
+  createdAt: string;
 }
 
 export interface FilePart {
@@ -241,10 +266,20 @@ export interface Project {
   instructions?: string;
   color?: string;
   modelId?: string;
+  knowledgeBaseIds: string[];
+  knowledgeBases: ProjectKnowledgeBase[];
   createdAt: string;
   updatedAt: string;
   conversationCount: number;
   files: ProjectFile[];
+}
+
+export interface ProjectKnowledgeBase {
+  id: string;
+  name: string;
+  description?: string;
+  documentCount: number;
+  totalChunks: number;
 }
 
 export interface ProjectFile {
@@ -318,6 +353,8 @@ export interface KnowledgeDocument {
   size: number;
   status: DocumentStatus;
   chunkCount: number;
+  extractMethod?: string;
+  errorMessage?: string;
   createdAt: string;
 }
 
@@ -331,6 +368,27 @@ export interface KnowledgeChunkRef {
 
 // ---------- Skill（自定义助手） ----------
 
+export type SkillKind = "prompt" | "pack";
+export type SkillReviewStatus = "draft" | "pending" | "approved" | "rejected";
+
+export interface SkillResourceRef {
+  id: string;
+  name: string;
+  kind?: "instruction" | "reference" | "template" | "asset";
+  description?: string;
+  path?: string;
+  mimeType?: string;
+  size?: number;
+  content?: string;
+}
+
+export interface SkillScriptPolicy {
+  enabled: boolean;
+  allowedScripts?: string[];
+  timeoutMs?: number;
+  network?: boolean;
+}
+
 export interface Skill {
   id: string;
   ownerId: string;
@@ -338,6 +396,15 @@ export interface Skill {
   emoji: string;
   description: string;
   systemPrompt: string;
+  kind: SkillKind;
+  version: string;
+  source?: string;
+  manifest?: Record<string, unknown>;
+  packagePath?: string;
+  requiredTools: ToolName[];
+  resourceRefs: SkillResourceRef[];
+  scriptPolicy: SkillScriptPolicy;
+  reviewStatus: SkillReviewStatus;
   greeting?: string;
   defaultModelId?: string;
   enabledTools: ToolName[];
@@ -363,6 +430,8 @@ export interface McpServer {
   /** 请求头（含密钥，回传时掩码） */
   headersMasked?: Record<string, string>;
   enabled: boolean;
+  /** 全局 MCP 是否默认对用户开启 */
+  defaultEnabled?: boolean;
   status: "connected" | "error" | "unknown";
   tools: { name: string; description?: string }[];
 }
@@ -409,6 +478,7 @@ export interface Plan {
 export interface Subscription {
   planId: string;
   planName: string;
+  modelTier: "free" | "pro";
   startedAt: string;
   expiresAt: string;
   usedQuotaCents: number;
@@ -479,9 +549,11 @@ export interface ChatToolToggles {
   webSearch: boolean;
   imageGeneration: boolean;
   codeRunner: boolean;
+  /** 是否允许模型检索用户私有知识库；开启时空 knowledgeBaseIds 表示全部知识库 */
+  knowledgeSearch: boolean;
   /** 启用的 MCP server id */
   mcpServerIds: string[];
-  /** 挂载的知识库 */
+  /** 限定检索的知识库范围；为空且 knowledgeSearch=true 时检索全部 */
   knowledgeBaseIds: string[];
 }
 
@@ -526,5 +598,7 @@ export type StreamEvent =
       status: Message["status"];
     }
   | { type: "error"; messageId?: string; message: string }
-  /** I13: 心跳，防止 CDN/代理在长 reasoning/tool 期间因空闲超时断流 */
-  | { type: "ping" };
+  | {
+      /** I13: 心跳，防止 CDN/代理在长 reasoning/tool 期间因空闲超时断流 */
+      type: "ping";
+    };

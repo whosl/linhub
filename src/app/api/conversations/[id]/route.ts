@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { and, asc, eq } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 import { requireSession } from "@/lib/server/auth";
+import { abortConversationGeneration } from "@/lib/server/chat-task-registry";
 
 async function ownedConversation(id: string, userId: string) {
   const [c] = await db
@@ -140,6 +141,15 @@ export async function DELETE(
   const { id } = await params;
   const c = await ownedConversation(id, session.user.id);
   if (!c) return Response.json({ error: "not found" }, { status: 404 });
-  await db.delete(schema.conversations).where(eq(schema.conversations.id, id));
+  abortConversationGeneration(id, session.user.id);
+  const deleted = await db
+    .delete(schema.conversations)
+    .where(
+      and(eq(schema.conversations.id, id), eq(schema.conversations.ownerId, session.user.id))
+    )
+    .returning({ id: schema.conversations.id });
+  if (deleted.length === 0) {
+    return Response.json({ error: "not found" }, { status: 404 });
+  }
   return Response.json({ ok: true });
 }

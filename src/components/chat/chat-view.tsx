@@ -7,7 +7,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowDownIcon } from "lucide-react";
 import { getDataService } from "@/lib/data";
 import { suggestedPrompts } from "@/lib/data/mock/fixtures";
-import type { FilePart, ImagePart, Model } from "@/lib/types";
+import type { FilePart, ImagePart, Model, Skill } from "@/lib/types";
 import {
   deepestLeaf,
   useChatStore,
@@ -28,6 +28,7 @@ const DEFAULT_COMPOSER: ComposerState = {
     webSearch: true,
     imageGeneration: true,
     codeRunner: true,
+    knowledgeSearch: true,
     mcpServerIds: [],
     knowledgeBaseIds: [],
   },
@@ -60,33 +61,28 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
   });
   const models = modelsData?.models ?? EMPTY_MODELS;
   const defaultModelId = modelsData?.defaultModelId;
-  const firstChatModelId = models.find(
-    (m) => !m.capabilities.includes("image-generation")
-  )?.id;
-  const chatModelIds = React.useMemo(
-    () =>
-      new Set(
-        models
-          .filter((m) => !m.capabilities.includes("image-generation"))
-          .map((m) => m.id)
-      ),
-    [models]
-  );
   const { data: currentConversation } = useQuery({
     queryKey: ["conversation", conversationId],
     queryFn: () => getDataService().getConversation(conversationId!),
     enabled: !!conversationId,
   });
-  const { data: pendingProject } = useQuery({
-    queryKey: ["project", pendingContext.projectId],
-    queryFn: () => getDataService().getProject(pendingContext.projectId!),
-    enabled: !conversationId && !!pendingContext.projectId,
+  const activeProjectId = pendingContext.projectId ?? currentConversation?.projectId;
+  const { data: activeProject } = useQuery({
+    queryKey: ["project", activeProjectId],
+    queryFn: () => getDataService().getProject(activeProjectId!),
+    enabled: !!activeProjectId,
   });
   const { data: pendingSkill } = useQuery({
     queryKey: ["skill", pendingContext.skillId],
     queryFn: () => getDataService().getSkill(pendingContext.skillId!),
     enabled: !conversationId && !!pendingContext.skillId,
   });
+  const { data: currentSkill } = useQuery({
+    queryKey: ["skill", currentConversation?.skillId],
+    queryFn: () => getDataService().getSkill(currentConversation!.skillId!),
+    enabled: !!conversationId && !!currentConversation?.skillId,
+  });
+  const activeSkill: Skill | undefined = pendingSkill ?? currentSkill ?? undefined;
   const { data: styles = [] } = useQuery({
     queryKey: ["styles"],
     queryFn: () => getDataService().listStyles(),
@@ -99,6 +95,16 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
     queryKey: ["current-user"],
     queryFn: () => getDataService().getCurrentUser(),
   });
+  const defaultableChatModels = React.useMemo(
+    () =>
+      models.filter((m) => !m.capabilities.includes("image-generation")),
+    [models]
+  );
+  const firstChatModelId = defaultableChatModels[0]?.id;
+  const defaultableChatModelIds = React.useMemo(
+    () => new Set(defaultableChatModels.map((m) => m.id)),
+    [defaultableChatModels]
+  );
   const { data: artifacts = [] } = useQuery({
     queryKey: ["artifacts", conversationId],
     queryFn: () => getDataService().listArtifacts(conversationId!),
@@ -171,29 +177,52 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
 
   const automaticModelId = React.useMemo(() => {
     if (currentConversation) {
-      return currentConversation.modelId || defaultModelId || firstChatModelId || "";
+      return currentConversation.modelId &&
+        defaultableChatModelIds.has(currentConversation.modelId)
+        ? currentConversation.modelId
+        : defaultModelId || firstChatModelId || "";
     }
     if (!conversationId) {
       if (
         pendingSkill?.defaultModelId &&
-        chatModelIds.has(pendingSkill.defaultModelId)
+        defaultableChatModelIds.has(pendingSkill.defaultModelId)
       ) {
         return pendingSkill.defaultModelId;
       }
-      if (pendingProject?.modelId && chatModelIds.has(pendingProject.modelId)) {
-        return pendingProject.modelId;
+      if (
+        activeProject?.modelId &&
+        defaultableChatModelIds.has(activeProject.modelId)
+      ) {
+        return activeProject.modelId;
       }
     }
     return defaultModelId || firstChatModelId || "";
   }, [
-    chatModelIds,
     conversationId,
     currentConversation,
     defaultModelId,
+    defaultableChatModelIds,
     firstChatModelId,
-    pendingProject?.modelId,
+    activeProject?.modelId,
     pendingSkill?.defaultModelId,
   ]);
+
+  const resolveSelectableModelId = React.useCallback(
+    (preferred?: string) => {
+      if (preferred && defaultableChatModelIds.has(preferred)) return preferred;
+      if (automaticModelId && defaultableChatModelIds.has(automaticModelId))
+        return automaticModelId;
+      if (defaultModelId && defaultableChatModelIds.has(defaultModelId))
+        return defaultModelId;
+      return firstChatModelId || "";
+    },
+    [
+      automaticModelId,
+      defaultModelId,
+      defaultableChatModelIds,
+      firstChatModelId,
+    ]
+  );
 
   // 会话/技能/项目/默认模型共同决定自动模型；用户手动切换后不再覆盖。
   React.useEffect(() => {
@@ -206,6 +235,17 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
       );
     });
   }, [automaticModelId]);
+
+  React.useEffect(() => {
+    if (!composer.modelId || defaultableChatModelIds.has(composer.modelId)) return;
+    modelExplicitlySelectedRef.current = false;
+    Promise.resolve().then(() => {
+      setComposer((prev) => {
+        if (!prev.modelId || defaultableChatModelIds.has(prev.modelId)) return prev;
+        return { ...prev, modelId: resolveSelectableModelId(prev.modelId) };
+      });
+    });
+  }, [composer.modelId, defaultableChatModelIds, resolveSelectableModelId]);
 
   React.useEffect(() => {
     if (!knowledgeBasesLoaded) return;
@@ -270,8 +310,8 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
       queryClient.invalidateQueries({ queryKey: ["models"] });
       queryClient.invalidateQueries({ queryKey: ["models", "with-default"] });
       toast.success("已设为默认模型");
-    } catch {
-      toast.error("设置失败");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "设置失败");
     }
   };
 
@@ -283,11 +323,7 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
       !conversationId &&
       (!!pendingContext.projectId || !!pendingContext.skillId) &&
       !modelExplicitlySelectedRef.current;
-    const selectedModelId =
-      composer.modelId ||
-      defaultModelId ||
-      firstChatModelId ||
-      "";
+    const selectedModelId = resolveSelectableModelId(composer.modelId);
     void (async () => {
       try {
         await send({
@@ -296,7 +332,9 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
           images,
           attachments: files,
           quotedText,
-          ...(shouldUseServerContextDefault ? {} : { modelId: selectedModelId }),
+          ...(shouldUseServerContextDefault || !selectedModelId
+            ? {}
+            : { modelId: selectedModelId }),
           styleId: composer.styleId,
           extendedThinking: composer.extendedThinking,
           tools: composer.tools,
@@ -320,13 +358,14 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
     if (!conversationId) return;
     const activeConversationId = conversationId;
     const activeProjectId = currentConversation?.projectId;
+    const selectedModelId = resolveSelectableModelId(composer.modelId);
     void (async () => {
       try {
         await send({
           conversationId,
           parentId,
           text: newText,
-          modelId: composer.modelId || defaultModelId || firstChatModelId || "",
+          ...(selectedModelId ? { modelId: selectedModelId } : {}),
           styleId: composer.styleId,
           extendedThinking: composer.extendedThinking,
           tools: composer.tools,
@@ -345,9 +384,13 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
     if (!conversationId) return;
     const activeConversationId = conversationId;
     const activeProjectId = currentConversation?.projectId;
+    const selectedModelId =
+      modelId && defaultableChatModelIds.has(modelId)
+        ? modelId
+        : resolveSelectableModelId(composer.modelId);
     void (async () => {
       try {
-        await regenerate(activeConversationId, assistantMessageId, modelId);
+        await regenerate(activeConversationId, assistantMessageId, selectedModelId);
       } finally {
         void queryClient.invalidateQueries({ queryKey: ["conversations"] });
         void queryClient.invalidateQueries({
@@ -363,6 +406,8 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
     void (async () => {
       try {
         await stop(activeConversationId);
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "停止生成失败，请重试");
       } finally {
         void queryClient.invalidateQueries({ queryKey: ["conversations"] });
         if (activeConversationId) {
@@ -433,17 +478,19 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
               </div>
             )}
             <ChatInput
-              models={models}
+              models={defaultableChatModels}
               styles={styles}
               knowledgeBases={knowledgeBases}
+              activeProject={activeProject}
               composer={composer}
               onComposerChange={handleComposerChange}
               isStreaming={isStartingNew}
               onSend={handleSend}
               // I11: 新会话首条响应期间也能停止（store/api-service 用哨兵键登记 controller）
               onStop={handleStop}
-              defaultModelId={user?.defaultModelId ?? defaultModelId}
+              defaultModelId={defaultModelId}
               onSetDefaultModel={setDefaultModel}
+              activeSkill={activeSkill}
               autoFocus
             />
             <div className="mx-auto mt-2 grid max-w-2xl grid-cols-2 gap-2 px-4 sm:grid-cols-3">
@@ -519,7 +566,7 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
                 key={m.id}
                 message={m}
                 isStreaming={isStreaming && session?.streamingMessageId === m.id}
-                models={models}
+                models={defaultableChatModels}
                 branch={isStreaming ? undefined : branchInfo(m.id, m.parentId)}
                 onRegenerate={
                   m.role === "assistant" && !isStreaming
@@ -572,9 +619,10 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
         </div>
 
         <ChatInput
-          models={models}
+          models={defaultableChatModels}
           styles={styles}
           knowledgeBases={knowledgeBases}
+          activeProject={activeProject}
           composer={composer}
           onComposerChange={handleComposerChange}
           quotedText={quotedText}
@@ -582,8 +630,9 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
           isStreaming={!!isStreaming}
           onSend={handleSend}
           onStop={handleStop}
-          defaultModelId={user?.defaultModelId ?? defaultModelId}
+          defaultModelId={defaultModelId}
           onSetDefaultModel={setDefaultModel}
+          activeSkill={activeSkill}
         />
       </div>
 

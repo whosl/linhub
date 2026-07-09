@@ -15,7 +15,11 @@ export function assertEnv() {
       `缺少必需环境变量：${missing.join(", ")}。请参考 .env.example 配置后重启。`
     );
   }
-  if ((process.env.ENCRYPTION_KEY ?? "").length < 32) {
-    throw new Error("ENCRYPTION_KEY 长度必须至少 32 字符（AES-256 密钥）");
+  const key = process.env.ENCRYPTION_KEY ?? "";
+  // 与 crypto.ts 一致：AES-256 需要 32 字节 = 64 个 hex 字符
+  if (!/^[0-9a-fA-F]{64}$/.test(key)) {
+    throw new Error(
+      "ENCRYPTION_KEY 必须是 64 个十六进制字符（32 字节，可用 openssl rand -hex 32 生成）"
+    );
   }
 }

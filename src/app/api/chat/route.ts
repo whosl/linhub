@@ -14,6 +14,7 @@ import { ensureSeeded } from "@/lib/server/seed";
 import { computeCostCents, resolveModel } from "@/lib/server/llm/registry";
 import {
   assertCanSpend,
+  getActiveSubscription,
   assertModelAccess,
   recordUsage,
 } from "@/lib/server/billing";
@@ -27,10 +28,17 @@ import {
   buildKnowledgeTool,
   buildMcpTools,
   buildMemoryTools,
+  buildPptxTools,
+  buildSkillPackTools,
+  buildSpreadsheetTools,
   buildVisionTool,
   buildWebTools,
   loadRecentMemories,
 } from "@/lib/server/llm/tools";
+import {
+  composeSkillPackPrompt,
+  mergeSkillToggles,
+} from "@/lib/server/skill-runtime";
 import type {
   ChatToolToggles,
   ImagePart,
@@ -41,6 +49,18 @@ import type {
   ToolCallPart,
   ToolResultSummary,
 } from "@/lib/types";
+import {
+  canceledClientIds,
+  chatTasks,
+  chatTasksByClientId,
+  clientGenerationKey,
+  isLiveTask,
+  pendingGenerationKeys,
+  PENDING_GENERATION_STALE_MS,
+  type ChatEmit,
+  type ChatGenerationTask,
+  type ChatSubscriber,
+} from "@/lib/server/chat-task-registry";
 
 export const maxDuration = 300;
 
@@ -59,8 +79,6 @@ interface RegenerateInput {
 
 type ChatRequest = SendMessageInput | RegenerateInput;
 
-type ChatEmit = (event: StreamEvent) => void;
-
 interface PreparedGeneration {
   conversationId: string;
   assistantId: string;
@@ -70,58 +88,11 @@ interface PreparedGeneration {
   run: (emit: ChatEmit, signal: AbortSignal) => Promise<void>;
 }
 
-interface ChatSubscriber {
-  emit: ChatEmit;
-  close: () => void;
-}
-
-interface ChatGenerationTask {
-  conversationId: string;
-  clientGenerationId?: string;
-  userId: string;
-  assistantMessageId: string;
-  abortController: AbortController;
-  canceledBeforeStart: boolean;
-  assistantStarted: boolean;
-  bootstrapPublished: boolean;
-  events: StreamEvent[];
-  subscribers: Set<ChatSubscriber>;
-  done: boolean;
-  startedAt: number;
-  promise?: Promise<void>;
-}
-
-const globalChatState = globalThis as typeof globalThis & {
-  __linhubChatTasks?: Map<string, ChatGenerationTask>;
-  __linhubChatTasksByClientId?: Map<string, ChatGenerationTask>;
-  __linhubCanceledClientIds?: Set<string>;
-  __linhubPendingGenerationKeys?: Map<string, { userId: string; startedAt: number }>;
-};
-
-const chatTasks = (globalChatState.__linhubChatTasks ??= new Map());
-const chatTasksByClientId = (globalChatState.__linhubChatTasksByClientId ??= new Map());
-const canceledClientIds = (globalChatState.__linhubCanceledClientIds ??= new Set());
-const pendingGenerationKeys = (globalChatState.__linhubPendingGenerationKeys ??= new Map());
-const PENDING_GENERATION_STALE_MS = 300_000;
-
 class ChatBusyError extends Error {
   constructor() {
     super("当前会话正在生成，请稍后再试");
     this.name = "ChatBusyError";
   }
-}
-
-function isLiveTask(task: ChatGenerationTask | undefined, userId?: string) {
-  return (
-    !!task &&
-    !task.done &&
-    !task.abortController.signal.aborted &&
-    (!userId || task.userId === userId)
-  );
-}
-
-function clientGenerationKey(userId: string, clientGenerationId: string) {
-  return `${userId}:${clientGenerationId}`;
 }
 
 function requestedConversationId(body: ChatRequest) {
@@ -207,11 +178,12 @@ export async function POST(req: NextRequest) {
   let prepared: PreparedGeneration;
   let releaseGenerationSlot: (() => void) | undefined;
   try {
+    const origin = req.nextUrl.origin;
     releaseGenerationSlot = await reserveGenerationSlot(body, userId);
     prepared =
       "regenerate" in body
-        ? await prepareRegenerate(body, userId)
-        : await prepareSend(body, userId);
+        ? await prepareRegenerate(body, userId, origin)
+        : await prepareSend(body, userId, origin);
   } catch (e) {
     releaseGenerationSlot?.();
     return Response.json(
@@ -246,6 +218,10 @@ export async function GET(req: NextRequest) {
   if (!conversationId) {
     return Response.json({ error: "缺少 conversationId" }, { status: 400 });
   }
+  const limited =
+    rateLimit(`chat-resume:${session.user.id}`, 120, 60_000) ??
+    rateLimit(`chat-resume:${session.user.id}:${conversationId}`, 30, 60_000);
+  if (limited) return limited;
   const [conversation] = await db
     .select({ id: schema.conversations.id })
     .from(schema.conversations)
@@ -1141,7 +1117,8 @@ async function assertOwnedRefs(
 
 async function prepareSend(
   input: SendMessageInput,
-  userId: string
+  userId: string,
+  origin: string
 ): Promise<PreparedGeneration> {
   const bootstrapEvents: StreamEvent[] = [];
   const emit = (event: StreamEvent) => bootstrapEvents.push(event);
@@ -1149,10 +1126,11 @@ async function prepareSend(
   let conversationId = input.conversationId;
   let isNew = false;
   let effectiveModelId = input.modelId || "";
+  // 无论新/旧会话，都校验 style/project/skill 归属，防止 IDOR
+  await assertOwnedRefs(userId, input);
   if (!conversationId) {
     conversationId = `c-${uid()}`;
     isNew = true;
-    await assertOwnedRefs(userId, input);
     // 技能默认模型：用户未指定模型时，优先使用自定义助手自己的默认模型。
     if (!effectiveModelId && input.skillId) {
       effectiveModelId = (await getSkillDefaultModelId(userId, input.skillId)) ?? "";
@@ -1169,7 +1147,12 @@ async function prepareSend(
           )
         )
         .limit(1);
-      if (proj?.modelId) effectiveModelId = proj.modelId;
+      if (
+        proj?.modelId &&
+        (await isAccessibleChatModelForUser(userId, proj.modelId))
+      ) {
+        effectiveModelId = proj.modelId;
+      }
     }
     if (!effectiveModelId) {
       effectiveModelId = (await getDefaultModelId(userId)) ?? "";
@@ -1217,6 +1200,19 @@ async function prepareSend(
   let parentId: string | null;
   if (input.parentId !== undefined) {
     parentId = input.parentId;
+    if (parentId) {
+      const [parentMsg] = await db
+        .select({ id: schema.messages.id })
+        .from(schema.messages)
+        .where(
+          and(
+            eq(schema.messages.id, parentId),
+            eq(schema.messages.conversationId, conversationId)
+          )
+        )
+        .limit(1);
+      if (!parentMsg) throw new Error("父消息不属于当前会话");
+    }
   } else {
     const [conversation] = await db
       .select({ leaf: schema.conversations.currentLeafId })
@@ -1296,6 +1292,7 @@ async function prepareSend(
         extendedThinking: input.extendedThinking,
         toolToggles: input.tools,
         userId,
+        origin,
         emit: streamEmit,
         signal,
       });
@@ -1329,7 +1326,8 @@ async function prepareSend(
 
 async function prepareRegenerate(
   input: RegenerateInput,
-  userId: string
+  userId: string,
+  origin: string
 ): Promise<PreparedGeneration> {
   const [target] = await db
     .select()
@@ -1376,6 +1374,7 @@ async function prepareRegenerate(
         // 兜底才从原回复中实际用过的工具推断，避免默认全开。
         toolToggles,
         userId,
+        origin,
         emit,
         signal,
       }),
@@ -1400,7 +1399,21 @@ async function getMessageToolToggles(
     (p): p is Extract<MessagePart, { type: "tool-config" }> =>
       p.type === "tool-config"
   );
-  return part?.tools ?? null;
+  return normalizeChatToolToggles(part?.tools);
+}
+
+function normalizeChatToolToggles(
+  tools: ChatToolToggles | null | undefined
+): ChatToolToggles | null {
+  if (!tools) return null;
+  return {
+    webSearch: tools.webSearch ?? false,
+    imageGeneration: tools.imageGeneration ?? false,
+    codeRunner: tools.codeRunner ?? false,
+    knowledgeSearch: tools.knowledgeSearch ?? true,
+    mcpServerIds: tools.mcpServerIds ?? [],
+    knowledgeBaseIds: tools.knowledgeBaseIds ?? [],
+  };
 }
 
 function inferRegenerateToolToggles(parts: MessagePart[]): ChatToolToggles {
@@ -1408,6 +1421,7 @@ function inferRegenerateToolToggles(parts: MessagePart[]): ChatToolToggles {
     webSearch: false,
     imageGeneration: false,
     codeRunner: false,
+    knowledgeSearch: false,
     mcpServerIds: [],
     knowledgeBaseIds: [],
   };
@@ -1428,6 +1442,7 @@ function inferRegenerateToolToggles(parts: MessagePart[]): ChatToolToggles {
       toggles.imageGeneration = true;
     }
     if (part.toolName === "run_code") toggles.codeRunner = true;
+    if (part.toolName === "search_knowledge") toggles.knowledgeSearch = true;
   }
   return toggles;
 }
@@ -1445,11 +1460,18 @@ async function getDefaultModelId(userId: string): Promise<string | null> {
     .where(eq(schema.settings.id, "global"))
     .limit(1);
   const enabledModels = await db
-    .select({ id: schema.models.id, capabilities: schema.models.capabilities })
+    .select({
+      id: schema.models.id,
+      capabilities: schema.models.capabilities,
+      tier: schema.models.tier,
+    })
     .from(schema.models)
     .where(eq(schema.models.enabled, true));
+  const hasProAccess = await userHasProAccess(userId);
   const chatModels = enabledModels.filter(
-    (m) => !(m.capabilities as string[]).includes("image-generation")
+    (m) =>
+      !(m.capabilities as string[]).includes("image-generation") &&
+      (m.tier !== "pro" || hasProAccess)
   );
   const chatModelIds = new Set(chatModels.map((m) => m.id));
   if (user?.defaultModelId && chatModelIds.has(user.defaultModelId)) {
@@ -1481,23 +1503,186 @@ async function getSkillDefaultModelId(
     .limit(1);
   if (!skill?.defaultModelId) return null;
 
-  const [model] = await db
-    .select({ id: schema.models.id, capabilities: schema.models.capabilities })
-    .from(schema.models)
-    .where(
-      and(
-        eq(schema.models.id, skill.defaultModelId),
-        eq(schema.models.enabled, true)
-      )
-    )
-    .limit(1);
-  if (!model || (model.capabilities as string[]).includes("image-generation")) {
-    return null;
-  }
-  return model.id;
+  if (!(await isAccessibleChatModelForUser(userId, skill.defaultModelId))) return null;
+  return skill.defaultModelId;
 }
 
 type ResolvedChatModel = Awaited<ReturnType<typeof resolveModel>>;
+
+async function userHasProAccess(userId: string) {
+  return (await getActiveSubscription(userId))?.plan.modelTier === "pro";
+}
+
+async function isAccessibleChatModelForUser(userId: string, modelId: string) {
+  const [model] = await db
+    .select({ capabilities: schema.models.capabilities, tier: schema.models.tier })
+    .from(schema.models)
+    .where(and(eq(schema.models.id, modelId), eq(schema.models.enabled, true)))
+    .limit(1);
+  if (!model || (model.capabilities as string[]).includes("image-generation")) {
+    return false;
+  }
+  return model.tier !== "pro" || (await userHasProAccess(userId));
+}
+
+async function tryResolveHistoryImageSource(url: string, origin: string) {
+  try {
+    return { ok: true as const, source: await resolveImageSource(url, origin) };
+  } catch (e) {
+    return {
+      ok: false as const,
+      message: e instanceof Error ? e.message : "图片无法读取",
+    };
+  }
+}
+
+function getPlainTextFromParts(parts: MessagePart[]) {
+  return parts
+    .filter((p): p is { type: "text"; text: string } => p.type === "text")
+    .map((p) => p.text)
+    .join("\n");
+}
+
+const PRIVATE_KNOWLEDGE_QUERY_PATTERN = new RegExp(
+  [
+    "知识库(?:里|中|内|里的|中的|里面|内容|文档|资料|报告)",
+    "(?:用|基于|根据|检索|搜索|查询|查找|查|看看|读取|从|在|我的).{0,20}知识库",
+    "(?:基于|根据).{0,12}知识库.{0,20}(?:文档|文件|报告|资料|材料)?",
+  ].join("|"),
+  "u"
+);
+
+function isKnowledgeDirectedQuery(text: string) {
+  return PRIVATE_KNOWLEDGE_QUERY_PATTERN.test(text);
+}
+
+const PROJECT_MATERIAL_QUERY_PATTERN =
+  /(?:项目资料|项目文件|项目文档|已上传.{0,6}(?:资料|文件|文档|报告)|上传的.{0,6}(?:资料|文件|文档|报告)|这份.{0,8}(?:资料|文件|文档|报告|总结)|这个.{0,8}(?:资料|文件|文档|报告|总结)|(?:基于|根据).{0,12}(?:资料|文件|文档|报告|材料|总结))/u;
+
+function isProjectMaterialDirectedQuery(text: string) {
+  return PROJECT_MATERIAL_QUERY_PATTERN.test(text);
+}
+
+async function loadProjectKnowledgeBaseIds(projectId: string, userId: string) {
+  const rows = await db
+    .select({ id: schema.projectKnowledgeBases.knowledgeBaseId })
+    .from(schema.projectKnowledgeBases)
+    .innerJoin(
+      schema.knowledgeBases,
+      eq(schema.projectKnowledgeBases.knowledgeBaseId, schema.knowledgeBases.id)
+    )
+    .where(
+      and(
+        eq(schema.projectKnowledgeBases.projectId, projectId),
+        eq(schema.knowledgeBases.ownerId, userId)
+      )
+    );
+  return rows.map((row) => row.id);
+}
+
+const IMAGE_TOOL_QUERY_PATTERN =
+  /(?:调用|使用).{0,12}(?:图像生成工具|图片生成工具|生图工具|图片编辑工具|图像编辑工具|generate_image|edit_image)/iu;
+
+const ARTIFACT_TERM_PATTERN =
+  /(?:SVG|HTML|React|Canvas|Mermaid|代码|组件|网页|页面|网站|应用|小工具|工具|Artifact|矢量图|图标组件|流程图|时序图|架构图|ER图|甘特图|图表|表格)/iu;
+const NEGATED_ARTIFACT_TERM_PATTERN =
+  /(?:不要|别|禁止|不能|不准|不要用|别用|别拿|不要拿).{0,16}(?:SVG|HTML|React|Canvas|Mermaid|代码|组件|网页|页面|Artifact|矢量图|图标组件)/iu;
+const IMAGE_RELATED_ARTIFACT_QUERY_PATTERNS = [
+  new RegExp(
+    "(?:用|使用|写|做|制作|创建|生成|实现).{0,16}(?:SVG|HTML|React|Canvas|Mermaid|代码|组件|网页|页面|网站|应用|小工具|工具|Artifact|矢量图|图标组件|流程图|时序图|架构图|ER图|甘特图|图表|表格)",
+    "iu"
+  ),
+  new RegExp(
+    "(?:图片|图像|照片|头像|海报|相册|照片墙).{0,20}(?:压缩|上传|裁剪|编辑器|生成器|管理|预览|标注|处理).{0,20}(?:工具|页面|应用|组件|网页|网站|系统|demo|Demo)?",
+    "iu"
+  ),
+  new RegExp(
+    "(?:做|制作|创建|写|实现).{0,16}(?:图片|图像|照片|头像|海报|相册|照片墙).{0,20}(?:压缩|上传|裁剪|编辑器|生成器|管理|预览|标注|处理)",
+    "iu"
+  ),
+];
+
+const IMAGE_EDIT_QUERY_PATTERNS = [
+  /(?:P图|修图|改图|编辑图片|编辑图像|编辑这张图|编辑这张图片|编辑这张照片|图片编辑|图像编辑)/iu,
+  /(?:这张图|这张图片|这张照片|图片|图像|照片|头像).{0,20}(?:去背景|换背景|抠图|换成|改成|移除|删除|擦除|编辑|修改|调整|美化)/iu,
+  /(?:去掉|移除|删除|替换|更换).{0,12}(?:背景|水印|文字|人物|物体)/iu,
+];
+
+const IMAGE_GENERATION_QUERY_PATTERNS = [
+  IMAGE_TOOL_QUERY_PATTERN,
+  /(?:生图|出图|文生图|以图生图)/iu,
+  new RegExp(
+    "(?:生成|创作|画|绘制|做|制作).{0,12}(?:一张|一幅|一个|一款|张|幅|个|款)?.{0,28}(?:图片|图像|插画|照片|海报|头像|壁纸|表情包|封面|贴纸|猫图|狗图)",
+    "iu"
+  ),
+  new RegExp(
+    "(?:帮我|给我).{0,8}(?:画|生成|做|制作).{0,36}(?:图片|图像|插画|照片|海报|头像|壁纸|表情包|封面|贴纸|猫|狗|机器人|人物|风景)",
+    "iu"
+  ),
+  /(?:^|[，。！？\s])(?:帮我|给我)?(?:画|绘制)(?!.*(?:流程图|时序图|架构图|ER图|甘特图|图表|函数图|曲线图|表格)).{2,60}/iu,
+  /(?:generate|create|draw|make).{0,24}(?:image|picture|photo|avatar|poster|wallpaper|sticker)/iu,
+];
+
+function isArtifactDirectedImageQuery(text: string) {
+  if (NEGATED_ARTIFACT_TERM_PATTERN.test(text)) return false;
+  return IMAGE_RELATED_ARTIFACT_QUERY_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function isImageEditDirectedQuery(text: string) {
+  return IMAGE_EDIT_QUERY_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function isImageGenerationDirectedQuery(text: string) {
+  if (IMAGE_TOOL_QUERY_PATTERN.test(text)) return true;
+  if (isArtifactDirectedImageQuery(text)) return false;
+  if (ARTIFACT_TERM_PATTERN.test(text) && !NEGATED_ARTIFACT_TERM_PATTERN.test(text)) {
+    return false;
+  }
+  return (
+    isImageEditDirectedQuery(text) ||
+    IMAGE_GENERATION_QUERY_PATTERNS.some((pattern) => pattern.test(text))
+  );
+}
+
+const CODE_EXECUTION_QUERY_PATTERNS = [
+  new RegExp("(?:调用|使用).{0,12}(?:代码运行工具|run_code)", "iu"),
+  new RegExp(
+    "(?:运行|执行|跑|验证).{0,16}(?:这段|下面|上述|以下|上面|这个|这些|给定|我发的).{0,16}(?:代码|脚本|程序|JavaScript|JS|TypeScript|TS|Python|SQL)",
+    "iu"
+  ),
+  new RegExp(
+    "(?:运行|执行|跑|验证).{0,16}(?:代码块|代码片段|脚本|程序)",
+    "iu"
+  ),
+  new RegExp(
+    "(?:这段|下面|上述|以下|上面|这个|这些|给定|我发的).{0,16}(?:代码|脚本|程序|JavaScript|JS|TypeScript|TS|Python|SQL).{0,16}(?:运行|执行|跑|输出|打印)",
+    "iu"
+  ),
+  /运行得到的输出|运行结果|执行结果/iu,
+];
+
+const CODE_CONCEPT_QUERY_PATTERN = new RegExp(
+  [
+    "执行计划",
+    "运行时",
+    "输出格式",
+    "时间复杂度",
+    "空间复杂度",
+    "结果(?:怎么|如何|为什么|原因|分析)",
+    "(?:是什么|有哪些|区别|原理|概念)",
+  ].join("|"),
+  "iu"
+);
+
+function isCodeExecutionDirectedQuery(text: string) {
+  const explicitlyRequestsRunner = /(?:代码运行工具|run_code|运行得到的输出|运行结果|执行结果)/iu.test(
+    text
+  );
+  if (!explicitlyRequestsRunner && CODE_CONCEPT_QUERY_PATTERN.test(text)) {
+    return false;
+  }
+  return CODE_EXECUTION_QUERY_PATTERNS.some((pattern) => pattern.test(text));
+}
 
 async function resolveChatModel(
   modelId: string,
@@ -1537,10 +1722,11 @@ async function streamAssistant(opts: {
   /** 重新生成时选择模型只是本次重试，不覆盖会话后续默认模型。 */
   persistModel?: boolean;
   userId: string;
+  origin: string;
   emit: (e: StreamEvent) => void;
   signal: AbortSignal;
 }) {
-  const { conversationId, parentId, assistantId, modelId, userId, emit, signal } =
+  const { conversationId, parentId, assistantId, modelId, userId, origin, emit, signal } =
     opts;
   if (signal.aborted) return;
 
@@ -1633,6 +1819,15 @@ async function streamAssistant(opts: {
     chain.unshift(cursor);
     cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
   }
+  const currentUserMessage = chain[chain.length - 1];
+  const currentUserText =
+    currentUserMessage?.role === "user"
+      ? getPlainTextFromParts(currentUserMessage.parts as MessagePart[])
+      : "";
+  let shouldPrioritizeKnowledgeTool = isKnowledgeDirectedQuery(currentUserText);
+  const shouldPrioritizeCodeRunner = isCodeExecutionDirectedQuery(currentUserText);
+  const shouldPrioritizeImageGeneration =
+    isImageGenerationDirectedQuery(currentUserText);
 
   const history: ModelMessage[] = [];
   const assistantImageContextIds = new Set(
@@ -1648,10 +1843,7 @@ async function streamAssistant(opts: {
   for (const m of chain) {
     if (m.role === "system") continue;
     const msgParts = m.parts as MessagePart[];
-    let text = msgParts
-      .filter((p): p is { type: "text"; text: string } => p.type === "text")
-      .map((p) => p.text)
-      .join("\n");
+    let text = getPlainTextFromParts(msgParts);
     if (m.quotedText) text = `> ${m.quotedText}\n\n${text}`;
 
     // 文件附件：注入抽取文本
@@ -1667,36 +1859,59 @@ async function streamAssistant(opts: {
           )
         );
       if (att?.text) {
-        text += `\n\n<attached_file name="${att.name}">\n${att.text.slice(0, 30_000)}\n</attached_file>`;
+        text += `\n\n<attached_file id="${f.attachmentId}" name="${att.name}">\n${att.text.slice(0, 30_000)}\n</attached_file>`;
       } else {
-        text += `\n\n（用户上传了文件「${f.name}」，内容无法解析）`;
+        text += `\n\n（用户上传了文件「${f.name}」，attachmentId=${f.attachmentId}，内容无法解析）`;
       }
     }
 
     const imageParts = msgParts.filter((p): p is ImagePart => p.type === "image");
     if (m.role === "user" && imageParts.length > 0) {
-      const origin = process.env.APP_ORIGIN ?? "http://localhost:3000";
+      const imageUrls = imageParts
+        .map((img, i) => `图片${i + 1}: ${img.url}`)
+        .join("\n");
+      const imageToolHint = `\n\n（用户上传的图片路径：\n${imageUrls}\n如果用户要求编辑、修改、换背景或调整图片，请调用 edit_image，并把对应路径作为 imageUrl。）`;
       if (modelHasVision) {
-        const imageSrcs = await Promise.all(
-          imageParts.map((img) => resolveImageSource(img.url, origin))
+        const resolvedImages = await Promise.all(
+          imageParts.map((img) => tryResolveHistoryImageSource(img.url, origin))
         );
-        history.push({
-          role: "user",
-          content: [
-            ...imageSrcs.map(toModelImageFilePart),
-            { type: "text" as const, text: text || "请看这张图片。" },
-          ],
-        });
+        const imageSrcs = resolvedImages.flatMap((result) =>
+          result.ok ? [result.source] : []
+        );
+        const imageErrors = resolvedImages.flatMap((result) =>
+          result.ok ? [] : [result.message]
+        );
+        const imageErrorText =
+          imageErrors.length > 0
+            ? `\n\n（有 ${imageErrors.length} 张图片无法读取：${Array.from(new Set(imageErrors)).join("；")}）`
+            : "";
+        if (imageSrcs.length > 0) {
+          history.push({
+            role: "user",
+            content: [
+              ...imageSrcs.map(toModelImageFilePart),
+              {
+                type: "text" as const,
+                text: (text || "请看这张图片。") + imageErrorText + imageToolHint,
+              },
+            ],
+          });
+        } else {
+          history.push({
+            role: "user",
+            content:
+              (text || "用户上传了图片。") +
+              `\n\n（图片无法读取：${Array.from(new Set(imageErrors)).join("；") || "图片无效"}）` +
+              imageToolHint,
+          });
+        }
       } else {
-        // 无视觉能力：提示模型调用 analyze_image 工具
+        // 无视觉能力：提示模型按用户意图调用 analyze_image 或 edit_image 工具
         // 本地路径不拼 origin（网关下载不到 localhost），原样传给工具，
         // analyze_image 工具内部会把本地路径转 base64 内联。
-        const urls = imageParts
-          .map((img) => (img.url.startsWith("http") ? img.url : img.url))
-          .join("\n");
         history.push({
           role: "user",
-          content: `${text}\n\n（用户上传了图片，你无法直接查看。请调用 analyze_image 工具分析，图片路径：\n${urls}）`,
+          content: `${text}\n\n（用户上传了图片，你无法直接查看。若用户询问图片内容，请调用 analyze_image；若用户要求编辑图片，请调用 edit_image。图片路径：\n${imageUrls}）`,
         });
       }
       continue;
@@ -1792,15 +2007,34 @@ async function streamAssistant(opts: {
     .select({ projectId: schema.conversations.projectId, skillId: schema.conversations.skillId })
     .from(schema.conversations)
     .where(eq(schema.conversations.id, conversationId));
+  let projectKnowledgeBaseIds: string[] = [];
+  if (conv?.projectId) {
+    projectKnowledgeBaseIds = await loadProjectKnowledgeBaseIds(
+      conv.projectId,
+      userId
+    );
+    if (
+      projectKnowledgeBaseIds.length > 0 &&
+      isProjectMaterialDirectedQuery(currentUserText)
+    ) {
+      shouldPrioritizeKnowledgeTool = true;
+    }
+  }
 
-  // Skill：系统提示词覆盖
+  let activeSkill: typeof schema.skills.$inferSelect | undefined;
+  // Skill：旧提示词技能保持覆盖；Skill Pack 叠加运行时说明和能力清单
   if (conv?.skillId) {
     const [skill] = await db
       .select()
       .from(schema.skills)
       .where(eq(schema.skills.id, conv.skillId));
     if (skill) {
-      system = `${skill.systemPrompt}\n\n（你运行在 LinHub 平台上，使用 Markdown 格式回答。）`;
+      activeSkill = skill;
+      if (skill.kind === "pack") {
+        system += `\n\n${composeSkillPackPrompt(skill)}`;
+      } else {
+        system = `${skill.systemPrompt}\n\n（你运行在 LinHub 平台上，使用 Markdown 格式回答。）`;
+      }
     }
   }
 
@@ -1812,6 +2046,10 @@ async function streamAssistant(opts: {
       .where(eq(schema.projects.id, conv.projectId));
     if (project?.instructions) {
       system += `\n\n本会话属于项目「${project.name}」，项目指令：\n${project.instructions}`;
+    }
+    if (projectKnowledgeBaseIds.length > 0) {
+      system +=
+        "\n\n本项目已关联知识库；用户询问项目资料、项目文件、报告、文档或材料时，应优先调用 search_knowledge 检索这些关联知识库。";
     }
     const projectFiles = await db
       .select({ name: schema.attachments.name, text: schema.attachments.extractedText })
@@ -1870,29 +2108,72 @@ async function streamAssistant(opts: {
   }
 
   // 工具集：根据会话开关组装
-  const toggles = opts.toolToggles;
+  const toggles = mergeSkillToggles(opts.toolToggles, activeSkill);
+  const knowledgeSearchEnabled = toggles?.knowledgeSearch ?? true;
+  const imageGenerationEnabled = toggles?.imageGeneration ?? false;
   if (toggles?.codeRunner) {
     system +=
-      "\n\n工具选择规则：当用户要求运行、执行、验证代码，或明确要求调用代码运行工具时，优先调用 run_code；不要用 web_search 代替本地代码运行。";
+      "\n\n工具选择规则：当用户要求运行、执行、验证代码，或明确要求调用代码运行工具时，必须先调用 run_code，等待工具结果后再给结论；不要在工具返回前猜测、手算、复述旧结果或用 web_search 代替本地代码运行。对 Excel/CSV 等表格的复杂聚合、筛选、统计，优先调用 analyze_spreadsheet；run_code 仅支持受限 JavaScript，不能 import pandas。";
+  } else if (shouldPrioritizeCodeRunner) {
+    system +=
+      "\n\n代码运行规则：本轮用户要求运行、执行、验证代码，或明确要求调用代码运行工具，但用户已关闭代码运行。不要用 web_search、知识库或手算结果冒充运行结果；请说明当前无法调用代码运行工具，并提示用户开启代码运行后重试。可以给出代码片段供用户自行运行，但必须明确它尚未在 LinHub 中执行。";
+  }
+  if (knowledgeSearchEnabled && shouldPrioritizeKnowledgeTool) {
+    system +=
+      "\n\n知识库检索规则：本轮用户在询问知识库、项目资料、已上传文档、报告、资料或附件。必须先调用 search_knowledge 检索用户私有知识库；不要用 web_search 或 search_memory 替代。若检索无结果，再如实说明没有在知识库中找到；只有用户同时明确要求查公开网页时，才在知识库检索之后补充联网搜索。";
+  } else if (!knowledgeSearchEnabled && shouldPrioritizeKnowledgeTool) {
+    system +=
+      "\n\n知识库检索规则：本轮用户在询问知识库、项目资料、已上传文档、报告、资料或附件，但用户已关闭知识库检索。不要用 web_search 或 search_memory 替代私有知识库；请说明当前无法读取知识库，并提示用户开启知识库检索后重试。";
+  }
+  if (imageGenerationEnabled && shouldPrioritizeImageGeneration) {
+    system +=
+      "\n\n图像生成规则：本轮用户要求生成或编辑图片。必须调用 generate_image 或 edit_image；不要用 create_artifact、update_artifact、SVG、HTML、Markdown、代码或文字描述冒充图片结果。只有用户明确要求 SVG/HTML/React/Canvas/代码作品/矢量图时，才改用 Artifact。";
+  } else if (!imageGenerationEnabled && shouldPrioritizeImageGeneration) {
+    system +=
+      "\n\n图像生成规则：本轮用户要求生成或编辑图片，但用户已关闭图像生成。不要调用 create_artifact、update_artifact，也不要用 SVG、HTML、Markdown、代码、ASCII 图、prompt 或文字描述冒充图片结果；请说明当前无法调用图像生成工具，并提示用户开启图像生成后重试。";
   }
   const pendingImages: string[] = [];
   let tools: ToolSet = {};
   let closeMcp: (() => Promise<void>) | undefined;
-  if (toggles?.webSearch) Object.assign(tools, buildWebTools());
+  if (toggles?.webSearch) Object.assign(tools, buildWebTools(userId));
   if (toggles?.webSearch) {
     system +=
       "\n\n联网搜索规则：优先用少量高质量来源完成核查；一旦已有足够证据，必须停止继续调用搜索/读取工具并直接给出最终回答。";
   }
   if (toggles?.codeRunner) Object.assign(tools, buildCodeTools());
-  if (toggles?.imageGeneration)
+  Object.assign(tools, buildSpreadsheetTools(userId));
+  if (imageGenerationEnabled)
     Object.assign(
       tools,
-      buildImageTools(userId, (url) => pendingImages.push(url))
+      buildImageTools(userId, (url) => pendingImages.push(url), origin)
     );
-  Object.assign(tools, buildVisionTool());
-  Object.assign(tools, buildArtifactTools(conversationId));
+  Object.assign(tools, buildVisionTool(userId, origin));
+  if (!(shouldPrioritizeImageGeneration && !imageGenerationEnabled)) {
+    Object.assign(tools, buildArtifactTools(conversationId));
+  }
   Object.assign(tools, buildMemoryTools(userId, conversationId, conv?.projectId));
-  Object.assign(tools, buildKnowledgeTool(userId, toggles?.knowledgeBaseIds ?? []));
+  if (knowledgeSearchEnabled) {
+    const effectiveKnowledgeBaseIds = Array.from(
+      new Set([...(projectKnowledgeBaseIds ?? []), ...((toggles?.knowledgeBaseIds ?? []))])
+    );
+    Object.assign(tools, buildKnowledgeTool(userId, effectiveKnowledgeBaseIds));
+  }
+  if (activeSkill?.kind === "pack") {
+    Object.assign(tools, buildSkillPackTools(activeSkill));
+    const skillTools = new Set([
+      ...((activeSkill.enabledTools ?? []) as string[]),
+      ...((activeSkill.requiredTools ?? []) as string[]),
+    ]);
+    if (
+      activeSkill.id === "skill-pptx-native" ||
+      skillTools.has("pptx_extract_text") ||
+      skillTools.has("pptx_create_deck")
+    ) {
+      Object.assign(tools, buildPptxTools(userId));
+      system +=
+        "\n\nPPTX 工具规则：当用户上传或引用 .pptx 附件时，可从消息中的 attachmentId 调用 pptx_extract_text 或 pptx_analyze_template；生成新演示文稿时调用 pptx_create_deck，并在最终回答里给出下载说明。";
+    }
+  }
   try {
     const mcp = await buildMcpTools(userId, toggles?.mcpServerIds ?? []);
     Object.assign(tools, mcp.tools);
@@ -2212,52 +2493,71 @@ async function streamAssistant(opts: {
     };
 
     // 计费落库
-    await recordUsage(userId, record, conversationId, usage, { allowDebt: true });
+    await recordUsage(userId, record, conversationId, usage, {
+      allowDebt: true,
+      capability: "chat",
+    });
     await closeMcp?.();
     if (status === "streaming") status = "complete";
   } catch (e) {
     await closeMcp?.();
+    const billPartialUsage = async () => {
+      const record = resolvedChatModel?.record;
+      if (!record) return;
+      let inputTokens = 0;
+      let outputTokens = 0;
+      try {
+        const real = await Promise.race([
+          streamResult?.usage,
+          new Promise<never>((_, rej) =>
+            setTimeout(() => rej(new Error("timeout")), 2000)
+          ),
+        ]);
+        inputTokens = real?.inputTokens ?? 0;
+        outputTokens = real?.outputTokens ?? 0;
+      } catch {
+        const historyChars = history.reduce(
+          (n, m) =>
+            n + (typeof m.content === "string" ? m.content.length : 500),
+          system.length
+        );
+        const outputChars = parts.reduce(
+          (n, p) =>
+            n + ("text" in p && typeof p.text === "string" ? p.text.length : 0),
+          0
+        );
+        inputTokens = Math.ceil(historyChars / 4);
+        outputTokens = Math.ceil(outputChars / 4);
+      }
+      if (inputTokens > 0 || outputTokens > 0) {
+        usage = {
+          inputTokens,
+          outputTokens,
+          costCents: computeCostCents(record, { inputTokens, outputTokens }),
+        };
+        await recordUsage(userId, record, conversationId, usage, {
+          allowDebt: true,
+          capability: "chat",
+        });
+      }
+    };
+
     if (signal.aborted || (e instanceof Error && e.name === "AbortError")) {
       status = "stopped";
       // 中止也要为已产生的 token 计费（C3：防逃单）
       try {
-        const record = resolvedChatModel?.record;
-        if (!record) throw new Error("模型不可用");
-        // 优先取 SDK 真实用量（限 2s，abort 后可能拿不到）；否则按字符数估算
-        let inputTokens = 0;
-        let outputTokens = 0;
-        try {
-          const real = await Promise.race([
-            streamResult?.usage,
-            new Promise<never>((_, rej) => setTimeout(() => rej(new Error("timeout")), 2000)),
-          ]);
-          inputTokens = real?.inputTokens ?? 0;
-          outputTokens = real?.outputTokens ?? 0;
-        } catch {
-          const historyChars = history.reduce(
-            (n, m) => n + (typeof m.content === "string" ? m.content.length : 500),
-            system.length
-          );
-          const outputChars = parts.reduce(
-            (n, p) => n + ("text" in p && typeof p.text === "string" ? p.text.length : 0),
-            0
-          );
-          inputTokens = Math.ceil(historyChars / 4);
-          outputTokens = Math.ceil(outputChars / 4);
-        }
-        if (inputTokens > 0 || outputTokens > 0) {
-          usage = {
-            inputTokens,
-            outputTokens,
-            costCents: computeCostCents(record, { inputTokens, outputTokens }),
-          };
-          await recordUsage(userId, record, conversationId, usage, { allowDebt: true });
-        }
+        await billPartialUsage();
       } catch {
         // 中止计费失败不阻塞消息落库
       }
     } else {
       status = "error";
+      // 非 abort 错误同样入账，避免中途失败逃单
+      try {
+        await billPartialUsage();
+      } catch {
+        // 错误计费失败不阻塞消息落库
+      }
       const isBilling = e instanceof Error && e.name === "BillingError";
       const rawMsg = getErrorMessage(e);
       const msg = formatChatErrorMessage(rawMsg);
@@ -2327,6 +2627,9 @@ function summarizeToolResult(output: unknown): ToolResultSummary {
     const summary: ToolResultSummary = {};
     if (Array.isArray(o.sources)) summary.sources = o.sources as ToolResultSummary["sources"];
     if (Array.isArray(o.images)) summary.images = o.images as string[];
+    if (Array.isArray(o.attachments)) {
+      summary.attachments = o.attachments as ToolResultSummary["attachments"];
+    }
     if (typeof o.artifactId === "string") summary.artifactId = o.artifactId;
     if (typeof o.artifactTitle === "string") summary.artifactTitle = o.artifactTitle;
     if (typeof o.answer === "string") summary.text = o.answer;
@@ -2352,8 +2655,17 @@ function formatToolCallsAsText(parts: ToolCallPart[]) {
         }`
     );
     const images = result.images?.map((url) => `- 图片: ${url}`);
+    const attachments = result.attachments?.map(
+      (file) => `- 附件：${file.name}\n  URL: ${file.url}`
+    );
     const text = result.text ? [`- ${result.text}`] : [];
-    const detail = [...text, ...(chunks ?? []), ...(sources ?? []), ...(images ?? [])]
+    const detail = [
+      ...text,
+      ...(chunks ?? []),
+      ...(sources ?? []),
+      ...(images ?? []),
+      ...(attachments ?? []),
+    ]
       .join("\n")
       .slice(0, 2000);
     return detail
@@ -2395,6 +2707,17 @@ function formatRawToolOutputDetail(output: unknown): string {
       .slice(0, 4)
       .map((url) => `- 图片：${url}`);
     if (images.length > 0) lines.push(images.join("\n"));
+  }
+  if (Array.isArray(o.attachments)) {
+    const attachments = o.attachments
+      .filter((file): file is Record<string, unknown> => !!file && typeof file === "object")
+      .slice(0, 4)
+      .map((file) => {
+        const name = typeof file.name === "string" ? file.name : "附件";
+        const url = typeof file.url === "string" ? file.url : "";
+        return `- 附件：${name}${url ? `\n  URL: ${url}` : ""}`;
+      });
+    if (attachments.length > 0) lines.push(attachments.join("\n"));
   }
   if (lines.length > 0) return lines.join("\n\n");
   return JSON.stringify(toJsonValue(output)).slice(0, 2500);

@@ -10,10 +10,11 @@ import {
   ChevronDownIcon,
   GlobeIcon,
   ImageIcon,
+  Loader2Icon,
   MicIcon,
-  PaletteIcon,
   PaperclipIcon,
   PencilIcon,
+  PlugIcon,
   SlidersHorizontalIcon,
   SquareIcon,
   StarIcon,
@@ -21,14 +22,19 @@ import {
   XIcon,
 } from "lucide-react";
 import { cn, formatBytes } from "@/lib/utils";
+import { FILE_ACCEPT } from "@/lib/file-types";
 import type {
   ChatStyle,
   ChatToolToggles,
   FilePart,
   ImagePart,
   KnowledgeBase,
+  McpServer,
   Model,
+  Project,
+  Skill,
 } from "@/lib/types";
+import { getDataService } from "@/lib/data";
 import { ImageMaskEditor } from "./image-mask-editor";
 import { Tooltip } from "@/components/ui/tooltip";
 import { Switch } from "@/components/ui/misc";
@@ -75,10 +81,13 @@ export function ChatInput({
   defaultModelId,
   onSetDefaultModel,
   knowledgeBases = [],
+  activeProject,
+  activeSkill,
 }: {
   models: Model[];
   styles: ChatStyle[];
   knowledgeBases?: KnowledgeBase[];
+  activeProject?: Project | null;
   composer: ComposerState;
   onComposerChange: (patch: Partial<ComposerState>) => void;
   quotedText?: string;
@@ -91,18 +100,29 @@ export function ChatInput({
   defaultModelId?: string;
   /** 把指定模型设为用户默认 */
   onSetDefaultModel?: (modelId: string) => void;
+  activeSkill?: Skill;
 }) {
   const [text, setText] = React.useState("");
   const [images, setImages] = React.useState<ImagePart[]>([]);
   const [files, setFiles] = React.useState<FilePart[]>([]);
   const [recording, setRecording] = React.useState(false);
   const [modelMenuOpen, setModelMenuOpen] = React.useState(false);
-  // 图片编辑器：editingIndex 指向 images 数组里要编辑的图
+  const [pendingUploadCount, setPendingUploadCount] = React.useState(0);
+  // 图片编辑器：记录当前要编辑的图片 URL。
   const [editingImage, setEditingImage] = React.useState<string | null>(null);
+  const knowledgeScopeHintId = React.useId();
+  const mcpScopeHintId = React.useId();
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const imageEditInputRef = React.useRef<HTMLInputElement>(null);
+  const pendingUploadCountRef = React.useRef(0);
   // C4: 追踪本地创建的 blob URL（服务端返回的 url 不应 revoke），卸载时统一释放。
   const localBlobUrls = React.useRef<Set<string>>(new Set());
+  const [mcpServers, setMcpServers] = React.useState<McpServer[]>([]);
+  const hasPptxFile = files.some((file) => file.name.toLowerCase().endsWith(".pptx"));
+  const isPptxSkill =
+    activeSkill?.id === "skill-pptx-native" ||
+    !!activeSkill?.requiredTools.some((tool) => String(tool).startsWith("pptx_"));
   const revokeUrl = React.useCallback((url?: string) => {
     if (url && localBlobUrls.current.delete(url)) URL.revokeObjectURL(url);
   }, []);
@@ -112,18 +132,85 @@ export function ChatInput({
   }, []);
   React.useEffect(() => () => revokeAllUrls(), [revokeAllUrls]);
 
+  React.useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const ds = getDataService();
+        const [userServers, globalServers] = await Promise.all([
+          ds.listMcpServers("user"),
+          ds.listMcpServers("global"),
+        ]);
+        if (!cancelled) {
+          setMcpServers(
+            [...globalServers, ...userServers].filter((s) => s.enabled)
+          );
+        }
+      } catch {
+        // MCP 列表拉取失败时静默忽略，工具面板仍可用
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const chatModels = models.filter((m) => !m.capabilities.includes("image-generation"));
-  const currentModel = chatModels.find((m) => m.id === composer.modelId) ?? chatModels[0];
+  const currentModel =
+    chatModels.find((m) => m.id === composer.modelId) ??
+    (defaultModelId ? chatModels.find((m) => m.id === defaultModelId) : undefined);
   const currentStyle = styles.find((s) => s.id === composer.styleId);
+  const knowledgeSearchEnabled = composer.tools.knowledgeSearch ?? true;
   const selectedKnowledgeBaseIds = composer.tools.knowledgeBaseIds ?? [];
+  const projectKnowledgeBaseCount = activeProject?.knowledgeBaseIds.length ?? 0;
+  const projectFileCount = activeProject?.files.length ?? 0;
+  const selectedMcpServerIds = composer.tools.mcpServerIds ?? [];
+  const knowledgeScopeText = !knowledgeSearchEnabled
+    ? "已关闭"
+    : selectedKnowledgeBaseIds.length > 0
+      ? projectKnowledgeBaseCount > 0
+        ? `项目 ${projectKnowledgeBaseCount} + 已选 ${selectedKnowledgeBaseIds.length}`
+        : `已选 ${selectedKnowledgeBaseIds.length} 个`
+      : projectKnowledgeBaseCount > 0
+        ? `项目 ${projectKnowledgeBaseCount} 个`
+        : "全部资料";
+  const knowledgeScopeHint = !knowledgeSearchEnabled
+    ? "关闭后模型不会检索知识库。"
+    : selectedKnowledgeBaseIds.length > 0
+      ? projectKnowledgeBaseCount > 0
+        ? "本轮会检索项目关联知识库和已勾选知识库。"
+        : "取消全部选择后恢复检索全部知识库。"
+      : projectKnowledgeBaseCount > 0
+        ? "本轮默认检索项目关联知识库。"
+        : "当前未限定范围，模型会默认检索全部知识库。可勾选具体知识库来限定检索范围。";
+  const mcpScopeText =
+    selectedMcpServerIds.length > 0
+      ? `已选 ${selectedMcpServerIds.length} 个`
+      : "未启用";
+  const mcpScopeHint =
+    selectedMcpServerIds.length > 0
+      ? "已勾选的 MCP 服务器会在本轮对话中挂载。"
+      : "勾选后模型可调用对应 MCP 工具；默认不自动挂载全局服务器。";
 
   const toggleKnowledgeBase = (id: string, checked: boolean) => {
     onComposerChange({
       tools: {
         ...composer.tools,
+        knowledgeSearch: true,
         knowledgeBaseIds: checked
           ? Array.from(new Set([...selectedKnowledgeBaseIds, id]))
           : selectedKnowledgeBaseIds.filter((kbId) => kbId !== id),
+      },
+    });
+  };
+
+  const toggleMcpServer = (id: string, checked: boolean) => {
+    onComposerChange({
+      tools: {
+        ...composer.tools,
+        mcpServerIds: checked
+          ? Array.from(new Set([...selectedMcpServerIds, id]))
+          : selectedMcpServerIds.filter((serverId) => serverId !== id),
       },
     });
   };
@@ -137,9 +224,17 @@ export function ChatInput({
 
   React.useEffect(resize, [text, resize]);
 
-  const canSend = (text.trim().length > 0 || images.length > 0 || files.length > 0) && !isStreaming;
+  const isUploading = pendingUploadCount > 0;
+  const canSend =
+    (text.trim().length > 0 || images.length > 0 || files.length > 0) &&
+    !isStreaming &&
+    !isUploading;
 
   const doSend = () => {
+    if (pendingUploadCountRef.current > 0) {
+      toast.warning("附件还在上传，完成后再发送");
+      return;
+    }
     if (!canSend) return;
     const sentLocalUrls = images
       .map((img) => img.url)
@@ -154,10 +249,26 @@ export function ChatInput({
   };
 
   const useRealApi = process.env.NEXT_PUBLIC_DATA_SOURCE === "api";
+  const beginUpload = React.useCallback(() => {
+    pendingUploadCountRef.current += 1;
+    setPendingUploadCount(pendingUploadCountRef.current);
+  }, []);
+  const finishUpload = React.useCallback(() => {
+    pendingUploadCountRef.current = Math.max(0, pendingUploadCountRef.current - 1);
+    setPendingUploadCount(pendingUploadCountRef.current);
+  }, []);
 
-  const handleFiles = async (fileList: FileList | File[]) => {
+  const handleFiles = async (
+    fileList: FileList | File[],
+    options?: { openFirstImageEditor?: boolean }
+  ) => {
+    let openedEditor = false;
     for (const file of Array.from(fileList)) {
       const isImage = file.type.startsWith("image/");
+      if (options?.openFirstImageEditor && !isImage) {
+        toast.warning("请选择图片文件进行编辑");
+        continue;
+      }
       // 真实模式：先上传到服务端拿到可持久访问的 URL / 附件 id
       let uploaded: {
         id: string;
@@ -165,6 +276,7 @@ export function ChatInput({
         hasText?: boolean;
       } | null = null;
       if (useRealApi) {
+        beginUpload();
         try {
           const form = new FormData();
           form.append("file", file);
@@ -177,6 +289,8 @@ export function ChatInput({
         } catch (e) {
           toast.error(e instanceof Error ? e.message : "上传失败");
           continue;
+        } finally {
+          finishUpload();
         }
       }
       if (isImage) {
@@ -188,9 +302,15 @@ export function ChatInput({
           localBlobUrls.current.add(url); // C4: 标记为本地创建，需手动 revoke
         }
         setImages((prev) => [...prev, { type: "image", url, alt: file.name }]);
+        if (options?.openFirstImageEditor && !openedEditor) {
+          openedEditor = true;
+          setEditingImage(url);
+        }
       } else {
         if (useRealApi && !uploaded?.hasText) {
-          toast.warning(`「${file.name}」暂不支持解析，模型将只能看到文件名`);
+          toast.warning(
+            `「${file.name}」未能提取文本，模型将只能看到文件名。若为旧版 Word，请另存为 .docx 后重试`
+          );
         }
         setFiles((prev) => [
           ...prev,
@@ -348,14 +468,16 @@ export function ChatInput({
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={img.url} alt={img.alt ?? ""} className="size-16 rounded-xl border object-cover" />
                 {/* 编辑 mask 按钮 */}
-                <button
-                  type="button"
-                  onClick={() => setEditingImage(img.url)}
-                  aria-label="编辑图片"
-                  className="absolute left-1 top-1 flex size-6 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm"
-                >
-                  <PencilIcon className="size-3.5" />
-                </button>
+                <Tooltip label="编辑图片">
+                  <button
+                    type="button"
+                    onClick={() => setEditingImage(img.url)}
+                    aria-label="编辑图片"
+                    className="absolute left-1 top-1 flex size-6 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm"
+                  >
+                    <PencilIcon className="size-3.5" />
+                  </button>
+                </Tooltip>
                 <button
                   type="button"
                   onClick={() => {
@@ -389,6 +511,11 @@ export function ChatInput({
             ))}
           </div>
         )}
+        {isPptxSkill && hasPptxFile && (
+          <div className="px-4 pt-2 text-xs text-muted-foreground">
+            PPT 技能已识别附件，可直接让它总结、改写或基于模板生成新版。
+          </div>
+        )}
 
         {/* 输入区 */}
         <textarea
@@ -414,27 +541,51 @@ export function ChatInput({
         />
 
         {/* 工具栏 */}
-        <div className="flex items-center gap-1 px-2.5 pb-2.5">
+        <div className="flex flex-wrap items-center gap-1 px-2.5 pb-2.5">
           <input
             ref={fileInputRef}
             type="file"
             multiple
             hidden
+            accept={FILE_ACCEPT}
             onChange={(e) => {
               if (e.target.files) handleFiles(e.target.files);
               e.target.value = "";
             }}
           />
-          <Tooltip label="上传文件或图片">
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              aria-label="上传文件或图片"
-              className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-            >
-              <PaperclipIcon className="size-4" />
-            </button>
-          </Tooltip>
+          <input
+            ref={imageEditInputRef}
+            type="file"
+            accept="image/*"
+            hidden
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void handleFiles([file], { openFirstImageEditor: true });
+              e.target.value = "";
+            }}
+          />
+          <div className="flex shrink-0 items-center gap-1">
+            <Tooltip label="上传文件或图片">
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                aria-label="上传文件或图片"
+                className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                <PaperclipIcon className="size-4" />
+              </button>
+            </Tooltip>
+            <Tooltip label="选择图片并编辑">
+              <button
+                type="button"
+                onClick={() => imageEditInputRef.current?.click()}
+                aria-label="编辑图片"
+                className="flex h-9 items-center gap-1.5 rounded-lg px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                <PencilIcon className="size-4" />
+                <span className="hidden sm:inline">编辑图片</span>
+              </button>
+            </Tooltip>
 
           {/* 工具开关 */}
           <Popover>
@@ -458,8 +609,8 @@ export function ChatInput({
                 }
               />
               <ToolToggleRow
-                icon={PaletteIcon}
-                label="图像生成"
+                icon={ImageIcon}
+                label="生成图片 / 编辑图片"
                 checked={composer.tools.imageGeneration}
                 onChange={(v) =>
                   onComposerChange({ tools: { ...composer.tools, imageGeneration: v } })
@@ -474,10 +625,41 @@ export function ChatInput({
                 }
               />
               {knowledgeBases.length > 0 && (
-                <div className="mt-1 border-t pt-1.5">
-                  <p className="flex items-center gap-1.5 px-2 pb-1.5 text-xs font-medium text-muted-foreground">
-                    <BookOpenIcon className="size-3.5" />
-                    挂载知识库
+                <ToolToggleRow
+                  icon={BookOpenIcon}
+                  label="资料检索"
+                  checked={knowledgeSearchEnabled}
+                  onChange={(v) =>
+                    onComposerChange({ tools: { ...composer.tools, knowledgeSearch: v } })
+                  }
+                />
+              )}
+              {knowledgeBases.length > 0 && (
+                <fieldset
+                  aria-describedby={knowledgeScopeHintId}
+                  disabled={!knowledgeSearchEnabled}
+                  className="mt-1 border-t pt-1.5 disabled:opacity-60"
+                >
+                  <legend className="flex w-full items-center gap-1.5 px-2 pb-1 text-xs font-medium text-muted-foreground">
+                    <BookOpenIcon className="size-3.5 shrink-0" />
+                    <span className="min-w-0 flex-1 truncate">资料检索</span>
+                    <span className="shrink-0 rounded-full border bg-muted px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+                      {knowledgeScopeText}
+                    </span>
+                  </legend>
+                  {activeProject && (projectFileCount > 0 || projectKnowledgeBaseCount > 0) && (
+                    <p className="px-2 pb-1 text-[11px] leading-4 text-muted-foreground">
+                      {activeProject.name}：{projectFileCount} 个项目资料
+                      {projectKnowledgeBaseCount > 0
+                        ? ` · ${projectKnowledgeBaseCount} 个关联知识库`
+                        : ""}
+                    </p>
+                  )}
+                  <p
+                    id={knowledgeScopeHintId}
+                    className="px-2 pb-1.5 text-[11px] leading-4 text-muted-foreground"
+                  >
+                    {knowledgeScopeHint}
                   </p>
                   <div className="max-h-40 overflow-y-auto pr-1">
                     {knowledgeBases.map((kb) => {
@@ -491,6 +673,8 @@ export function ChatInput({
                             type="checkbox"
                             checked={checked}
                             onChange={(event) => toggleKnowledgeBase(kb.id, event.target.checked)}
+                            aria-describedby={knowledgeScopeHintId}
+                            disabled={!knowledgeSearchEnabled}
                             className="mt-0.5 size-4 shrink-0 accent-[var(--primary)]"
                           />
                           <span className="min-w-0 flex-1">
@@ -503,7 +687,55 @@ export function ChatInput({
                       );
                     })}
                   </div>
-                </div>
+                </fieldset>
+              )}
+              {mcpServers.length > 0 && (
+                <fieldset
+                  aria-describedby={mcpScopeHintId}
+                  className="mt-1 border-t pt-1.5"
+                >
+                  <legend className="flex w-full items-center gap-1.5 px-2 pb-1 text-xs font-medium text-muted-foreground">
+                    <PlugIcon className="size-3.5 shrink-0" />
+                    <span className="min-w-0 flex-1 truncate">MCP 服务器</span>
+                    <span className="shrink-0 rounded-full border bg-muted px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+                      {mcpScopeText}
+                    </span>
+                  </legend>
+                  <p
+                    id={mcpScopeHintId}
+                    className="px-2 pb-1.5 text-[11px] leading-4 text-muted-foreground"
+                  >
+                    {mcpScopeHint}
+                  </p>
+                  <div className="max-h-40 overflow-y-auto pr-1">
+                    {mcpServers.map((server) => {
+                      const checked = selectedMcpServerIds.includes(server.id);
+                      return (
+                        <label
+                          key={server.id}
+                          className="flex cursor-pointer items-start gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-accent"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(event) =>
+                              toggleMcpServer(server.id, event.target.checked)
+                            }
+                            aria-describedby={mcpScopeHintId}
+                            className="mt-0.5 size-4 shrink-0 accent-[var(--primary)]"
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate">{server.name}</span>
+                            <span className="block text-xs text-muted-foreground">
+                              {server.scope === "global" ? "全局" : "我的"} ·{" "}
+                              {server.tools.length} 个工具
+                            </span>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </fieldset>
               )}
             </PopoverContent>
           </Popover>
@@ -527,7 +759,8 @@ export function ChatInput({
             </button>
           </Tooltip>
 
-          <div className="flex-1" />
+          </div>
+          <div className="ml-auto flex min-w-fit items-center gap-1">
 
           {/* 风格选择 */}
           <DropdownMenu>
@@ -677,17 +910,22 @@ export function ChatInput({
               type="button"
               onClick={doSend}
               disabled={!canSend}
-              aria-label="发送"
+              aria-label={isUploading ? "附件上传中" : "发送"}
               className={cn(
                 "rounded-full p-2 transition-all",
                 canSend
                   ? "bg-primary text-primary-foreground hover:scale-105 hover:bg-primary/90 active:scale-95"
-                  : "bg-muted text-muted-foreground"
+                : "bg-muted text-muted-foreground"
               )}
             >
-              <ArrowUpIcon className="size-4" />
+              {isUploading ? (
+                <Loader2Icon className="size-4 animate-spin" />
+              ) : (
+                <ArrowUpIcon className="size-4" />
+              )}
             </button>
           )}
+          </div>
         </div>
       </motion.div>
       <p className="pt-2 text-center text-[11px] text-muted-foreground">

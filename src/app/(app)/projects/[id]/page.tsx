@@ -27,6 +27,13 @@ type DeleteTarget =
   | { type: "file"; id: string; name: string }
   | { type: "project"; id: string; name: string };
 
+function formatUploadFailures(failures: string[]) {
+  const visible = failures.slice(0, 3).join("\n");
+  return failures.length > 3
+    ? `${visible}\n另有 ${failures.length - 3} 个失败`
+    : visible;
+}
+
 export default function ProjectDetailPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
@@ -39,6 +46,7 @@ export default function ProjectDetailPage() {
   const [deleteTarget, setDeleteTarget] = React.useState<DeleteTarget | null>(null);
   const [deleting, setDeleting] = React.useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const uploadInFlightRef = React.useRef(false);
 
   const { data: project } = useQuery({
     queryKey: ["project", id],
@@ -115,19 +123,42 @@ export default function ProjectDetailPage() {
   };
 
   const uploadFiles = async (files: FileList | File[]) => {
+    if (uploadInFlightRef.current) return;
     const list = Array.from(files);
-    if (list.length === 0 || uploading) return;
+    if (list.length === 0) return;
+    uploadInFlightRef.current = true;
     setUploading(true);
+    let successCount = 0;
+    const failures: string[] = [];
     try {
       for (const file of list) {
-        await getDataService().uploadProjectFile(id, file);
+        try {
+          await getDataService().uploadProjectFile(id, file);
+          successCount += 1;
+        } catch (e) {
+          const message = e instanceof Error ? e.message : "上传失败";
+          failures.push(`${file.name}：${message}`);
+        }
       }
-      queryClient.invalidateQueries({ queryKey: ["project", id] });
-      queryClient.invalidateQueries({ queryKey: ["projects"] });
-      toast.success(list.length === 1 ? "项目文件已上传" : `已上传 ${list.length} 个文件`);
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "上传失败");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["project", id] }),
+        queryClient.invalidateQueries({ queryKey: ["projects"] }),
+      ]);
+      if (failures.length === 0) {
+        toast.success(
+          successCount === 1 ? "项目文件已上传" : `已上传 ${successCount} 个文件`
+        );
+      } else if (successCount > 0) {
+        toast.warning(`已上传 ${successCount} 个文件，${failures.length} 个失败`, {
+          description: formatUploadFailures(failures),
+        });
+      } else {
+        toast.error(`${failures.length} 个文件上传失败`, {
+          description: formatUploadFailures(failures),
+        });
+      }
     } finally {
+      uploadInFlightRef.current = false;
       setUploading(false);
     }
   };

@@ -157,13 +157,17 @@ export function MessageItem({
         )}
         {message.parts.map((part, i) => {
           if (part.type === "image") {
+            const src =
+              part.mediaAssetId != null
+                ? `/api/media/${part.mediaAssetId}`
+                : part.url;
             return (
               // eslint-disable-next-line @next/next/no-img-element
               <img
                 key={i}
-                src={part.url}
+                src={src}
                 alt={part.alt ?? "上传的图片"}
-                onClick={() => setLightbox({ src: part.url, alt: part.alt })}
+                onClick={() => setLightbox({ src, alt: part.alt })}
                 className="max-h-64 max-w-[75%] cursor-zoom-in rounded-2xl border transition-opacity hover:opacity-90"
               />
             );
@@ -195,6 +199,7 @@ export function MessageItem({
                 <div className="mt-1.5 flex justify-end gap-2">
                   <button
                     onClick={() => setEditing(false)}
+                    aria-label="取消编辑"
                     className="rounded-lg px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent"
                   >
                     取消
@@ -205,6 +210,7 @@ export function MessageItem({
                       if (editText.trim() && editText !== part.text)
                         onEditResend?.(editText.trim());
                     }}
+                    aria-label="发送编辑后的消息"
                     className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
                   >
                     发送
@@ -262,6 +268,9 @@ export function MessageItem({
 
   // ---------- 助手消息 ----------
   const isEmpty = message.parts.length === 0;
+  const hasCopyableText = textContent.trim().length > 0;
+  const showActionBar =
+    !isStreaming && (!isEmpty || message.status === "stopped");
 
   return (
     <motion.div
@@ -316,17 +325,22 @@ export function MessageItem({
                   <MarkdownRenderer content={part.text} isStreaming={isStreaming && isLast} />
                 </div>
               );
-            case "image":
+            case "image": {
+              const src =
+                part.mediaAssetId != null
+                  ? `/api/media/${part.mediaAssetId}`
+                  : part.url;
               return (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
                   key={i}
-                  src={part.url}
+                  src={src}
                   alt={part.alt ?? "生成的图片"}
-                  onClick={() => setLightbox({ src: part.url, alt: part.alt })}
+                  onClick={() => setLightbox({ src, alt: part.alt })}
                   className="my-3 max-h-96 cursor-zoom-in rounded-2xl border shadow-sm transition-opacity hover:opacity-90"
                 />
               );
+            }
             default:
               return null;
           }
@@ -357,14 +371,16 @@ export function MessageItem({
       </div>
 
       {/* 助手消息操作栏 */}
-      {!isStreaming && !isEmpty && (
+      {showActionBar && (
         <div className="mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
           {branch && branch.total > 1 && <BranchSwitcher branch={branch} />}
-          <Tooltip label={copied ? "已复制" : "复制"}>
-            <button onClick={copy} aria-label={copied ? "已复制" : "复制"} className="action-btn rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
-              {copied ? <CheckIcon className="size-3.5 text-success" /> : <CopyIcon className="size-3.5" />}
-            </button>
-          </Tooltip>
+          {hasCopyableText && (
+            <Tooltip label={copied ? "已复制" : "复制"}>
+              <button onClick={copy} aria-label={copied ? "已复制" : "复制"} className="action-btn rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+                {copied ? <CheckIcon className="size-3.5 text-success" /> : <CopyIcon className="size-3.5" />}
+              </button>
+            </Tooltip>
+          )}
           {onRegenerate && (
             <DropdownMenu>
               <Tooltip label="重新生成">
@@ -417,7 +433,7 @@ export function MessageItem({
               </Tooltip>
             </>
           )}
-          <SpeakButton message={message} />
+          {hasCopyableText && <SpeakButton message={message} />}
           {modelName && (
             <span className="ml-1.5 text-[11px] text-muted-foreground">{modelName}</span>
           )}

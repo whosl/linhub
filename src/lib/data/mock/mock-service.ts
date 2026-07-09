@@ -13,6 +13,7 @@ import type {
   KnowledgeDocument,
   LedgerEntry,
   McpServer,
+  MediaAsset,
   MemoryEntry,
   Message,
   Model,
@@ -267,6 +268,7 @@ class MockStore {
   knowledgeBases: KnowledgeBase[] = structuredClone(mockKnowledgeBases);
   documents: Record<string, KnowledgeDocument[]> = structuredClone(mockDocuments);
   skills: Skill[] = structuredClone(mockSkills);
+  mediaAssets: MediaAsset[] = [];
   mcpServers: McpServer[] = structuredClone(mockMcpServers);
   plans: Plan[] = structuredClone(mockPlans);
   usageRecords: UsageRecord[] = structuredClone(mockUsageRecords);
@@ -280,11 +282,23 @@ export class MockDataService implements DataService {
   admin: AdminService = new MockAdminService(this.s);
 
   private projectWithConversationCount(project: Project): Project {
+    const knowledgeBaseIds = project.knowledgeBaseIds ?? [];
+    const knowledgeBases = this.s.knowledgeBases
+      .filter((kb) => knowledgeBaseIds.includes(kb.id))
+      .map((kb) => ({
+        id: kb.id,
+        name: kb.name,
+        description: kb.description,
+        documentCount: kb.documentCount,
+        totalChunks: kb.totalChunks,
+      }));
     return {
       ...project,
       conversationCount: this.s.conversations.filter(
         (conversation) => conversation.projectId === project.id && !conversation.archived
       ).length,
+      knowledgeBaseIds,
+      knowledgeBases,
       files: [...project.files],
     };
   }
@@ -364,6 +378,7 @@ export class MockDataService implements DataService {
   }
   async deleteConversation(id: string) {
     await sleep(150);
+    this.s.aborted.add(id);
     this.s.conversations = this.s.conversations.filter((c) => c.id !== id);
     delete this.s.messages[id];
   }
@@ -644,6 +659,8 @@ export class MockDataService implements DataService {
       description: p.description,
       instructions: p.instructions,
       color: p.color ?? "#C96442",
+      knowledgeBaseIds: p.knowledgeBaseIds ?? [],
+      knowledgeBases: [],
       createdAt: nowIso(),
       updatedAt: nowIso(),
       conversationCount: 0,
@@ -661,6 +678,18 @@ export class MockDataService implements DataService {
     if ("instructions" in patch) existing.instructions = patch.instructions ?? undefined;
     if ("color" in patch) existing.color = patch.color ?? undefined;
     if ("modelId" in patch) existing.modelId = patch.modelId ?? undefined;
+    if ("knowledgeBaseIds" in patch) {
+      existing.knowledgeBaseIds = patch.knowledgeBaseIds ?? [];
+      existing.knowledgeBases = this.s.knowledgeBases
+        .filter((kb) => existing.knowledgeBaseIds.includes(kb.id))
+        .map((kb) => ({
+          id: kb.id,
+          name: kb.name,
+          description: kb.description,
+          documentCount: kb.documentCount,
+          totalChunks: kb.totalChunks,
+        }));
+    }
     existing.updatedAt = nowIso();
     return this.projectWithConversationCount(existing);
   }
@@ -805,11 +834,23 @@ export class MockDataService implements DataService {
     await sleep(60);
     return this.s.skills.find((sk) => sk.id === id) ?? null;
   }
-  async saveSkill(sk: Partial<Skill> & { name: string }) {
+  async saveSkill(sk: Partial<Skill> & { name: string; shareToMarket?: boolean }) {
     await sleep(200);
+    const shareToMarket =
+      sk.shareToMarket ??
+      (sk.visibility === "public" || sk.visibility === "pending");
+    const visibility: Skill["visibility"] = shareToMarket
+      ? this.s.settings.skillMarketRequiresReview
+        ? "pending"
+        : "public"
+      : "private";
     const existing = sk.id ? this.s.skills.find((x) => x.id === sk.id) : undefined;
     if (existing) {
-      Object.assign(existing, sk, { updatedAt: nowIso() });
+      Object.assign(existing, sk, {
+        visibility,
+        reviewStatus: visibility === "pending" ? "pending" : "approved",
+        updatedAt: nowIso(),
+      });
       return { ...existing };
     }
     const created: Skill = {
@@ -819,11 +860,20 @@ export class MockDataService implements DataService {
       emoji: sk.emoji ?? "🤖",
       description: sk.description ?? "",
       systemPrompt: sk.systemPrompt ?? "",
+      kind: sk.kind ?? "prompt",
+      version: sk.version ?? "1.0.0",
+      source: sk.source,
+      manifest: sk.manifest,
+      packagePath: sk.packagePath,
+      requiredTools: sk.requiredTools ?? [],
+      resourceRefs: sk.resourceRefs ?? [],
+      scriptPolicy: sk.scriptPolicy ?? { enabled: false },
+      reviewStatus: visibility === "pending" ? "pending" : "approved",
       greeting: sk.greeting,
       defaultModelId: sk.defaultModelId,
       enabledTools: sk.enabledTools ?? [],
       knowledgeBaseIds: sk.knowledgeBaseIds ?? [],
-      visibility: sk.visibility ?? "private",
+      visibility,
       usageCount: 0,
       createdAt: nowIso(),
       updatedAt: nowIso(),
@@ -834,6 +884,47 @@ export class MockDataService implements DataService {
   async deleteSkill(id: string) {
     await sleep(150);
     this.s.skills = this.s.skills.filter((sk) => sk.id !== id);
+  }
+
+  // ---- 文件 / 媒体 ----
+  async listMediaAssets(opts?: {
+    kind?: "upload" | "generated" | "edited" | "all";
+    q?: string;
+    cursor?: string;
+    limit?: number;
+  }) {
+    await sleep(80);
+    let items = [...this.s.mediaAssets].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+    if (opts?.kind === "upload") {
+      items = items.filter((a) => a.kind === "upload");
+    } else if (opts?.kind === "generated") {
+      items = items.filter((a) => a.kind === "generated" || a.kind === "edited");
+    } else if (opts?.kind === "edited") {
+      items = items.filter((a) => a.kind === "edited");
+    }
+    if (opts?.q?.trim()) {
+      const q = opts.q.trim().toLowerCase();
+      items = items.filter((a) => a.name.toLowerCase().includes(q));
+    }
+    if (opts?.cursor) {
+      const t = new Date(opts.cursor).getTime();
+      if (!Number.isNaN(t)) {
+        items = items.filter((a) => new Date(a.createdAt).getTime() < t);
+      }
+    }
+    const limit = Math.min(opts?.limit ?? 60, 100);
+    const page = items.slice(0, limit);
+    return {
+      items: page.map((a) => ({ ...a })),
+      nextCursor:
+        items.length > limit ? page[page.length - 1]?.createdAt : undefined,
+    };
+  }
+  async deleteMediaAsset(id: string) {
+    await sleep(100);
+    this.s.mediaAssets = this.s.mediaAssets.filter((a) => a.id !== id);
   }
 
   // ---- MCP ----

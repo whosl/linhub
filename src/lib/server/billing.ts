@@ -1,7 +1,18 @@
-import { and, eq, gte, sql } from "drizzle-orm";
+import { and, desc, eq, gt, gte, sql } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 
 const uid = () => crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+
+export type UsageCapability =
+  | "chat"
+  | "image"
+  | "image-edit"
+  | "embedding"
+  | "tts"
+  | "asr"
+  | "vision-helper"
+  | "web-search"
+  | "spreadsheet-analysis";
 
 export interface SpendReservation {
   amountCents: number;
@@ -24,9 +35,15 @@ export async function getActiveSubscription(userId: string) {
     .select({ subscription: schema.subscriptions, plan: schema.plans })
     .from(schema.subscriptions)
     .innerJoin(schema.plans, eq(schema.subscriptions.planId, schema.plans.id))
-    .where(eq(schema.subscriptions.userId, userId));
-  if (!row || row.subscription.expiresAt <= new Date()) return null;
-  return row;
+    .where(
+      and(
+        eq(schema.subscriptions.userId, userId),
+        gt(schema.subscriptions.expiresAt, new Date())
+      )
+    )
+    .orderBy(desc(schema.subscriptions.expiresAt))
+    .limit(1);
+  return row ?? null;
 }
 
 /** Pro 模型需有效的 pro 订阅（C8：tier 校验） */
@@ -85,13 +102,16 @@ export async function recordUsage(
      * 预检后被其他请求扣完，仍必须把本次用量入账，避免完整响应免费落库。
      */
     allowDebt?: boolean;
+    capability?: UsageCapability;
   } = {}
 ) {
+  const capability = opts.capability ?? (usage.imageCount ? "image" : "chat");
   const run = () =>
     db.transaction(async (tx) => {
       await tx.insert(schema.usageRecords).values({
         id: `ur-${uid()}`,
         userId,
+        capability,
         modelId: record.id,
         modelName: record.displayName,
         conversationId: conversationId ?? undefined,
@@ -113,8 +133,15 @@ export async function recordUsage(
         })
         .from(schema.subscriptions)
         .innerJoin(schema.plans, eq(schema.subscriptions.planId, schema.plans.id))
-        .where(eq(schema.subscriptions.userId, userId));
-      if (sub && sub.expiresAt > new Date()) {
+        .where(
+          and(
+            eq(schema.subscriptions.userId, userId),
+            gt(schema.subscriptions.expiresAt, new Date())
+          )
+        )
+        .orderBy(desc(schema.subscriptions.expiresAt))
+        .limit(1);
+      if (sub) {
         const [updated] = await tx
           .update(schema.subscriptions)
           .set({
@@ -146,7 +173,7 @@ export async function recordUsage(
           amountCents: -remaining,
           balanceAfterCents: updated.balance,
           reason: "usage",
-          description: `${record.displayName} ${usage.imageCount ? "生图" : "对话"}消费`,
+          description: `${record.displayName} ${capability}消费`,
         });
       }
     }, { isolationLevel: "serializable" });
@@ -186,9 +213,16 @@ export async function reserveSpend(
         })
         .from(schema.subscriptions)
         .innerJoin(schema.plans, eq(schema.subscriptions.planId, schema.plans.id))
-        .where(eq(schema.subscriptions.userId, userId));
+        .where(
+          and(
+            eq(schema.subscriptions.userId, userId),
+            gt(schema.subscriptions.expiresAt, new Date())
+          )
+        )
+        .orderBy(desc(schema.subscriptions.expiresAt))
+        .limit(1);
 
-      if (sub && sub.expiresAt > new Date()) {
+      if (sub) {
         const [updated] = await tx
           .update(schema.subscriptions)
           .set({
@@ -284,11 +318,13 @@ export async function recordReservedUsage(
     outputTokens: number;
     imageCount?: number;
     costCents: number;
-  }
+  },
+  opts: { capability?: UsageCapability } = {}
 ) {
   await db.insert(schema.usageRecords).values({
     id: `ur-${uid()}`,
     userId,
+    capability: opts.capability ?? (usage.imageCount ? "image" : "chat"),
     modelId: record.id,
     modelName: record.displayName,
     conversationId: conversationId ?? undefined,

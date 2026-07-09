@@ -1,5 +1,10 @@
 import { NextRequest } from "next/server";
 import { requireSession } from "@/lib/server/auth";
+import { BillingError } from "@/lib/server/billing";
+import {
+  engineResource,
+  withAtomicBilling,
+} from "@/lib/server/billing/capabilities";
 import { rateLimit } from "@/lib/server/rate-limit";
 import { getAsrConfig } from "@/lib/server/engine-config";
 import { formatUpstreamError } from "@/lib/server/upstream-error";
@@ -35,52 +40,65 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const { apiKey, baseURL, model } = await getAsrConfig();
-
-    // 音频转 base64（MiMo ASR 要求 input_audio 格式）
-    const audioBuffer = Buffer.from(await audio.arrayBuffer());
-    const audioB64 = audioBuffer.toString("base64");
-    // 从文件名推断格式
-    const ext = (audio.name || "audio.webm").split(".").pop()?.toLowerCase() ?? "webm";
-    const format = ext === "wav" ? "wav" : ext === "mp3" || ext === "mpeg" ? "mp3" : ext;
-
-    const res = await fetch(`${baseURL}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "api-key": apiKey,
+    const text = await withAtomicBilling(
+      session.user.id,
+      {
+        capability: "asr",
+        resource: engineResource("asr"),
+        units: { requestCount: 1 },
       },
-      body: JSON.stringify({
-        model,
-        messages: [
-          {
-            role: "user",
-            // ASR 不能包含 text part，只放纯音频
-            content: [
+      async () => {
+        const { apiKey, baseURL, model } = await getAsrConfig();
+        const audioBuffer = Buffer.from(await audio.arrayBuffer());
+        const audioB64 = audioBuffer.toString("base64");
+        const ext =
+          (audio.name || "audio.webm").split(".").pop()?.toLowerCase() ?? "webm";
+        const format =
+          ext === "wav"
+            ? "wav"
+            : ext === "mp3" || ext === "mpeg"
+              ? "mp3"
+              : ext;
+
+        const res = await fetch(`${baseURL}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "api-key": apiKey,
+          },
+          body: JSON.stringify({
+            model,
+            messages: [
               {
-                type: "input_audio",
-                input_audio: { data: audioB64, format },
+                role: "user",
+                content: [
+                  {
+                    type: "input_audio",
+                    input_audio: { data: audioB64, format },
+                  },
+                ],
               },
             ],
-          },
-        ],
-      }),
-      signal: AbortSignal.timeout(ASR_TIMEOUT_MS),
-    });
+          }),
+          signal: AbortSignal.timeout(ASR_TIMEOUT_MS),
+        });
 
-    if (!res.ok) {
-      return Response.json(
-        { error: await formatUpstreamError(res, "ASR 服务不可用") },
-        { status: 502 }
-      );
-    }
+        if (!res.ok) {
+          throw new Error(await formatUpstreamError(res, "ASR 服务不可用"));
+        }
 
-    const data = (await res.json()) as {
-      choices?: { message?: { content?: string } }[];
-    };
-    const text = data.choices?.[0]?.message?.content ?? "";
+        const data = (await res.json()) as {
+          choices?: { message?: { content?: string } }[];
+        };
+        return data.choices?.[0]?.message?.content ?? "";
+      }
+    );
+
     return Response.json({ text });
   } catch (e) {
+    if (e instanceof BillingError) {
+      return Response.json({ error: e.message }, { status: 402 });
+    }
     return Response.json(
       {
         error: isTimeoutError(e)
