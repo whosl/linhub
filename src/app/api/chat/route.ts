@@ -22,6 +22,10 @@ import { rateLimit } from "@/lib/server/rate-limit";
 import { toUiArtifact } from "@/app/api/artifacts/util";
 import { resolveImageSource } from "@/lib/server/llm/image-source";
 import {
+  describeImageFromBuffer,
+  prepareVisionImage,
+} from "@/lib/server/vision-describe";
+import {
   buildArtifactTools,
   buildCodeTools,
   buildImageTools,
@@ -1587,13 +1591,156 @@ async function isAccessibleChatModelForUser(userId: string, modelId: string) {
 
 async function tryResolveHistoryImageSource(url: string, origin: string) {
   try {
-    return { ok: true as const, source: await resolveImageSource(url, origin) };
+    const source = await resolveImageSource(url, origin);
+    // 大图先压缩再内联，降低中转网关序列化栈溢出概率
+    if (source.startsWith("data:")) {
+      const comma = source.indexOf(";base64,");
+      if (comma > 0) {
+        const mime = source.slice(5, comma) || "image/png";
+        const prepared = await prepareVisionImage(
+          Buffer.from(source.slice(comma + 8), "base64"),
+          mime
+        );
+        return {
+          ok: true as const,
+          source: `data:${prepared.mimeType};base64,${prepared.buffer.toString("base64")}`,
+          url,
+        };
+      }
+    }
+    return { ok: true as const, source, url };
   } catch (e) {
     return {
       ok: false as const,
       message: e instanceof Error ? e.message : "图片无法读取",
+      url,
     };
   }
+}
+
+function isInlineVisionRequestError(message: string) {
+  return /Maximum call stack size exceeded|invalid image|unsupported image|image_url|does not support image|multimodal|vision|图片过大|图片\/多模态/i.test(
+    message
+  );
+}
+
+/** 从 data URL / http(s) 解析出 buffer，供辅助识图使用 */
+async function bufferFromImageSource(source: string): Promise<{ buffer: Buffer; mime: string }> {
+  if (source.startsWith("data:")) {
+    const comma = source.indexOf(";base64,");
+    if (comma < 0) throw new Error("无法解析图片 data URL");
+    return {
+      buffer: Buffer.from(source.slice(comma + 8), "base64"),
+      mime: source.slice(5, comma) || "image/png",
+    };
+  }
+  if (source.startsWith("http://") || source.startsWith("https://")) {
+    const res = await fetch(source, { signal: AbortSignal.timeout(30_000) });
+    if (!res.ok) throw new Error(`下载图片失败（${res.status}）`);
+    const ct = res.headers.get("content-type");
+    const mime = ct?.startsWith("image/") ? ct.split(";")[0]!.trim() : "image/png";
+    return { buffer: Buffer.from(await res.arrayBuffer()), mime };
+  }
+  throw new Error("不支持的图片地址");
+}
+
+/**
+ * 内联视觉请求失败后：立刻用辅助识图模型读图，把 OCR/描述注入历史，
+ * 并去掉多模态 file 部分，便于主模型纯文本重试。
+ */
+async function fallbackHistoryWithVisionHelper(opts: {
+  history: ModelMessage[];
+  userId: string;
+  question: string;
+}): Promise<{ history: ModelMessage[]; describedCount: number }> {
+  const question =
+    opts.question.trim() ||
+    "请完整提取图片中的全部文字（OCR），并简要描述图片内容。若无文字则只描述画面。";
+  let describedCount = 0;
+  const next: ModelMessage[] = [];
+
+  for (const message of opts.history) {
+    if (message.role !== "user" || typeof message.content === "string") {
+      next.push(message);
+      continue;
+    }
+    const content = message.content;
+    if (!Array.isArray(content)) {
+      next.push(message);
+      continue;
+    }
+
+    const fileParts = content.filter(
+      (part) =>
+        part &&
+        typeof part === "object" &&
+        "type" in part &&
+        (part as { type?: string }).type === "file"
+    );
+    if (fileParts.length === 0) {
+      next.push(message);
+      continue;
+    }
+
+    const textParts = content.filter(
+      (part) =>
+        part &&
+        typeof part === "object" &&
+        "type" in part &&
+        (part as { type?: string }).type === "text"
+    );
+    const baseText = textParts
+      .map((part) => ("text" in part ? String(part.text ?? "") : ""))
+      .join("\n")
+      .trim();
+
+    const descriptions: string[] = [];
+    for (let i = 0; i < fileParts.length; i++) {
+      const part = fileParts[i] as {
+        data?: { type?: string; data?: string; url?: URL | string };
+        mediaType?: string;
+      };
+      try {
+        let source = "";
+        if (part.data?.type === "data" && typeof part.data.data === "string") {
+          const mime = part.mediaType || "image/png";
+          source = `data:${mime};base64,${part.data.data}`;
+        } else if (part.data?.type === "url" && part.data.url) {
+          source = String(part.data.url);
+        }
+        if (!source) {
+          descriptions.push(`图片${i + 1}：无法读取`);
+          continue;
+        }
+        const { buffer, mime } = await bufferFromImageSource(source);
+        const text = await describeImageFromBuffer(
+          opts.userId,
+          buffer,
+          mime,
+          question
+        );
+        describedCount += 1;
+        descriptions.push(`图片${i + 1}识别结果：\n${text}`);
+      } catch (e) {
+        descriptions.push(
+          `图片${i + 1}识别失败：${e instanceof Error ? e.message : "未知错误"}`
+        );
+      }
+    }
+
+    next.push({
+      role: "user",
+      content: [
+        baseText || "请看这张图片。",
+        "（原生视觉内联失败，已改用辅助识图模型读取图片：）",
+        ...descriptions,
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+    });
+  }
+
+  return { history: next, describedCount };
 }
 
 function getPlainTextFromParts(parts: MessagePart[]) {
@@ -1871,6 +2018,8 @@ async function streamAssistant(opts: {
     : false;
   /** 内联解析失败（或缺视觉）时才需要挂 analyze_image 降级 */
   let visionHelperNeeded = false;
+  /** 本轮历史是否含原生内联图片（用于请求失败后立刻辅助识图重试） */
+  let historyHasInlineVision = false;
 
   // 历史消息链（从 parentId 向上回溯）
   const all = await db
@@ -1894,7 +2043,7 @@ async function streamAssistant(opts: {
   const shouldPrioritizeImageGeneration =
     isImageGenerationDirectedQuery(currentUserText);
 
-  const history: ModelMessage[] = [];
+  let history: ModelMessage[] = [];
   const assistantImageContextIds = new Set(
     chain
       .filter((m) => {
@@ -1958,6 +2107,7 @@ async function streamAssistant(opts: {
             ? `\n\n（有 ${failedImages.length} 张图片无法内联：${Array.from(new Set(imageErrors)).join("；")}。若需要读取这些图片，请调用 analyze_image，路径：\n${failedPaths}）`
             : "";
         if (imageSrcs.length > 0) {
+          historyHasInlineVision = true;
           history.push({
             role: "user",
             content: [
@@ -2408,238 +2558,334 @@ async function streamAssistant(opts: {
       // 关闭 store 后多步工具循环不会再以 item_reference 引用上一轮的 rs_xxx
       if (!storeEnabled) openaiProviderOptions.store = false;
     }
-    const result = streamText({
-      model,
-      system,
-      messages: history,
-      abortSignal: signal,
-      ...(record.maxOutputTokens ? { maxOutputTokens: record.maxOutputTokens } : {}),
-      ...(hasTools && modelSupportsTools
-        ? { tools, stopWhen: stepCountIs(12) }
-        : {}),
-      ...(Object.keys(openaiProviderOptions).length > 0
-        ? { providerOptions: { openai: openaiProviderOptions } }
-        : {}),
-    });
-    streamResult = result;
+    let activeHistory = history;
+    let visionFallbackAttempted = false;
     let followupInputTokens = 0;
     let followupOutputTokens = 0;
+    let result!: ReturnType<typeof streamText>;
 
-    let reasoningStart = 0;
-    const toolParts = new Map<string, ToolCallPart>();
-    const fallbackToolResults: string[] = [];
-    for await (const chunk of result.fullStream) {
-      if (signal.aborted) {
-        const abortError = new Error("Aborted");
-        abortError.name = "AbortError";
-        throw abortError;
-      }
-      if (chunk.type === "reasoning-start") {
-        reasoningStart = Date.now();
-      } else if (chunk.type === "reasoning-delta") {
-        if (!chunk.text) continue;
-        if (reasoningStart === 0) reasoningStart = Date.now();
-        appendDelta(parts, "reasoning", chunk.text);
-        emit({ type: "reasoning-delta", messageId: assistantId, delta: chunk.text });
-        await persistPartial();
-      } else if (chunk.type === "reasoning-end") {
-        const duration = Date.now() - reasoningStart;
-        const last = parts[parts.length - 1];
-        if (last?.type === "reasoning" && last.text.trim().length > 0) {
-          last.durationMs = Math.max(0, duration);
-          emit({
-            type: "reasoning-done",
-            messageId: assistantId,
-            durationMs: last.durationMs,
-          });
-          await persistPartial(true);
-        }
-      } else if (chunk.type === "text-delta") {
-        appendDelta(parts, "text", chunk.text);
-        emit({ type: "text-delta", messageId: assistantId, delta: chunk.text });
-        await persistPartial();
-      } else if (chunk.type === "tool-input-start") {
-        // 工具调用开始：先建一个 running 的 part（args 为空），
-        // 让前端立刻展示「搜索中…」卡片，而不是干等参数生成完。
-        const part: ToolCallPart = {
-          type: "tool-call",
-          toolCallId: chunk.id,
-          toolName: chunk.toolName as ToolCallPart["toolName"],
-          args: {},
-          state: "running",
-          inputPreview: "",
-        };
-        toolParts.set(chunk.id, part);
-        parts.push(part);
-        emit({ type: "tool-call-start", messageId: assistantId, part });
-        await persistPartial(true);
-      } else if (chunk.type === "tool-input-delta") {
-        // 工具参数逐字生成（如 web_search 的 query），实时累加预览文本。
-        const part = toolParts.get(chunk.id);
-        if (part) {
-          part.inputPreview = (part.inputPreview ?? "") + chunk.delta;
-          emit({
-            type: "tool-input-delta",
-            messageId: assistantId,
-            toolCallId: chunk.id,
-            delta: chunk.delta,
-          });
-          await persistPartial();
-        }
-      } else if (chunk.type === "tool-call") {
-        // 参数生成完毕，工具真正开始执行：用完整结构化 input 覆盖 args，清掉预览。
-        const existing = toolParts.get(chunk.toolCallId);
-        if (existing) {
-          existing.args = (chunk.input ?? {}) as Record<string, unknown>;
-          existing.inputPreview = undefined;
-          emit({ type: "tool-call-start", messageId: assistantId, part: { ...existing } });
-          await persistPartial(true);
-        } else {
-          // 兜底：若 tool-input-start 未到达（部分模型不发），沿用旧逻辑创建。
-          const part: ToolCallPart = {
-            type: "tool-call",
-            toolCallId: chunk.toolCallId,
-            toolName: chunk.toolName as ToolCallPart["toolName"],
-            args: (chunk.input ?? {}) as Record<string, unknown>,
-            state: "running",
-          };
-          toolParts.set(chunk.toolCallId, part);
-          parts.push(part);
-          emit({ type: "tool-call-start", messageId: assistantId, part });
-          await persistPartial(true);
-        }
-      } else if (chunk.type === "tool-result") {
-        const part = toolParts.get(chunk.toolCallId);
-        if (part) {
-          const fallbackToolText = formatRawToolOutputForFallback(
-            part.toolName,
-            chunk.output
-          );
-          if (fallbackToolText) fallbackToolResults.push(fallbackToolText);
-          part.state = "success";
-          part.result = summarizeToolResult(chunk.output);
-          emit({ type: "tool-call-end", messageId: assistantId, part });
-          if (
-            (part.toolName === "create_artifact" ||
-              part.toolName === "update_artifact") &&
-            part.result?.artifactId
-          ) {
-            const [artifact] = await db
-              .select()
-              .from(schema.artifacts)
-              .where(eq(schema.artifacts.id, part.result.artifactId))
-              .limit(1);
-            if (artifact) {
-              emit({
-                type: "artifact",
-                messageId: assistantId,
-                artifact: toUiArtifact(artifact),
-              });
-            }
-          }
-          // 生图工具产出的图片作为独立 part 展示
-          while (pendingImages.length > 0) {
-            const url = pendingImages.shift()!;
-            const imagePart: ImagePart = { type: "image", url, alt: "生成的图片" };
-            parts.push(imagePart);
-            emit({ type: "image", messageId: assistantId, part: imagePart });
-          }
-          await persistPartial(true);
-        }
-      } else if (chunk.type === "tool-error") {
-        const part = toolParts.get(chunk.toolCallId);
-        if (part) {
-          part.state = "error";
-          part.errorMessage =
-            chunk.error instanceof Error ? chunk.error.message : String(chunk.error);
-          emit({ type: "tool-call-end", messageId: assistantId, part });
-          await persistPartial(true);
-        }
-      } else if (chunk.type === "error") {
-        throw chunk.error instanceof Error ? chunk.error : new Error(String(chunk.error));
-      }
-    }
-
-    if (signal.aborted) {
-      const abortError = new Error("Aborted");
-      abortError.name = "AbortError";
-      throw abortError;
-    }
-
-    const hasVisibleOutput = parts.some(
-      (part) =>
-        (part.type === "text" && part.text.trim().length > 0) ||
-        part.type === "image"
-    );
-    const toolSummary = (
-      fallbackToolResults.length > 0
-        ? fallbackToolResults.join("\n\n")
-        : formatToolCallsAsText(
-            parts.filter((p): p is ToolCallPart => p.type === "tool-call")
-          )
-    ).slice(0, 12_000);
-    if (!hasVisibleOutput && toolSummary) {
+    // 优先原生内联；若网关/模型处理图片失败且尚未产出可见内容，立刻辅助识图并重试一次
+    for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const fallbackMaxOutputTokens = Math.min(
-          record.maxOutputTokens ?? 1200,
-          1200
-        );
-        await assertCanSpend(
-          userId,
-          computeCostCents(record, {
-            inputTokens:
-              estimatePromptTokens(system, history) + Math.ceil(toolSummary.length / 4),
-            outputTokens: Math.min(fallbackMaxOutputTokens, 256),
-          })
-        );
-        const fallback = await generateText({
+        result = streamText({
           model,
-          system:
-            system +
-            "\n\n你现在不能再调用工具。必须基于已经获得的工具结果，直接给出用户可见的最终回答；如果证据不足，要明确说明。",
-          messages: [
-            ...history,
-            {
-              role: "assistant",
-              content: `我已经调用工具得到以下结果：\n\n${toolSummary}`,
-            },
-            {
-              role: "user",
-              content:
-                "请基于上述工具结果，直接回答我最新的问题。使用中文，保留关键来源名称或链接，不要再请求调用工具。",
-            },
-          ],
+          system,
+          messages: activeHistory,
           abortSignal: signal,
-          maxOutputTokens: fallbackMaxOutputTokens,
+          ...(record.maxOutputTokens ? { maxOutputTokens: record.maxOutputTokens } : {}),
+          ...(hasTools && modelSupportsTools
+            ? { tools, stopWhen: stepCountIs(12) }
+            : {}),
           ...(Object.keys(openaiProviderOptions).length > 0
             ? { providerOptions: { openai: openaiProviderOptions } }
             : {}),
         });
-        followupInputTokens = fallback.usage.inputTokens ?? 0;
-        followupOutputTokens = fallback.usage.outputTokens ?? 0;
-        const text = fallback.text.trim();
-        if (text.length > 0) {
+        streamResult = result;
+
+        let reasoningStart = 0;
+        const toolParts = new Map<string, ToolCallPart>();
+        const fallbackToolResults: string[] = [];
+        for await (const chunk of result.fullStream) {
           if (signal.aborted) {
             const abortError = new Error("Aborted");
             abortError.name = "AbortError";
             throw abortError;
           }
-          appendDelta(parts, "text", text);
-          emit({ type: "text-delta", messageId: assistantId, delta: text });
-          await persistPartial(true);
+          if (chunk.type === "reasoning-start") {
+            reasoningStart = Date.now();
+          } else if (chunk.type === "reasoning-delta") {
+            if (!chunk.text) continue;
+            if (reasoningStart === 0) reasoningStart = Date.now();
+            appendDelta(parts, "reasoning", chunk.text);
+            emit({ type: "reasoning-delta", messageId: assistantId, delta: chunk.text });
+            await persistPartial();
+          } else if (chunk.type === "reasoning-end") {
+            const duration = Date.now() - reasoningStart;
+            const last = parts[parts.length - 1];
+            if (last?.type === "reasoning" && last.text.trim().length > 0) {
+              last.durationMs = Math.max(0, duration);
+              emit({
+                type: "reasoning-done",
+                messageId: assistantId,
+                durationMs: last.durationMs,
+              });
+              await persistPartial(true);
+            }
+          } else if (chunk.type === "text-delta") {
+            appendDelta(parts, "text", chunk.text);
+            emit({ type: "text-delta", messageId: assistantId, delta: chunk.text });
+            await persistPartial();
+          } else if (chunk.type === "tool-input-start") {
+            const part: ToolCallPart = {
+              type: "tool-call",
+              toolCallId: chunk.id,
+              toolName: chunk.toolName as ToolCallPart["toolName"],
+              args: {},
+              state: "running",
+              inputPreview: "",
+            };
+            toolParts.set(chunk.id, part);
+            parts.push(part);
+            emit({ type: "tool-call-start", messageId: assistantId, part });
+            await persistPartial();
+          } else if (chunk.type === "tool-input-delta") {
+            const part = toolParts.get(chunk.id);
+            if (part) {
+              part.inputPreview = (part.inputPreview ?? "") + chunk.delta;
+              emit({
+                type: "tool-input-delta",
+                messageId: assistantId,
+                toolCallId: chunk.id,
+                delta: chunk.delta,
+              });
+              await persistPartial();
+            }
+          } else if (chunk.type === "tool-call") {
+            const existing = toolParts.get(chunk.toolCallId);
+            if (existing) {
+              existing.args = (chunk.input ?? {}) as Record<string, unknown>;
+              existing.inputPreview = undefined;
+              emit({ type: "tool-call-start", messageId: assistantId, part: { ...existing } });
+              await persistPartial(true);
+            } else {
+              const part: ToolCallPart = {
+                type: "tool-call",
+                toolCallId: chunk.toolCallId,
+                toolName: chunk.toolName as ToolCallPart["toolName"],
+                args: (chunk.input ?? {}) as Record<string, unknown>,
+                state: "running",
+              };
+              toolParts.set(chunk.toolCallId, part);
+              parts.push(part);
+              emit({ type: "tool-call-start", messageId: assistantId, part });
+              await persistPartial(true);
+            }
+          } else if (chunk.type === "tool-result") {
+            const part = toolParts.get(chunk.toolCallId);
+            if (part) {
+              const fallbackToolText = formatRawToolOutputForFallback(
+                part.toolName,
+                chunk.output
+              );
+              if (fallbackToolText) fallbackToolResults.push(fallbackToolText);
+              part.state = "success";
+              part.result = summarizeToolResult(chunk.output);
+              emit({ type: "tool-call-end", messageId: assistantId, part });
+              if (
+                (part.toolName === "create_artifact" ||
+                  part.toolName === "update_artifact") &&
+                part.result?.artifactId
+              ) {
+                const [artifact] = await db
+                  .select()
+                  .from(schema.artifacts)
+                  .where(eq(schema.artifacts.id, part.result.artifactId))
+                  .limit(1);
+                if (artifact) {
+                  emit({
+                    type: "artifact",
+                    messageId: assistantId,
+                    artifact: toUiArtifact(artifact),
+                  });
+                }
+              }
+              while (pendingImages.length > 0) {
+                const url = pendingImages.shift()!;
+                const imagePart: ImagePart = { type: "image", url, alt: "生成的图片" };
+                parts.push(imagePart);
+                emit({ type: "image", messageId: assistantId, part: imagePart });
+              }
+              await persistPartial(true);
+            }
+          } else if (chunk.type === "tool-error") {
+            const part = toolParts.get(chunk.toolCallId);
+            if (part) {
+              part.state = "error";
+              part.errorMessage =
+                chunk.error instanceof Error ? chunk.error.message : String(chunk.error);
+              emit({ type: "tool-call-end", messageId: assistantId, part });
+              await persistPartial(true);
+            }
+          } else if (chunk.type === "error") {
+            throw chunk.error instanceof Error ? chunk.error : new Error(String(chunk.error));
+          }
         }
-      } catch (e) {
-        if (signal.aborted || (e instanceof Error && e.name === "AbortError")) {
-          throw e;
+
+        if (signal.aborted) {
+          const abortError = new Error("Aborted");
+          abortError.name = "AbortError";
+          throw abortError;
         }
-        if (e instanceof Error && e.name === "BillingError") {
-          status = "error";
-          const errorText = `⚠️ ${e.message}`;
-          appendDelta(parts, "text", errorText);
-          emit({ type: "text-delta", messageId: assistantId, delta: errorText });
-          await persistPartial(true);
+
+        const hasVisibleOutput = parts.some(
+          (part) =>
+            (part.type === "text" && part.text.trim().length > 0) ||
+            part.type === "image"
+        );
+        const toolSummary = (
+          fallbackToolResults.length > 0
+            ? fallbackToolResults.join("\n\n")
+            : formatToolCallsAsText(
+                parts.filter((p): p is ToolCallPart => p.type === "tool-call")
+              )
+        ).slice(0, 12_000);
+        if (!hasVisibleOutput && toolSummary) {
+          try {
+            const fallbackMaxOutputTokens = Math.min(
+              record.maxOutputTokens ?? 1200,
+              1200
+            );
+            await assertCanSpend(
+              userId,
+              computeCostCents(record, {
+                inputTokens:
+                  estimatePromptTokens(system, activeHistory) +
+                  Math.ceil(toolSummary.length / 4),
+                outputTokens: Math.min(fallbackMaxOutputTokens, 256),
+              })
+            );
+            const fallback = await generateText({
+              model,
+              system:
+                system +
+                "\n\n你现在不能再调用工具。必须基于已经获得的工具结果，直接给出用户可见的最终回答；如果证据不足，要明确说明。",
+              messages: [
+                ...activeHistory,
+                {
+                  role: "assistant",
+                  content: `我已经调用工具得到以下结果：\n\n${toolSummary}`,
+                },
+                {
+                  role: "user",
+                  content:
+                    "请基于上述工具结果，直接回答我最新的问题。使用中文，保留关键来源名称或链接，不要再请求调用工具。",
+                },
+              ],
+              abortSignal: signal,
+              maxOutputTokens: fallbackMaxOutputTokens,
+              ...(Object.keys(openaiProviderOptions).length > 0
+                ? { providerOptions: { openai: openaiProviderOptions } }
+                : {}),
+            });
+            followupInputTokens = fallback.usage.inputTokens ?? 0;
+            followupOutputTokens = fallback.usage.outputTokens ?? 0;
+            const text = fallback.text.trim();
+            if (text.length > 0) {
+              if (signal.aborted) {
+                const abortError = new Error("Aborted");
+                abortError.name = "AbortError";
+                throw abortError;
+              }
+              appendDelta(parts, "text", text);
+              emit({ type: "text-delta", messageId: assistantId, delta: text });
+              await persistPartial(true);
+            }
+          } catch (e) {
+            if (signal.aborted || (e instanceof Error && e.name === "AbortError")) {
+              throw e;
+            }
+            if (e instanceof Error && e.name === "BillingError") {
+              status = "error";
+              const errorText = `⚠️ ${e.message}`;
+              appendDelta(parts, "text", errorText);
+              emit({ type: "text-delta", messageId: assistantId, delta: errorText });
+              await persistPartial(true);
+            }
+          }
         }
-        // 兜底整理失败时仍给出可见状态，避免工具完成后出现空白回答。
+
+        break;
+      } catch (streamErr) {
+        if (signal.aborted || (streamErr instanceof Error && streamErr.name === "AbortError")) {
+          throw streamErr;
+        }
+        const raw = getErrorMessage(streamErr);
+        const hasVisiblePartial = parts.some(
+          (part) =>
+            (part.type === "text" && part.text.trim().length > 0) ||
+            part.type === "image"
+        );
+        const canVisionFallback =
+          attempt === 0 &&
+          !visionFallbackAttempted &&
+          historyHasInlineVision &&
+          !hasVisiblePartial &&
+          isInlineVisionRequestError(raw);
+
+        if (!canVisionFallback) throw streamErr;
+
+        visionFallbackAttempted = true;
+        try {
+          const real = await Promise.race([
+            streamResult?.usage,
+            new Promise<never>((_, rej) =>
+              setTimeout(() => rej(new Error("timeout")), 2000)
+            ),
+          ]);
+          if (real && ((real.inputTokens ?? 0) > 0 || (real.outputTokens ?? 0) > 0)) {
+            await recordUsage(
+              userId,
+              record,
+              conversationId,
+              {
+                inputTokens: real.inputTokens ?? 0,
+                outputTokens: real.outputTokens ?? 0,
+                costCents: computeCostCents(record, {
+                  inputTokens: real.inputTokens ?? 0,
+                  outputTokens: real.outputTokens ?? 0,
+                }),
+              },
+              { allowDebt: true, capability: "chat" }
+            );
+          }
+        } catch {
+          // 失败请求用量不可用时跳过
+        }
+
+        const notice = "原生视觉内联失败，正在改用辅助识图模型…\n\n";
+        parts.length = 0;
+        appendDelta(parts, "text", notice);
+        emit({
+          type: "assistant-snapshot",
+          message: {
+            id: assistantId,
+            conversationId,
+            parentId,
+            role: "assistant",
+            modelId: effectiveModelId,
+            parts: cloneMessageParts(parts),
+            createdAt: assistantStartedAt.toISOString(),
+            status: "streaming",
+          },
+        });
+        emit({ type: "text-delta", messageId: assistantId, delta: notice });
+        await persistPartial(true);
+
+        const fallback = await fallbackHistoryWithVisionHelper({
+          history: activeHistory,
+          userId,
+          question: currentUserText,
+        });
+        if (fallback.describedCount === 0) throw streamErr;
+
+        activeHistory = fallback.history;
+        history = activeHistory;
+        parts.length = 0;
+        emit({
+          type: "assistant-snapshot",
+          message: {
+            id: assistantId,
+            conversationId,
+            parentId,
+            role: "assistant",
+            modelId: effectiveModelId,
+            parts: [],
+            createdAt: assistantStartedAt.toISOString(),
+            status: "streaming",
+          },
+        });
+        await persistPartial(true);
+        continue;
       }
     }
 

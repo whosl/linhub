@@ -39,8 +39,8 @@ export async function describeImageFromBuffer(
 
   const { model, record } = await resolveModel(s.helper);
   const mime = mimeType.startsWith("image/") ? mimeType : "image/png";
-  const image = await prepareVisionImage(buffer, mime);
-  const base64 = image.buffer.toString("base64");
+  // 辅助识图始终尽量压缩；传 Uint8Array 避免超大 base64 字符串在工具调用栈里再序列化一次
+  const image = await prepareVisionImage(buffer, mime, { forceCompress: true });
 
   const result = await withAtomicBilling(
     userId,
@@ -58,7 +58,7 @@ export async function describeImageFromBuffer(
             content: [
               {
                 type: "file",
-                data: { type: "data", data: base64 },
+                data: { type: "data", data: new Uint8Array(image.buffer) },
                 mediaType: image.mimeType,
               },
               { type: "text", text: question },
@@ -73,8 +73,16 @@ export async function describeImageFromBuffer(
   return (result ?? "").trim();
 }
 
-async function prepareVisionImage(buffer: Buffer, mimeType: string) {
-  if (buffer.length <= VISION_INLINE_TARGET_BYTES) {
+/** 内联/辅助识图前压缩大图，降低网关序列化栈溢出概率 */
+export async function prepareVisionImage(
+  buffer: Buffer,
+  mimeType: string,
+  opts?: { forceCompress?: boolean }
+) {
+  const shouldCompress =
+    opts?.forceCompress || buffer.length > VISION_INLINE_TARGET_BYTES;
+
+  if (!shouldCompress) {
     return { buffer, mimeType };
   }
 

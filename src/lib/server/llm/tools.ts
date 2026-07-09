@@ -1614,30 +1614,14 @@ export function buildVisionTool(userId: string, origin?: string): ToolSet {
           await assertSafeUrl(imageUrl);
         }
 
-        const imageSrc = await resolveImageSource(imageUrl, origin);
-        let buffer: Buffer;
-        let mime = "image/png";
-
-        if (imageSrc.startsWith("data:")) {
-          const m = /^data:([^;]+);base64,([\s\S]+)$/.exec(imageSrc);
-          if (!m) throw new Error("无法解析图片 data URL");
-          mime = m[1] || mime;
-          buffer = Buffer.from(m[2], "base64");
-        } else if (
-          imageSrc.startsWith("http://") ||
-          imageSrc.startsWith("https://")
-        ) {
-          await assertSafeUrl(imageSrc);
-          const res = await fetch(imageSrc, {
-            signal: AbortSignal.timeout(30_000),
-          });
-          if (!res.ok) throw new Error(`下载图片失败（${res.status}）`);
-          const ct = res.headers.get("content-type");
-          if (ct?.startsWith("image/")) mime = ct.split(";")[0]!.trim();
-          buffer = Buffer.from(await res.arrayBuffer());
-        } else {
-          throw new Error("不支持的图片地址");
-        }
+        // 直接读 Buffer，避免 4MB+ 图先转 data URL 再在工具调用栈里正则/序列化
+        const { resolveImageBuffer } = await import(
+          "@/lib/server/llm/image-source"
+        );
+        const { buffer, mimeType: mime } = await resolveImageBuffer(
+          imageUrl,
+          origin
+        );
 
         const { describeImageFromBuffer } = await import(
           "@/lib/server/vision-describe"
