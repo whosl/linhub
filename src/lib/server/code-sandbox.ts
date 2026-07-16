@@ -4,10 +4,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import {
   chmod,
   copyFile,
-  lstat,
   mkdir,
   mkdtemp,
-  readFile,
   readdir,
   realpath,
   rm,
@@ -132,7 +130,6 @@ interface NormalizedLimits {
 interface PreparedWorkspace {
   root: string;
   codeDir: string;
-  copiedOutputDir: string;
   mountedInputs: { source: string; destination: string }[];
 }
 
@@ -201,7 +198,6 @@ export async function runCodeSandbox(
   const docker = dockerBinary();
   let containerId: string | undefined;
   let attached: AttachedProcess | undefined;
-  let containerPaused = false;
 
   try {
     const createResult = await runCommand(
@@ -240,7 +236,7 @@ export async function runCodeSandbox(
         break;
       }
 
-      const status = await readContainerExitCode(docker, containerId, workspace.root);
+      const status = await readContainerExitCode(docker, containerId);
       if (status !== null) {
         exitCode = status;
         break;
@@ -252,7 +248,7 @@ export async function runCodeSandbox(
           `runsc 容器在返回执行状态前退出（Docker 退出码 ${attachmentState.code ?? "null"}）`;
         break;
       }
-      await delay(50);
+      await delay(100);
     }
 
     if (infrastructureFailure) {
@@ -261,41 +257,16 @@ export async function runCodeSandbox(
       );
     }
 
-    // 超时或标准输出超限时先冻结，再复制有限 tmpfs 中的输出，避免复制期间继续写入。
-    if (timedOut || stdoutStderrLimitExceeded) {
-      const pauseResult = await runCommand(
-        docker,
-        ["pause", containerId],
-        5_000,
-        64 * 1024
-      ).catch(() => null);
-      containerPaused = pauseResult?.code === 0;
-    }
-
-    let outputCopyFailed = false;
-    if ((!timedOut && !stdoutStderrLimitExceeded) || containerPaused) {
-      const copyResult = await runCommand(
-        docker,
-        ["cp", `${containerId}:/workspace/output/.`, workspace.copiedOutputDir],
-        15_000,
-        128 * 1024
-      ).catch(() => null);
-      outputCopyFailed = copyResult === null || copyResult.code !== 0;
-    } else {
-      outputCopyFailed = true;
-    }
-
-    const collected = outputCopyFailed
+    // gVisor 的运行时 tmpfs 不会出现在 Docker archive（docker cp）视图中。
+    // 正常结束后必须通过 runsc 内部的 docker exec 只读取回，超时/输出超限则不发布半成品。
+    const collected = timedOut || stdoutStderrLimitExceeded
       ? { files: [] as SandboxOutputFile[], exceeded: false }
-      : await collectOutputFiles(
-          workspace.copiedOutputDir,
+      : await collectContainerOutputFiles(
+          docker,
+          containerId,
           limits.outputFiles,
           limits.outputBytes
         );
-
-    if (outputCopyFailed && !timedOut && !stdoutStderrLimitExceeded) {
-      throw new Error("沙盒已结束，但无法安全取回输出目录。");
-    }
 
     return {
       stdout: bufferText(attached.stdout),
@@ -309,11 +280,6 @@ export async function runCodeSandbox(
     };
   } finally {
     if (containerId) {
-      if (containerPaused) {
-        await runCommand(docker, ["unpause", containerId], 5_000, 64 * 1024).catch(
-          () => undefined
-        );
-      }
       await runCommand(docker, ["rm", "--force", "--volumes", containerId], 10_000, 64 * 1024).catch(
         () => undefined
       );
@@ -395,13 +361,11 @@ async function prepareWorkspace(
   const root = await mkdtemp(path.join(tempBase, "linhub-sandbox-"));
   const codeDir = path.join(root, "workspace");
   const inputDir = path.join(codeDir, "input");
-  const copiedOutputDir = path.join(root, "collected-output");
   const mountedInputs: PreparedWorkspace["mountedInputs"] = [];
 
   try {
     await mkdir(inputDir, { recursive: true, mode: 0o700 });
     await mkdir(path.join(codeDir, "output"), { mode: 0o700 });
-    await mkdir(copiedOutputDir, { mode: 0o700 });
     await writeFile(path.join(codeDir, MAIN_FILES[options.language]), options.code, {
       encoding: "utf8",
       mode: 0o444,
@@ -459,7 +423,7 @@ async function prepareWorkspace(
     await chmod(path.join(codeDir, "output"), 0o555);
     await chmod(codeDir, 0o555);
     assertDockerMountSource(codeDir);
-    return { root, codeDir, copiedOutputDir, mountedInputs };
+    return { root, codeDir, mountedInputs };
   } catch (error) {
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
     throw error;
@@ -480,56 +444,59 @@ async function makeTreeReadOnly(directory: string): Promise<void> {
   await chmod(directory, 0o555);
 }
 
-async function collectOutputFiles(
-  root: string,
+async function collectContainerOutputFiles(
+  docker: string,
+  containerId: string,
   maxFiles: number,
   maxBytes: number
 ): Promise<{ files: SandboxOutputFile[]; exceeded: boolean }> {
-  await makeCollectedTreeReadable(root);
   const files: SandboxOutputFile[] = [];
   let totalBytes = 0;
   let exceeded = false;
-
-  async function visit(directory: string, prefix: string): Promise<void> {
-    const entries = await readdir(directory, { withFileTypes: true });
-    entries.sort((a, b) => a.name.localeCompare(b.name));
-    for (const entry of entries) {
-      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
-      const fullPath = path.join(directory, entry.name);
-      const metadata = await lstat(fullPath);
-      if (metadata.isSymbolicLink()) continue;
-      if (metadata.isDirectory()) {
-        await visit(fullPath, relativePath);
-        continue;
-      }
-      if (!metadata.isFile()) continue;
-      if (files.length >= maxFiles || totalBytes + metadata.size > maxBytes) {
-        exceeded = true;
-        continue;
-      }
-      const data = await readFile(fullPath);
-      totalBytes += data.byteLength;
-      files.push({ path: relativePath, size: data.byteLength, data });
-    }
+  const listLimit = Math.min(8 * 1024 * 1024, Math.max(64 * 1024, maxFiles * 1024));
+  const listed = await runBinaryCommand(
+    docker,
+    ["exec", containerId, "find", "/workspace/output", "-type", "f", "-print0"],
+    10_000,
+    listLimit
+  );
+  if (listed.limitExceeded) return { files, exceeded: true };
+  if (listed.code !== 0) {
+    throw new Error(
+      `沙盒已结束，但无法列出输出目录：${cleanDockerError(listed.stderr)}`
+    );
   }
 
-  await visit(root, "");
+  const outputRoot = "/workspace/output";
+  const paths = splitNull(listed.stdout)
+    .map((entry) => decodeUtf8Path(entry))
+    .sort((left, right) => left.localeCompare(right));
+  for (const absolutePath of paths) {
+    const relativePath = safeContainerOutputPath(outputRoot, absolutePath);
+    if (files.length >= maxFiles || totalBytes >= maxBytes) {
+      exceeded = true;
+      continue;
+    }
+    const remaining = maxBytes - totalBytes;
+    const content = await runBinaryCommand(
+      docker,
+      ["exec", containerId, "cat", absolutePath],
+      15_000,
+      remaining
+    );
+    if (content.limitExceeded) {
+      exceeded = true;
+      continue;
+    }
+    if (content.code !== 0) {
+      throw new Error(
+        `沙盒已结束，但无法读取输出文件 ${relativePath}：${cleanDockerError(content.stderr)}`
+      );
+    }
+    totalBytes += content.stdout.byteLength;
+    files.push({ path: relativePath, size: content.stdout.byteLength, data: content.stdout });
+  }
   return { files, exceeded };
-}
-
-async function makeCollectedTreeReadable(directory: string): Promise<void> {
-  await chmod(directory, 0o700);
-  const entries = await readdir(directory, { withFileTypes: true });
-  for (const entry of entries) {
-    const entryPath = path.join(directory, entry.name);
-    const metadata = await lstat(entryPath);
-    if (metadata.isSymbolicLink()) continue;
-    if (metadata.isDirectory()) {
-      await makeCollectedTreeReadable(entryPath);
-    } else if (metadata.isFile()) {
-      await chmod(entryPath, 0o400);
-    }
-  }
 }
 
 function startAttachedContainer(
@@ -575,22 +542,16 @@ function startAttachedContainer(
 
 async function readContainerExitCode(
   docker: string,
-  containerId: string,
-  workspaceRoot: string
+  containerId: string
 ): Promise<number | null> {
-  const statusDir = path.join(workspaceRoot, "status");
-  await mkdir(statusDir, { recursive: true, mode: 0o700 });
   const result = await runCommand(
     docker,
-    ["cp", `${containerId}:/linhub-status/exit-code`, statusDir],
+    ["exec", containerId, "cat", "/linhub-status/exit-code"],
     2_000,
     32 * 1024
   ).catch(() => null);
   if (!result || result.code !== 0) return null;
-  const raw = await readFile(path.join(statusDir, "exit-code"), "utf8").catch(
-    () => ""
-  );
-  const value = Number(raw.trim());
+  const value = Number(result.stdout.trim());
   return Number.isInteger(value) && value >= 0 && value <= 255 ? value : null;
 }
 
@@ -598,6 +559,68 @@ interface CommandResult {
   code: number | null;
   stdout: string;
   stderr: string;
+}
+
+interface BinaryCommandResult {
+  code: number | null;
+  stdout: Buffer;
+  stderr: string;
+  limitExceeded: boolean;
+}
+
+function runBinaryCommand(
+  command: string,
+  args: readonly string[],
+  timeoutMs: number,
+  outputLimit: number
+): Promise<BinaryCommandResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, [...args], {
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let bytes = 0;
+    let limitExceeded = false;
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      if (!settled) {
+        settled = true;
+        reject(new Error(`命令超时：${command}`));
+      }
+    }, timeoutMs);
+    const collect = (target: Buffer[], chunk: Buffer) => {
+      const remaining = Math.max(0, outputLimit - bytes);
+      if (remaining > 0) target.push(Buffer.from(chunk.subarray(0, remaining)));
+      bytes += chunk.byteLength;
+      if (chunk.byteLength > remaining) {
+        limitExceeded = true;
+        child.kill("SIGKILL");
+      }
+    };
+    child.stdout.on("data", (chunk: Buffer) => collect(stdout, chunk));
+    child.stderr.on("data", (chunk: Buffer) => collect(stderr, chunk));
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        code,
+        stdout: Buffer.concat(stdout),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+        limitExceeded,
+      });
+    });
+  });
 }
 
 function runCommand(
@@ -756,6 +779,53 @@ function safeRelativePath(value: string): string {
   const normalized = path.posix.normalize(value);
   if (normalized === "." || normalized === ".." || normalized.startsWith("../")) {
     throw new Error("输入文件路径越权");
+  }
+  return normalized;
+}
+
+function splitNull(value: Buffer): Buffer[] {
+  const entries: Buffer[] = [];
+  let start = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] !== 0) continue;
+    if (index > start) entries.push(value.subarray(start, index));
+    start = index + 1;
+  }
+  if (start < value.length) {
+    throw new Error("沙盒输出文件列表格式不完整");
+  }
+  return entries;
+}
+
+function decodeUtf8Path(value: Buffer): string {
+  const decoded = value.toString("utf8");
+  if (!Buffer.from(decoded, "utf8").equals(value)) {
+    throw new Error("沙盒输出文件名不是有效 UTF-8");
+  }
+  return decoded;
+}
+
+function safeContainerOutputPath(root: string, absolutePath: string): string {
+  if (
+    absolutePath.length <= root.length + 1 ||
+    absolutePath.length > root.length + 1 + 512 ||
+    absolutePath.includes("\0") ||
+    absolutePath.includes("\n") ||
+    absolutePath.includes("\r") ||
+    absolutePath.includes("\\") ||
+    !absolutePath.startsWith(`${root}/`)
+  ) {
+    throw new Error("沙盒输出文件路径不正确");
+  }
+  const relativePath = path.posix.relative(root, absolutePath);
+  const normalized = path.posix.normalize(relativePath);
+  if (
+    normalized === "." ||
+    normalized === ".." ||
+    normalized.startsWith("../") ||
+    path.posix.isAbsolute(normalized)
+  ) {
+    throw new Error("沙盒输出文件路径越权");
   }
   return normalized;
 }
