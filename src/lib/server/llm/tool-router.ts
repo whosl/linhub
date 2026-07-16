@@ -240,6 +240,10 @@ function applyRuleRouting(
   }
   if (hasSheet || isSpreadsheetDirectedQuery(text)) {
     enabledBuiltins.spreadsheet = true;
+    const dataSkill = skillCandidates.find((skill) => skill.id === "skill-data-analyst");
+    if (dataSkill && (hasSheet || /数据分析|数据质量|清洗数据|制作?图表|指标趋势/iu.test(text))) {
+      selectedSkillIds.add(dataSkill.id);
+    }
     reasons.push("用户请求涉及表格文件或复杂表格分析。");
   }
   if (images.length > 0 || isVisionDirectedQuery(text)) {

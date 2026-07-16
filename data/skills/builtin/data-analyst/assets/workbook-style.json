@@ -1,0 +1,7 @@
+{
+  "header": { "fill": "#1F4E78", "fontColor": "#FFFFFF", "bold": true },
+  "body": { "bandedRows": true, "borderColor": "#D9E2F3" },
+  "numberFormats": { "integer": "0", "decimal": "0.00", "percent": "0.0%", "date": "yyyy-mm-dd" },
+  "freezeHeader": true,
+  "autoFilter": true
+}

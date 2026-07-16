@@ -2412,6 +2412,51 @@ export function buildSkillPackTools(
       }),
     });
   }
+  if (skill.id === "skill-data-analyst") {
+    Object.assign(tools, {
+      start_data_analysis: tool({
+        description:
+          "启动可刷新恢复的数据分析任务。用户要求对上传的 CSV/TSV/XLSX/XLS 做完整质量检查、统计、图表或报告时调用；本地数据默认不联网。",
+        inputSchema: z.object({
+          question: z.string().min(5).max(4_000).describe("分析问题、指标口径和期望交付"),
+          attachmentIds: z
+            .array(z.string())
+            .min(1)
+            .max(8)
+            .describe("需要分析的用户附件 id"),
+          needsExternalData: z
+            .boolean()
+            .default(false)
+            .describe("只有用户明确要求行业基准、公开数据或最新背景时才设为 true"),
+        }),
+        execute: async ({ question, attachmentIds, needsExternalData }) => {
+          if (!context) throw new Error("当前会话无法创建持久数据分析任务");
+          const { createSkillRun } = await import("@/lib/server/skill-runs");
+          const run = await createSkillRun({
+            ownerId: userId,
+            conversationId: context.conversationId,
+            messageId: context.messageId,
+            skillId: skill.id,
+            kind: "data-analysis",
+            skillName: skill.name,
+            payload: {
+              question,
+              attachmentIds,
+              needsExternalData,
+              modelId: context.modelId,
+            },
+          });
+          if (!run) throw new Error("数据分析任务创建失败");
+          return {
+            text: "数据分析已在后台启动，可在任务卡查看数据检查、沙盒分析和最终交付物。",
+            skillRunId: run.id,
+            skillName: skill.name,
+          };
+        },
+      }),
+    });
+    return tools;
+  }
   return tools;
 }
 

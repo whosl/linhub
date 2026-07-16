@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{TITLE}}</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, "PingFang SC", sans-serif; }
+    body { margin: 0; background: #f6f7fb; color: #172033; }
+    main { max-width: 960px; margin: 0 auto; padding: 40px 24px 64px; }
+    header, section { background: white; border: 1px solid #e7e9f0; border-radius: 18px; padding: 24px; margin-bottom: 18px; }
+    h1 { margin: 0 0 8px; font-size: 28px; } h2 { font-size: 18px; }
+    pre { white-space: pre-wrap; line-height: 1.7; font-family: inherit; }
+    .muted { color: #667085; } .chart { overflow-x: auto; }
+  </style>
+</head>
+<body><main>
+  <header><h1>{{TITLE}}</h1><p class="muted">LinHub Data Analyst 确定性分析预览</p></header>
+  <section><h2>数据概况</h2><pre>{{SUMMARY}}</pre></section>
+  <section><h2>质量检查</h2><pre>{{QUALITY}}</pre></section>
+  <section class="chart"><h2>快速图表</h2>{{CHART}}</section>
+</main></body></html>

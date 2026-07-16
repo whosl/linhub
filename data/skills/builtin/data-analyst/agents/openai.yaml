@@ -1,0 +1,4 @@
+interface:
+  display_name: "数据分析师"
+  short_description: "分析表格数据质量与趋势，生成图表、报告和可复现代码"
+  default_prompt: "请使用数据分析技能分析我上传的数据，并交付报告和图表。"

@@ -32,6 +32,7 @@ const TOOL_META: Record<string, { icon: React.ElementType; verb: string; label: 
   tavily_crawl: { icon: GlobeIcon, verb: "爬取", label: (a) => `爬取 ${shortUrl(String(a.url ?? ""))}` },
   tavily_research: { icon: BrainCircuitIcon, verb: "调研", label: () => "深度调研" },
   start_deep_research: { icon: BrainCircuitIcon, verb: "调研", label: () => "启动深度调研" },
+  start_data_analysis: { icon: CodeIcon, verb: "分析", label: () => "启动数据分析" },
   generate_image: { icon: PaletteIcon, verb: "生成图片", label: () => "生成图片" },
   edit_image: { icon: ImageIcon, verb: "编辑图片", label: () => "编辑图片" },
   analyze_image: { icon: ScanEyeIcon, verb: "识别图片", label: () => "识别图片" },

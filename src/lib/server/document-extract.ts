@@ -32,6 +32,14 @@ export interface SpreadsheetSheetSummary {
   stats: Record<string, { min?: number; max?: number; mean?: number; numericCount: number }>;
 }
 
+export interface SpreadsheetDataSheet {
+  name: string;
+  headers: string[];
+  rows: string[][];
+  totalRows: number;
+  truncated: boolean;
+}
+
 export interface ExtractMeta {
   pages?: number;
   slides?: number;
@@ -372,4 +380,75 @@ export async function analyzeSpreadsheetBuffer(
     return { sheets: result.meta?.sheets ?? [], text: result.text };
   }
   throw new Error("仅支持 .xlsx / .xls / .csv / .tsv");
+}
+
+/**
+ * 为受控数据分析提供结构化行数据。最多读取固定行数/单元格数，避免把超大
+ * 工作簿整体复制进沙盒或模型上下文；完整行数仍保留在元数据中。
+ */
+export async function extractSpreadsheetData(
+  name: string,
+  buffer: Buffer,
+  options: { maxRowsPerSheet?: number; maxCells?: number } = {}
+): Promise<SpreadsheetDataSheet[]> {
+  const maxRowsPerSheet = Math.min(Math.max(options.maxRowsPerSheet ?? 10_000, 1), 50_000);
+  const maxCells = Math.min(Math.max(options.maxCells ?? 250_000, 1), 1_000_000);
+  const ext = extOf(name);
+  let remainingCells = maxCells;
+
+  const normalizeMatrix = (sheetName: string, matrix: string[][]): SpreadsheetDataSheet => {
+    const rawHeaders = matrix[0] ?? [];
+    const headers = uniqueHeaders(rawHeaders);
+    const allRows = matrix.slice(1);
+    const rows: string[][] = [];
+    for (const row of allRows) {
+      if (rows.length >= maxRowsPerSheet || remainingCells <= 0) break;
+      const width = Math.min(Math.max(headers.length, row.length), remainingCells);
+      rows.push(Array.from({ length: width }, (_, index) => row[index] ?? ""));
+      remainingCells -= width;
+    }
+    return {
+      name: sheetName,
+      headers,
+      rows,
+      totalRows: allRows.length,
+      truncated: rows.length < allRows.length,
+    };
+  };
+
+  if (ext === ".csv" || ext === ".tsv") {
+    const matrix = parseDelimited(buffer.toString("utf-8"), ext === ".tsv" ? "\t" : ",");
+    return [normalizeMatrix(ext === ".tsv" ? "TSV" : "CSV", matrix)];
+  }
+  if (ext !== ".xlsx" && ext !== ".xls") {
+    throw new Error("仅支持 .xlsx / .xls / .csv / .tsv");
+  }
+
+  const workbook = new ExcelJS.Workbook();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await workbook.xlsx.load(buffer as any);
+  const sheets: SpreadsheetDataSheet[] = [];
+  workbook.eachSheet((worksheet) => {
+    const matrix: string[][] = [];
+    worksheet.eachRow({ includeEmpty: false }, (row) => {
+      const values: string[] = [];
+      row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+        while (values.length < colNumber - 1) values.push("");
+        values[colNumber - 1] = cellToString(cell.value);
+      });
+      matrix.push(values);
+    });
+    sheets.push(normalizeMatrix(worksheet.name, matrix));
+  });
+  return sheets;
+}
+
+function uniqueHeaders(values: string[]) {
+  const seen = new Map<string, number>();
+  return values.map((value, index) => {
+    const base = value.trim() || `列${index + 1}`;
+    const count = (seen.get(base) ?? 0) + 1;
+    seen.set(base, count);
+    return count === 1 ? base : `${base}_${count}`;
+  });
 }
