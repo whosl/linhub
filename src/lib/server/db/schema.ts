@@ -1,4 +1,5 @@
 import {
+  bigserial,
   boolean,
   index,
   integer,
@@ -263,6 +264,97 @@ export const skills = pgTable("skills", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
+
+// ---------- 持久 Skill Run / Subagent ----------
+
+export const skillRuns = pgTable(
+  "skill_runs",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    messageId: text("message_id").references(() => messages.id, {
+      onDelete: "set null",
+    }),
+    skillId: text("skill_id").references(() => skills.id, {
+      onDelete: "set null",
+    }),
+    kind: text("kind").notNull(),
+    skillName: text("skill_name").notNull(),
+    status: text("status", {
+      enum: ["queued", "running", "waiting_input", "completed", "failed", "cancelled"],
+    })
+      .notNull()
+      .default("queued"),
+    stage: text("stage").notNull().default("等待执行"),
+    progress: integer("progress").notNull().default(0),
+    input: jsonb("input").$type<Record<string, unknown>>().notNull().default({}),
+    result: jsonb("result").$type<Record<string, unknown>>(),
+    error: text("error"),
+    cancelRequested: boolean("cancel_requested").notNull().default(false),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at"),
+    startedAt: timestamp("started_at"),
+    completedAt: timestamp("completed_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => [
+    index("skill_run_owner_idx").on(table.ownerId, table.createdAt),
+    index("skill_run_queue_idx").on(table.status, table.createdAt),
+    index("skill_run_conversation_idx").on(table.conversationId, table.createdAt),
+  ]
+);
+
+export const skillRunSteps = pgTable(
+  "skill_run_steps",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => skillRuns.id, { onDelete: "cascade" }),
+    parentStepId: text("parent_step_id"),
+    kind: text("kind", {
+      enum: ["coordinator", "subagent", "tool", "approval", "artifact"],
+    }).notNull(),
+    label: text("label").notNull(),
+    status: text("status", {
+      enum: ["queued", "running", "completed", "failed", "cancelled", "skipped"],
+    })
+      .notNull()
+      .default("queued"),
+    progress: integer("progress").notNull().default(0),
+    sourceCount: integer("source_count").notNull().default(0),
+    attempt: integer("attempt").notNull().default(0),
+    modelId: text("model_id"),
+    input: jsonb("input").$type<Record<string, unknown>>(),
+    result: jsonb("result").$type<Record<string, unknown>>(),
+    error: text("error"),
+    startedAt: timestamp("started_at"),
+    completedAt: timestamp("completed_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => [index("skill_run_step_run_idx").on(table.runId, table.createdAt)]
+);
+
+export const skillRunEvents = pgTable(
+  "skill_run_events",
+  {
+    sequence: bigserial("sequence", { mode: "number" }).primaryKey(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => skillRuns.id, { onDelete: "cascade" }),
+    type: text("type").notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (table) => [index("skill_run_event_cursor_idx").on(table.runId, table.sequence)]
+);
 
 export const memories = pgTable(
   "memories",

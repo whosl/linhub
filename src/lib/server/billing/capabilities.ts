@@ -46,6 +46,7 @@ const CAPABILITY_LABEL: Record<BillableCapability, string> = {
   "web-search": "联网搜索",
   "spreadsheet-analysis": "表格分析",
   "tool-router": "工具路由",
+  subagent: "Subagent",
 };
 
 /** 引擎类能力的默认单价（分/次），settings 覆盖 */

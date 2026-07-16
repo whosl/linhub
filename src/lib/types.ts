@@ -210,13 +210,21 @@ export interface ToolConfigPart {
   routing?: ToolRoutingDecision;
 }
 
+/** 长任务只在消息中保存引用；详情和事件从 Skill Run API 恢复。 */
+export interface SkillRunPart {
+  type: "skill-run";
+  runId: string;
+  skillName: string;
+}
+
 export type MessagePart =
   | TextPart
   | ReasoningPart
   | ToolCallPart
   | ImagePart
   | FilePart
-  | ToolConfigPart;
+  | ToolConfigPart
+  | SkillRunPart;
 
 export interface Message {
   id: string;
@@ -426,6 +434,74 @@ export interface Skill {
   usageCount: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export type SkillRunStatus =
+  | "queued"
+  | "running"
+  | "waiting_input"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type SkillRunStepStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "skipped";
+
+export interface SkillRunStep {
+  id: string;
+  runId: string;
+  parentStepId?: string;
+  kind: "coordinator" | "subagent" | "tool" | "approval" | "artifact";
+  label: string;
+  status: SkillRunStepStatus;
+  progress: number;
+  sourceCount: number;
+  attempt: number;
+  modelId?: string;
+  error?: string;
+  startedAt?: string;
+  completedAt?: string;
+}
+
+export interface SkillRunAttachment {
+  id: string;
+  name: string;
+  url?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+}
+
+export interface SkillRunSnapshot {
+  id: string;
+  conversationId: string;
+  messageId?: string;
+  skillId?: string;
+  kind: string;
+  skillName: string;
+  status: SkillRunStatus;
+  stageLabel: string;
+  progress: number;
+  steps: SkillRunStep[];
+  resultAttachments: SkillRunAttachment[];
+  sourceCount: number;
+  error?: string;
+  startedAt?: string;
+  completedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SkillRunEvent {
+  sequence: number;
+  runId: string;
+  type: string;
+  payload: Record<string, unknown>;
+  createdAt: string;
 }
 
 // ---------- MCP ----------

@@ -23,6 +23,7 @@ import { MarkdownRenderer } from "./markdown/markdown-renderer";
 import { ReasoningBlock } from "./reasoning-block";
 import { ToolCallCard } from "./tool-call-card";
 import { ToolCallsSummary, isWebTool } from "./tool-calls-summary";
+import { SkillRunLiveCard } from "./skill-run-card";
 import { ImageLightbox } from "./image-lightbox";
 import { Tooltip } from "@/components/ui/tooltip";
 import { CopyFallbackDialog } from "@/components/ui/copy-fallback-dialog";
@@ -301,6 +302,14 @@ export function MessageItem({
         {message.parts.map((part, i) => {
           const isLast = i === message.parts.length - 1;
           switch (part.type) {
+            case "skill-run":
+              return (
+                <SkillRunLiveCard
+                  key={part.runId}
+                  runId={part.runId}
+                  skillName={part.skillName}
+                />
+              );
             case "reasoning": {
               const hasReasoningText = part.text.trim().length > 0;
               if (!hasReasoningText && !isStreaming) return null;

@@ -13,7 +13,8 @@ export type UsageCapability =
   | "vision-helper"
   | "web-search"
   | "spreadsheet-analysis"
-  | "tool-router";
+  | "tool-router"
+  | "subagent";
 
 export interface SpendReservation {
   amountCents: number;
