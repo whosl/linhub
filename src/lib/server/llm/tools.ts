@@ -28,7 +28,15 @@ import {
   analyzePptxTemplate,
   createPptxDeck,
   extractPptxAttachmentText,
+  localAttachmentPath,
 } from "@/lib/server/pptx";
+import { openMediaStream } from "@/lib/server/media";
+import { persistGeneratedAttachment } from "@/lib/server/generated-attachment";
+import {
+  runCodeSandbox,
+  type SandboxInputFile,
+  type SandboxLanguage,
+} from "@/lib/server/code-sandbox";
 
 // ---------- Tavily ----------
 
@@ -965,6 +973,8 @@ function assignVariable(
   if (op === "/=") env.set(name, toNumber(previous) / toNumber(value));
 }
 
+// 仅保留旧解释器供历史结果调试；聊天工具已强制走 gVisor，不会调用或回退到这里。
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function runJavaScriptSnippet(code: string): Promise<string> {
   assertSafeJavaScriptSnippet(code);
   const logs: string[] = [];
@@ -1056,23 +1066,156 @@ async function runJavaScriptSnippet(code: string): Promise<string> {
   return output.slice(0, CODE_OUTPUT_MAX_LENGTH);
 }
 
-export function buildCodeTools(): ToolSet {
+export function buildCodeTools(userId: string): ToolSet {
   return {
     run_code: tool({
       description:
-        "运行一小段受限 JavaScript 子集，支持数字/字符串表达式、数组字面量、变量、简单 for 循环、Math 函数、常见数组/字符串方法（map/filter/reduce/sort/join/split/slice 等）和 console.log；不支持网络、文件、import/require、eval/Function、异步任务、while、class、new 或外部依赖（含 pandas）。用户给出可支持的代码时必须尽量原样运行，不要改写成手算结果；不要用联网搜索代替代码运行。分析 Excel/CSV 表格请改用 analyze_spreadsheet。",
+        "在 gVisor 隔离沙盒中运行 Python、Node.js 或 Bash。沙盒无网络、非 root、根文件系统只读，并限制时间、内存、CPU、进程、输出大小；输入附件位于 /workspace/input，需交付的文件必须写入 /workspace/output。适用于执行、验证、调试代码和基于附件生成文件；不要用联网搜索冒充运行结果。",
       inputSchema: z.object({
         language: z
-          .enum(["javascript", "js"])
-          .describe("代码语言；当前仅支持 JavaScript"),
-        code: z.string().describe("要执行的短 JavaScript 代码"),
+          .enum(["python", "node", "javascript", "js", "bash"])
+          .describe("运行语言；javascript/js 会使用 Node.js"),
+        code: z.string().max(1_000_000).describe("要在沙盒中执行的完整代码"),
+        args: z
+          .array(z.string().max(4_096))
+          .max(32)
+          .optional()
+          .describe("传给脚本的命令行参数"),
+        inputs: z
+          .array(
+            z.object({
+              attachmentId: z.string().describe("用户拥有的附件或媒体资产 id"),
+              path: z
+                .string()
+                .max(240)
+                .optional()
+                .describe("在 /workspace/input 下的相对路径；默认使用原文件名"),
+            })
+          )
+          .max(32)
+          .optional()
+          .describe("只读输入附件"),
+        timeoutSeconds: z
+          .number()
+          .int()
+          .min(1)
+          .max(120)
+          .optional()
+          .describe("运行超时，默认 30 秒"),
       }),
-      execute: async ({ code }) => {
-        const output = await runJavaScriptSnippet(code);
-        return { text: output };
+      execute: async ({ language, code, args, inputs, timeoutSeconds }) => {
+        const sandboxLanguage: SandboxLanguage =
+          language === "python" || language === "bash" ? language : "node";
+        const inputFiles: SandboxInputFile[] = [];
+        const usedPaths = new Set<string>();
+        for (const input of inputs ?? []) {
+          const loaded = await loadOwnedSandboxInput(userId, input.attachmentId);
+          let targetPath = input.path?.trim() || sandboxInputName(loaded.name);
+          if (usedPaths.has(targetPath)) {
+            targetPath = `${input.attachmentId}-${targetPath}`;
+          }
+          usedPaths.add(targetPath);
+          inputFiles.push({ path: targetPath, content: loaded.buffer });
+        }
+
+        const result = await runCodeSandbox({
+          language: sandboxLanguage,
+          code,
+          args,
+          inputFiles,
+          limits: { timeoutMs: (timeoutSeconds ?? 30) * 1_000 },
+        });
+        const attachments = [];
+        for (const output of result.outputFiles) {
+          const attachment = await persistGeneratedAttachment({
+            ownerId: userId,
+            name: output.path,
+            mimeType: sandboxOutputMimeType(output.path),
+            bytes: output.data,
+          });
+          attachments.push({
+            id: attachment.id,
+            name: attachment.name,
+            mimeType: attachment.mimeType,
+            size: attachment.sizeBytes,
+            url: attachment.url,
+          });
+        }
+
+        const summary = [
+          `语言：${sandboxLanguage}`,
+          `退出码：${result.exitCode ?? "无"}`,
+          `耗时：${result.durationMs} ms`,
+          result.timedOut ? "状态：运行超时" : undefined,
+          result.stdoutStderrLimitExceeded ? "状态：标准输出超过限制" : undefined,
+          result.outputLimitExceeded ? "状态：部分输出文件超过限制，未保存" : undefined,
+          result.stdout ? `stdout:\n${result.stdout}` : "stdout：（无输出）",
+          result.stderr ? `stderr:\n${result.stderr}` : undefined,
+        ].filter((value): value is string => Boolean(value));
+        return {
+          text: summary.join("\n"),
+          attachments,
+          exitCode: result.exitCode,
+          durationMs: result.durationMs,
+          timedOut: result.timedOut,
+        };
       },
     }),
   };
+}
+
+async function loadOwnedSandboxInput(userId: string, attachmentId: string) {
+  const media = await openMediaStream(attachmentId, userId);
+  if (media) return { name: media.row.name, buffer: media.buffer };
+
+  const [attachment] = await db
+    .select({
+      name: schema.attachments.name,
+      storagePath: schema.attachments.storagePath,
+    })
+    .from(schema.attachments)
+    .where(
+      and(
+        eq(schema.attachments.id, attachmentId),
+        eq(schema.attachments.ownerId, userId)
+      )
+    )
+    .limit(1);
+  if (!attachment) throw new Error("输入附件不存在或无权访问");
+
+  if (attachment.storagePath.startsWith("/api/media/")) {
+    const mediaId = attachment.storagePath.replace(/^\/api\/media\//u, "");
+    const storedMedia = await openMediaStream(mediaId, userId);
+    if (storedMedia) return { name: attachment.name, buffer: storedMedia.buffer };
+  }
+  const filePath = localAttachmentPath(attachment.storagePath);
+  if (!filePath) throw new Error("输入附件文件不可读取");
+  const { readFile } = await import("node:fs/promises");
+  return { name: attachment.name, buffer: await readFile(filePath) };
+}
+
+function sandboxInputName(value: string) {
+  const name = value.replace(/\\/gu, "/").split("/").pop()?.trim() || "input.bin";
+  return name.replace(/[\u0000\n\r,]/gu, "-").slice(0, 200) || "input.bin";
+}
+
+function sandboxOutputMimeType(name: string) {
+  const extension = name.slice(name.lastIndexOf(".")).toLowerCase();
+  const byExtension: Record<string, string> = {
+    ".csv": "text/csv",
+    ".html": "text/html",
+    ".json": "application/json",
+    ".md": "text/markdown",
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".svg": "image/svg+xml",
+    ".txt": "text/plain",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".zip": "application/zip",
+  };
+  return byExtension[extension] ?? "application/octet-stream";
 }
 
 // ---------- 图像生成 / 编辑（gpt-image-2） ----------

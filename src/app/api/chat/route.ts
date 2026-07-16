@@ -2425,7 +2425,7 @@ async function streamAssistant(opts: {
     !isProjectConversation || effectiveKnowledgeBaseIds.length > 0;
   if (toggles?.codeRunner) {
     system +=
-      "\n\n工具选择规则：当用户要求运行、执行、验证代码，或明确要求调用代码运行工具时，必须先调用 run_code，等待工具结果后再给结论；不要在工具返回前猜测、手算、复述旧结果或用 web_search 代替本地代码运行。对 Excel/CSV 等表格的复杂聚合、筛选、统计，优先调用 analyze_spreadsheet；run_code 仅支持受限 JavaScript，不能 import pandas。";
+      "\n\n工具选择规则：当用户要求运行、执行、验证代码，或明确要求调用代码运行工具时，必须先调用 run_code，等待工具结果后再给结论；不要在工具返回前猜测、手算、复述旧结果或用 web_search 代替本地代码运行。run_code 在无网络的 gVisor 沙盒中支持 Python、Node.js 和 Bash；输入附件位于 /workspace/input，需交付的文件写入 /workspace/output。对 Excel/CSV 等表格先用 analyze_spreadsheet 获取结构，再用 run_code 完成复杂分析。";
   } else if (shouldPrioritizeCodeRunner) {
     system +=
       "\n\n代码运行规则：本轮用户要求运行、执行、验证代码，或明确要求调用代码运行工具，但用户已关闭代码运行。不要用 web_search、知识库或手算结果冒充运行结果；请说明当前无法调用代码运行工具，并提示用户开启代码运行后重试。可以给出代码片段供用户自行运行，但必须明确它尚未在 LinHub 中执行。";
@@ -2460,7 +2460,7 @@ async function streamAssistant(opts: {
     system +=
       "\n\n联网搜索规则：优先用少量高质量来源完成核查；一旦已有足够证据，必须停止继续调用搜索/读取工具并直接给出最终回答。";
   }
-  if (enabledBuiltins.codeRunner) Object.assign(tools, buildCodeTools());
+  if (enabledBuiltins.codeRunner) Object.assign(tools, buildCodeTools(userId));
   if (enabledBuiltins.spreadsheet) Object.assign(tools, buildSpreadsheetTools(userId));
   if (imageGenerationEnabled)
     Object.assign(

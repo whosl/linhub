@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "skill-code-lab",
+  "display": {
+    "name": "代码实验室",
+    "emoji": "🧪"
+  },
+  "routing": {
+    "positiveTriggers": ["运行代码", "执行脚本", "验证代码", "代码沙盒", "Code Lab"],
+    "negativeTriggers": ["只解释代码", "只写代码", "联网安装依赖"]
+  },
+  "capabilities": {
+    "required": ["sandbox.run"],
+    "requiredTools": ["run_code"]
+  },
+  "workflow": {
+    "stages": ["准备输入", "隔离执行", "检查结果", "交付文件"],
+    "supportsCancel": false,
+    "supportsRetry": true,
+    "supportsResume": false
+  }
+}
