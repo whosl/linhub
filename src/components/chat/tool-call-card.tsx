@@ -24,6 +24,7 @@ import { cn } from "@/lib/utils";
 import { formatToolPreviewLabel } from "@/lib/chat-text";
 import type { ToolCallPart } from "@/lib/types";
 import { SkillRunLiveCard } from "./skill-run-card";
+import { PptStudioBriefCard } from "./ppt-studio-brief-card";
 
 const TOOL_META: Record<string, { icon: React.ElementType; verb: string; label: (args: Record<string, unknown>) => string }> = {
   web_search: { icon: SearchIcon, verb: "搜索", label: (a) => `搜索「${a.query ?? ""}」` },
@@ -33,6 +34,7 @@ const TOOL_META: Record<string, { icon: React.ElementType; verb: string; label: 
   tavily_research: { icon: BrainCircuitIcon, verb: "调研", label: () => "深度调研" },
   start_deep_research: { icon: BrainCircuitIcon, verb: "调研", label: () => "启动深度调研" },
   start_data_analysis: { icon: CodeIcon, verb: "分析", label: () => "启动数据分析" },
+  start_ppt_studio: { icon: FileTextIcon, verb: "制作", label: () => "打开 PPT 工作室" },
   generate_image: { icon: PaletteIcon, verb: "生成图片", label: () => "生成图片" },
   edit_image: { icon: ImageIcon, verb: "编辑图片", label: () => "编辑图片" },
   analyze_image: { icon: ScanEyeIcon, verb: "识别图片", label: () => "识别图片" },
@@ -104,7 +106,18 @@ export function ToolCallCard({
 
   // 持久 Skill Run 和 Artifact 使用结构化交付卡，不依赖模型手写链接。
   if (skillRunId && part.state === "success") {
-    return <SkillRunLiveCard runId={skillRunId} skillName={part.result?.skillName ?? "Skill"} />;
+    if (part.toolName === "start_ppt_studio") {
+      return (
+        <PptStudioBriefCard
+          runId={skillRunId}
+          skillName={part.result?.skillName ?? "PPT 工作室"}
+          initialTopic={typeof part.args.topic === "string" ? part.args.topic : ""}
+        />
+      );
+    }
+    return (
+      <SkillRunLiveCard runId={skillRunId} skillName={part.result?.skillName ?? "Skill"} />
+    );
   }
   if (artifactId && part.state === "success") {
     return (

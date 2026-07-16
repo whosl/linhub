@@ -2457,6 +2457,39 @@ export function buildSkillPackTools(
     });
     return tools;
   }
+  if (skill.id === "skill-ppt-studio") {
+    Object.assign(tools, {
+      start_ppt_studio: tool({
+        description:
+          "在信息流中打开 PPT 工作室需求卡。用户要求制作或生成 PPT/演示文稿时先调用，让用户填写受众、页数、主题、媒体偏好、语言和输出格式；提交前不会渲染。",
+        inputSchema: z.object({
+          topic: z.string().min(2).max(200).describe("从用户请求提取的演示主题"),
+        }),
+        execute: async ({ topic }) => {
+          if (!context) throw new Error("当前会话无法创建 PPT 工作室任务");
+          const { createSkillRun } = await import("@/lib/server/skill-runs");
+          const run = await createSkillRun({
+            ownerId: userId,
+            conversationId: context.conversationId,
+            messageId: context.messageId,
+            skillId: skill.id,
+            kind: "ppt-studio",
+            skillName: skill.name,
+            status: "waiting_input",
+            stage: "等待填写 PPT 需求",
+            payload: { topic, modelId: context.modelId },
+          });
+          if (!run) throw new Error("PPT 工作室任务创建失败");
+          return {
+            text: "PPT 工作室已打开，请在信息流卡片中填写需求；提交后才会开始生成。",
+            skillRunId: run.id,
+            skillName: skill.name,
+          };
+        },
+      }),
+    });
+    return tools;
+  }
   return tools;
 }
 

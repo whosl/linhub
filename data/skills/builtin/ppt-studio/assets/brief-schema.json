@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LinHub PPT Studio Brief",
+  "type": "object",
+  "required": ["topic", "audience", "pageCount", "theme", "mediaPreference", "language", "outputFormat"],
+  "properties": {
+    "topic": { "type": "string", "minLength": 2, "maxLength": 200 },
+    "audience": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "pageCount": { "type": "integer", "minimum": 3, "maximum": 30 },
+    "theme": { "enum": ["theme01", "theme02", "theme03", "theme04", "theme05", "theme06", "theme07", "theme08", "theme09", "theme10", "theme11", "theme12"] },
+    "mediaPreference": { "enum": ["auto", "image-heavy", "text-first", "no-media"] },
+    "language": { "enum": ["zh", "en"] },
+    "outputFormat": { "enum": ["pptx", "html"] },
+    "additionalInstructions": { "type": "string", "maxLength": 1000 }
+  },
+  "additionalProperties": false
+}

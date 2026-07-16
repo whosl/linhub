@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "skill-ppt-studio",
+  "display": {
+    "name": "PPT 工作室",
+    "emoji": "🎞️"
+  },
+  "routing": {
+    "positiveTriggers": ["制作 PPT", "生成演示文稿", "做幻灯片", "设计路演", "改写 PPT"],
+    "negativeTriggers": ["总结现有 PPT", "提取 PPT 文字", "只分析模板"]
+  },
+  "capabilities": {
+    "required": ["ppt.dashi", "skill-run.input"],
+    "requiredTools": ["start_ppt_studio"]
+  },
+  "workflow": {
+    "stages": ["填写需求", "生成大纲", "匹配版式", "填写内容", "校验渲染"],
+    "supportsCancel": true,
+    "supportsRetry": true,
+    "supportsResume": true,
+    "requiresInput": true
+  }
+}

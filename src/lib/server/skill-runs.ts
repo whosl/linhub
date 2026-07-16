@@ -80,6 +80,8 @@ export async function createSkillRun(input: {
   kind: string;
   skillName: string;
   payload: Record<string, unknown>;
+  status?: SkillRunStatus;
+  stage?: string;
 }) {
   await ensureSkillRunTables();
   const id = `run-${uid()}`;
@@ -91,10 +93,55 @@ export async function createSkillRun(input: {
     skillId: input.skillId,
     kind: input.kind,
     skillName: input.skillName,
+    status: input.status ?? "queued",
+    stage: input.stage ?? (input.status === "waiting_input" ? "等待填写需求" : "等待执行"),
     input: input.payload,
   });
   await appendSkillRunEvent(id, "run-created", { skillName: input.skillName });
   return getSkillRunSnapshot(id, input.ownerId);
+}
+
+export async function submitSkillRunInput(
+  runId: string,
+  ownerId: string,
+  input: Record<string, unknown>
+) {
+  await ensureSkillRunTables();
+  const [run] = await db
+    .select({ kind: schema.skillRuns.kind, input: schema.skillRuns.input })
+    .from(schema.skillRuns)
+    .where(
+      and(
+        eq(schema.skillRuns.id, runId),
+        eq(schema.skillRuns.ownerId, ownerId),
+        eq(schema.skillRuns.status, "waiting_input")
+      )
+    )
+    .limit(1);
+  if (!run) return null;
+  if (run.kind !== "ppt-studio") return null;
+  const [updated] = await db
+    .update(schema.skillRuns)
+    .set({
+      input: { ...run.input, ...input },
+      status: "queued",
+      stage: "等待生成",
+      progress: 0,
+      error: null,
+      cancelRequested: false,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.skillRuns.id, runId),
+        eq(schema.skillRuns.ownerId, ownerId),
+        eq(schema.skillRuns.status, "waiting_input")
+      )
+    )
+    .returning({ id: schema.skillRuns.id });
+  if (!updated) return null;
+  await appendSkillRunEvent(runId, "input-submitted", { kind: run.kind });
+  return getSkillRunSnapshot(runId, ownerId);
 }
 
 export async function appendSkillRunEvent(
@@ -191,6 +238,36 @@ export async function updateSkillRun(
 
 export async function requestSkillRunCancellation(runId: string, ownerId: string) {
   await ensureSkillRunTables();
+  const [existing] = await db
+    .select({ status: schema.skillRuns.status })
+    .from(schema.skillRuns)
+    .where(and(eq(schema.skillRuns.id, runId), eq(schema.skillRuns.ownerId, ownerId)))
+    .limit(1);
+  if (!existing) return false;
+  if (existing.status === "waiting_input") {
+    const [cancelled] = await db
+      .update(schema.skillRuns)
+      .set({
+        status: "cancelled",
+        stage: "已停止",
+        progress: 100,
+        cancelRequested: true,
+        completedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.skillRuns.id, runId),
+          eq(schema.skillRuns.ownerId, ownerId),
+          eq(schema.skillRuns.status, "waiting_input")
+        )
+      )
+      .returning({ id: schema.skillRuns.id });
+    if (cancelled) {
+      await appendSkillRunEvent(runId, "cancel-requested");
+      return true;
+    }
+  }
   const [run] = await db
     .update(schema.skillRuns)
     .set({ cancelRequested: true, stage: "正在停止", updatedAt: new Date() })
@@ -255,6 +332,7 @@ export async function getSkillRunSnapshot(runId: string, ownerId?: string) {
     status: run.status,
     stageLabel: run.stage,
     progress: run.progress,
+    input: run.input,
     steps: steps.map((step) => ({
       id: step.id,
       runId: step.runId,

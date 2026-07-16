@@ -261,7 +261,9 @@ function applyRuleRouting(
   if (hasPptx || isPptxDirectedQuery(text)) {
     enabledBuiltins.pptx = true;
     enabledBuiltins.artifacts = true;
-    const pptxSkill = skillCandidates.find((skill) => skill.id === "skill-pptx-native");
+    const wantsPptCreation = /制作|生成|创建|设计|重做|改写|做一?份|create|generate|build/iu.test(text);
+    const preferredPptSkillId = wantsPptCreation ? "skill-ppt-studio" : "skill-pptx-native";
+    const pptxSkill = skillCandidates.find((skill) => skill.id === preferredPptSkillId);
     if (pptxSkill) selectedSkillIds.add(pptxSkill.id);
     reasons.push("用户请求涉及 PPTX 文件或演示文稿任务。");
   }

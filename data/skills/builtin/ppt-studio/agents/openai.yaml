@@ -1,0 +1,4 @@
+interface:
+  display_name: "PPT 工作室"
+  short_description: "先在信息流填写演示需求，再用 Dashi 版式生成可编辑 PPTX 或 HTML"
+  default_prompt: "请打开 PPT 工作室，先让我填写演示文稿需求。"

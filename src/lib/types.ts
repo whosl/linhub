@@ -489,6 +489,7 @@ export interface SkillRunSnapshot {
   status: SkillRunStatus;
   stageLabel: string;
   progress: number;
+  input: Record<string, unknown>;
   steps: SkillRunStep[];
   resultAttachments: SkillRunAttachment[];
   sourceCount: number;

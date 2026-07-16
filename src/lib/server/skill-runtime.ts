@@ -17,6 +17,7 @@ import type {
 type SkillRow = typeof schema.skills.$inferSelect;
 
 const PPTX_SKILL_ID = "skill-pptx-native";
+const DASHI_PPT_SKILL_ID = "skill-dashi-ppt";
 const SCRIPT_OUTPUT_LIMIT = 8_000;
 const DEFAULT_SCRIPT_TIMEOUT_MS = 30_000;
 
@@ -150,7 +151,117 @@ async function seedNativeSkillPacks() {
     path.resolve(process.cwd(), "data", "skills", "builtin"),
     owner.id
   );
+  await seedDashiPptSkill(owner.id);
   return true;
+}
+
+async function seedDashiPptSkill(ownerId: string) {
+  const packagePath = path.resolve(process.cwd(), "data", "skills", "dashi-ppt");
+  const upstreamInstructions = await readFile(path.join(packagePath, "SKILL.md"), "utf-8").catch(
+    () => null
+  );
+  if (!upstreamInstructions) return;
+
+  const instructions = [
+    "你是 LinHub 中的 Dashi PPT 演示文稿助手，使用 Dashi PPT v0.4.0 的主题和版式运行时生成演示文稿。",
+    "开始制作前确认主题风格和是否需要图片/视频；只有用户明确说全部由你决定时才自行选择。默认约 10 页，至少 8 页。",
+    "先按每页的信息角色调用 dashi_query_layouts 查询候选版式。复杂字段、数组、图表或媒体版式必须再调用 dashi_inspect_layouts，严格按返回的 copyKeys、fillPlan、propShapes 和长度预算填写 props。",
+    "一个 deck 只能从当前主题前 5 个版式中选择 1 个封面；正文使用第 6 页之后的版式；所有 slides.layout 必须唯一。",
+    "每页只表达一个主要信息角色，所有可见模板文案都必须替换成用户主题内容，不得残留示例文案。",
+    "默认输出 PPTX；用户明确要求浏览器可编辑 HTML ��，将 format 设为 html。最后调用 dashi_render_deck 完成安全修正、规范校验、渲染和导出。",
+    "不要调用 run_skill_script，也不要声称已经生成文件，除非 dashi_render_deck 返回了附件。",
+    "可选主题：theme01 轻拟态、theme02 炫光紫绿、theme03 深浅代码、theme04 玻璃糖果、theme05 色谱图表、theme06 深色图谱、theme07 冷白调研、theme08 黑金实验、theme09 深蓝杂志、theme10 金色指数、theme11 高能增长、theme12 声波霓虹。普通自动选择不使用 theme10。",
+  ].join("\n");
+
+  await db
+    .insert(schema.skills)
+    .values({
+      id: DASHI_PPT_SKILL_ID,
+      ownerId,
+      name: "Dashi PPT 渲染运行时",
+      emoji: "🎞️",
+      description:
+        "PPT 工作室使用的 Dashi v0.4.0 后端渲染运行时，不作为独立用户入口。来源：chuspeeism/dashi-ppt-skill。",
+      systemPrompt: instructions,
+      kind: "pack",
+      version: "0.4.0",
+      source: "chuspeeism/dashi-ppt-skill",
+      manifest: {
+        id: "dashi-ppt",
+        title: "Dashi PPT",
+        version: "0.4.0",
+        license: "AGPL-3.0",
+        sourceUrl: "https://github.com/chuspeeism/dashi-ppt-skill",
+        tags: ["ppt", "pptx", "presentation", "html-deck", "skill-pack"],
+      },
+      packagePath,
+      requiredTools: [
+        "list_skill_resources",
+        "read_skill_resource",
+        "dashi_query_layouts",
+        "dashi_inspect_layouts",
+        "dashi_render_deck",
+      ],
+      resourceRefs: [
+        {
+          id: "dashi-ppt-upstream-skill",
+          name: "Dashi PPT 上游技能说明",
+          kind: "instruction",
+          description: "上游 v0.4.0 SKILL.md；包含主题、版式、字段和生成工作流。",
+          mimeType: "text/markdown",
+          size: upstreamInstructions.length,
+          content: upstreamInstructions.slice(0, 50_000),
+        },
+      ],
+      scriptPolicy: { enabled: false },
+      reviewStatus: "approved",
+      visibility: "private",
+    })
+    .onConflictDoUpdate({
+      target: schema.skills.id,
+      set: {
+        name: "Dashi PPT 渲染运行时",
+        emoji: "🎞️",
+        description:
+          "PPT 工作室使用的 Dashi v0.4.0 后端渲染运行时，不作为独立用户入口。来源：chuspeeism/dashi-ppt-skill。",
+        systemPrompt: instructions,
+        kind: "pack",
+        version: "0.4.0",
+        source: "chuspeeism/dashi-ppt-skill",
+        manifest: {
+          id: "dashi-ppt",
+          title: "Dashi PPT",
+          version: "0.4.0",
+          license: "AGPL-3.0",
+          sourceUrl: "https://github.com/chuspeeism/dashi-ppt-skill",
+          tags: ["ppt", "pptx", "presentation", "html-deck", "skill-pack"],
+        },
+        packagePath,
+        requiredTools: [
+          "list_skill_resources",
+          "read_skill_resource",
+          "dashi_query_layouts",
+          "dashi_inspect_layouts",
+          "dashi_render_deck",
+        ],
+        resourceRefs: [
+          {
+            id: "dashi-ppt-upstream-skill",
+            name: "Dashi PPT 上游技能说明",
+            kind: "instruction",
+            description: "上游 v0.4.0 SKILL.md；包含主题、版式、字段和生成工作流。",
+            mimeType: "text/markdown",
+            size: upstreamInstructions.length,
+            content: upstreamInstructions.slice(0, 50_000),
+          },
+        ],
+        scriptPolicy: { enabled: false },
+        reviewStatus: "approved",
+        visibility: "private",
+        publishedAt: null,
+        updatedAt: new Date(),
+      },
+    });
 }
 
 export function composeSkillPackPrompt(skill: SkillRow) {
