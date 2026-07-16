@@ -128,7 +128,7 @@ else
     --user=65532:65532 \
     --cap-drop=ALL \
     --security-opt=no-new-privileges:true \
-    --pids-limit=16 \
+    --pids-limit=64 \
     --memory=64m \
     --memory-swap=64m \
     --cpus=0.25 \
