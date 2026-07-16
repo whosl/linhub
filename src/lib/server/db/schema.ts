@@ -207,12 +207,18 @@ export const skills = pgTable("skills", {
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
+  /** Agent Skills 标准 name（目录 slug）；旧提示词 Skill 可为空。 */
+  slug: text("slug"),
   emoji: text("emoji").notNull().default("🤖"),
   description: text("description").notNull().default(""),
   systemPrompt: text("system_prompt").notNull(),
   kind: text("kind", { enum: ["prompt", "pack"] }).notNull().default("prompt"),
   version: text("version").notNull().default("1.0.0"),
   source: text("source").notNull().default("user"),
+  license: text("license"),
+  compatibility: text("compatibility"),
+  allowedTools: jsonb("allowed_tools").$type<string[]>().notNull().default([]),
+  packageDigest: text("package_digest"),
   manifest: jsonb("manifest").$type<Record<string, unknown>>().notNull().default({}),
   packagePath: text("package_path"),
   requiredTools: jsonb("required_tools").$type<string[]>().notNull().default([]),

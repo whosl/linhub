@@ -399,12 +399,18 @@ export interface Skill {
   id: string;
   ownerId: string;
   name: string;
+  /** Agent Skills 标准 name，与 Skill 包目录名一致。 */
+  slug?: string;
   emoji: string;
   description: string;
   systemPrompt: string;
   kind: SkillKind;
   version: string;
   source?: string;
+  license?: string;
+  compatibility?: string;
+  allowedTools?: string[];
+  packageDigest?: string;
   manifest?: Record<string, unknown>;
   packagePath?: string;
   requiredTools: ToolName[];

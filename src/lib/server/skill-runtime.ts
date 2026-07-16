@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { sql } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
+import { installBuiltInAgentSkills } from "@/lib/server/skills/agent-skill-registry";
 import type {
   ChatToolToggles,
   SkillResourceRef,
@@ -36,8 +37,13 @@ async function ensureSkillRuntimeColumns() {
   await db.execute(sql`
     alter table if exists skills
       add column if not exists kind text not null default 'prompt',
+      add column if not exists slug text,
       add column if not exists version text not null default '1.0.0',
       add column if not exists source text not null default 'user',
+      add column if not exists license text,
+      add column if not exists compatibility text,
+      add column if not exists allowed_tools jsonb not null default '[]'::jsonb,
+      add column if not exists package_digest text,
       add column if not exists manifest jsonb not null default '{}'::jsonb,
       add column if not exists package_path text,
       add column if not exists required_tools jsonb not null default '[]'::jsonb,
@@ -140,6 +146,10 @@ async function seedNativeSkillPacks() {
         updatedAt: new Date(),
       },
     });
+  await installBuiltInAgentSkills(
+    path.resolve(process.cwd(), "data", "skills", "builtin"),
+    owner.id
+  );
   return true;
 }
 
@@ -236,7 +246,8 @@ export async function readSkillResource(skill: SkillRow, resourceId: string) {
   if (!resource.path || !skill.packagePath || skill.packagePath.startsWith("builtin://")) {
     throw new Error("该技能资源没有可读取的文件内容");
   }
-  const root = path.resolve(skill.packagePath, "resources");
+  // Agent Skills 资源路径相对 Skill 根目录，兼容 references/、assets/ 等标准目录。
+  const root = path.resolve(skill.packagePath);
   const target = path.resolve(root, resource.path);
   if (!target.startsWith(root + path.sep) && target !== root) {
     throw new Error("技能资源路径越权，已拒绝读取");
