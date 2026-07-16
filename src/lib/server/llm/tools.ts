@@ -2208,8 +2208,12 @@ export function buildKnowledgeTool(userId: string, kbIds: string[]): ToolSet {
 
 // ---------- Skill Pack 内部工具 ----------
 
-export function buildSkillPackTools(skill: typeof schema.skills.$inferSelect): ToolSet {
-  return {
+export function buildSkillPackTools(
+  skill: typeof schema.skills.$inferSelect,
+  userId: string,
+  context?: { conversationId: string; messageId: string; modelId: string }
+): ToolSet {
+  const tools: ToolSet = {
     list_skill_resources: tool({
       description: "列出当前 Skill Pack 附带的说明、参考材料、模板或资源清单。",
       inputSchema: z.object({}),
@@ -2220,20 +2224,14 @@ export function buildSkillPackTools(skill: typeof schema.skills.$inferSelect): T
     }),
     read_skill_resource: tool({
       description: "读取当前 Skill Pack 的单个资源内容。只能读取当前技能声明的资源。",
-      inputSchema: z.object({
-        resourceId: z.string().describe("资源 id"),
-      }),
+      inputSchema: z.object({ resourceId: z.string().describe("资源 id") }),
       execute: async ({ resourceId }) => {
         const resource = await readSkillResource(skill, resourceId);
-        return {
-          text: `资源「${resource.name}」：\n${resource.text}`,
-          resource,
-        };
+        return { text: `资源「${resource.name}」：\n${resource.text}`, resource };
       },
     }),
     run_skill_script: tool({
-      description:
-        "运行当前 Skill Pack 审核通过且显式允许的脚本。普通用户技能和未审核技能不能使用。",
+      description: "运行当前 Skill Pack 审核通过且显式允许的脚本。普通用户技能和未审核技能不能使用。",
       inputSchema: z.object({
         script: z.string().describe("脚本文件名，必须在技能清单中声明"),
         input: z.record(z.string(), z.unknown()).optional().describe("传给脚本的 JSON 输入"),
@@ -2241,6 +2239,37 @@ export function buildSkillPackTools(skill: typeof schema.skills.$inferSelect): T
       execute: async ({ script, input }) => runSkillScript(skill, script, input ?? {}),
     }),
   };
+  if (skill.id === "skill-deep-research") {
+    Object.assign(tools, {
+      start_deep_research: tool({
+        description: "启动可刷新恢复的深度调研任务。用户要求深度调研、行业研究、竞品研究、尽调或带引用报告时必须调用；任务会在后台并行运行。",
+        inputSchema: z.object({
+          query: z.string().min(5).max(4_000).describe("完整研究问题和范围"),
+          mode: z.enum(["quick", "deep"]).default("deep"),
+        }),
+        execute: async ({ query, mode }) => {
+          if (!context) throw new Error("当前会话无法创建持久调研任务");
+          const { createSkillRun } = await import("@/lib/server/skill-runs");
+          const run = await createSkillRun({
+            ownerId: userId,
+            conversationId: context.conversationId,
+            messageId: context.messageId,
+            skillId: skill.id,
+            kind: "deep-research",
+            skillName: skill.name,
+            payload: { query, mode, modelId: context.modelId },
+          });
+          if (!run) throw new Error("深度调研任务创建失败");
+          return {
+            text: "深度调研已在后台启动，可在任务卡查看并行子任务、来源和最终报告。",
+            skillRunId: run.id,
+            skillName: skill.name,
+          };
+        },
+      }),
+    });
+  }
+  return tools;
 }
 
 // ---------- PPTX ----------

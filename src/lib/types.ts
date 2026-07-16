@@ -152,6 +152,9 @@ export interface ToolResultSummary {
   chunks?: KnowledgeChunkRef[];
   /** 通用文本结果 */
   text?: string;
+  /** 持久 Skill Run 结果卡。 */
+  skillRunId?: string;
+  skillName?: string;
   /** 关联 artifact */
   artifactId?: string;
   /** Artifact 展示标题 */

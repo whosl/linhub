@@ -2485,7 +2485,14 @@ async function streamAssistant(opts: {
   }
   const toolSkill = activeSkill?.kind === "pack" ? activeSkill : routedSkill;
   if (toolSkill?.kind === "pack") {
-    Object.assign(tools, buildSkillPackTools(toolSkill));
+    Object.assign(
+      tools,
+      buildSkillPackTools(toolSkill, userId, {
+        conversationId,
+        messageId: assistantId,
+        modelId: effectiveModelId,
+      })
+    );
     const skillTools = new Set([
       ...((toolSkill.enabledTools ?? []) as string[]),
       ...((toolSkill.requiredTools ?? []) as string[]),

@@ -27,6 +27,13 @@ export async function POST(
     return Response.json({ ok: true, status: "cancelled" });
   }
   try {
+    if (run.kind === "deep-research") {
+      const { executeDeepResearchRun } = await import(
+        "@/lib/server/research/deep-research"
+      );
+      await executeDeepResearchRun(run);
+      return Response.json({ ok: true });
+    }
     if (run.kind !== "subagent-batch") {
       throw new Error(`尚未注册 Skill 执行器：${run.kind}`);
     }

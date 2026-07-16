@@ -23,6 +23,7 @@ import {
 import { cn } from "@/lib/utils";
 import { formatToolPreviewLabel } from "@/lib/chat-text";
 import type { ToolCallPart } from "@/lib/types";
+import { SkillRunLiveCard } from "./skill-run-card";
 
 const TOOL_META: Record<string, { icon: React.ElementType; verb: string; label: (args: Record<string, unknown>) => string }> = {
   web_search: { icon: SearchIcon, verb: "搜索", label: (a) => `搜索「${a.query ?? ""}」` },
@@ -30,6 +31,7 @@ const TOOL_META: Record<string, { icon: React.ElementType; verb: string; label: 
   tavily_extract: { icon: GlobeIcon, verb: "提取", label: (a) => `提取 ${shortUrl(String(a.url ?? ""))}` },
   tavily_crawl: { icon: GlobeIcon, verb: "爬取", label: (a) => `爬取 ${shortUrl(String(a.url ?? ""))}` },
   tavily_research: { icon: BrainCircuitIcon, verb: "调研", label: () => "深度调研" },
+  start_deep_research: { icon: BrainCircuitIcon, verb: "调研", label: () => "启动深度调研" },
   generate_image: { icon: PaletteIcon, verb: "生成图片", label: () => "生成图片" },
   edit_image: { icon: ImageIcon, verb: "编辑图片", label: () => "编辑图片" },
   analyze_image: { icon: ScanEyeIcon, verb: "识别图片", label: () => "识别图片" },
@@ -84,6 +86,7 @@ export function ToolCallCard({
   };
   const Icon = meta.icon;
   const artifactId = part.result?.artifactId;
+  const skillRunId = part.result?.skillRunId;
   const artifactTitle = part.result?.artifactTitle ?? part.args.title ?? "作品";
   const hasDetail =
     !!part.result?.sources?.length ||
@@ -98,7 +101,10 @@ export function ToolCallCard({
   const isGenerating = part.state === "running" && part.inputPreview != null;
   const previewText = isGenerating ? extractPreviewValue(part.inputPreview!) : null;
 
-  // Artifact 卡片：点击打开右侧面板
+  // 持久 Skill Run 和 Artifact 使用结构化交付卡，不依赖模型手写链接。
+  if (skillRunId && part.state === "success") {
+    return <SkillRunLiveCard runId={skillRunId} skillName={part.result?.skillName ?? "Skill"} />;
+  }
   if (artifactId && part.state === "success") {
     return (
       <button

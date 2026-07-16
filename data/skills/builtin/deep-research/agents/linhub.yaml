@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "skill-deep-research",
+  "display": {
+    "name": "深度调研",
+    "emoji": "🔬"
+  },
+  "routing": {
+    "positiveTriggers": ["深度调研", "行业研究", "竞品研究", "尽调", "带引用报告"],
+    "negativeTriggers": ["普通闲聊", "简单事实", "纯改写"]
+  },
+  "capabilities": {
+    "required": ["search.cn", "search.global", "read.web"],
+    "requiredTools": ["web_search", "web_read", "web_crawl"]
+  },
+  "workflow": {
+    "stages": ["制定计划", "并行调研", "读取来源", "交叉核验", "生成报告"],
+    "supportsCancel": true,
+    "supportsRetry": true,
+    "supportsResume": true
+  }
+}
