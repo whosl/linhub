@@ -17,6 +17,11 @@ import {
   updateSkillRun,
   upsertSkillRunStep,
 } from "@/lib/server/skill-runs";
+import {
+  formatDashiContractIssues,
+  selectDashiInspections,
+  validateDashiProps,
+} from "@/lib/server/ppt-studio/dashi-contract";
 
 const SlideRoleSchema = z.enum([
   "cover",
@@ -162,40 +167,22 @@ export async function executePptStudioRun(run: typeof schema.skillRuns.$inferSel
     for (let start = 0; start < outline.length; start += 5) {
       const chunkOutline = outline.slice(start, start + 5);
       const chunkLayouts = layouts.slice(start, start + 5);
-      const chunkInspections = inspectionsForLayouts(inspections, chunkLayouts);
-      const filled = await generateObject({
+      const chunkInspections = selectDashiInspections(inspections, chunkLayouts);
+      const filled = await generateDashiSlideChunk({
         model: resolved.model,
-        schema: z.object({
-          slides: z
-            .array(
-              z.object({
-                propsJson: z
-                  .string()
-                  .min(2)
-                  .max(50_000)
-                  .describe("当前页面 props 的严格 JSON 对象字符串"),
-              })
-            )
-            .length(chunkOutline.length),
-        }),
-        prompt: [
-          "根据页面大纲和 Dashi 字段契约填写每页 propsJson。每个 propsJson 必须是可被 JSON.parse 解析的对象字符串，并与指定 layouts 按下标一一对应。",
-          "只写 fillPlan/propShapes 允许的文案、数组和公开 count 字段，不写样式字段。",
-          "严格遵守 maxChars，所有可见示例文案都要替换。数字和事实只能来自用户主题与补充要求，不得编造来源。",
-          `语言：${brief.language}。`,
-          `页面大纲：${JSON.stringify(chunkOutline)}`,
-          `指定 layouts：${JSON.stringify(chunkLayouts)}`,
-          `字段契约：${JSON.stringify(chunkInspections).slice(0, 100_000)}`,
-        ].join("\n"),
-        abortSignal: controller.signal,
-        maxOutputTokens: 6_000,
+        outline: chunkOutline,
+        layouts: chunkLayouts,
+        inspections: chunkInspections,
+        language: brief.language,
+        slideOffset: start,
+        signal: controller.signal,
       });
-      usage.inputTokens += filled.usage.inputTokens ?? 0;
-      usage.outputTokens += filled.usage.outputTokens ?? 0;
-      filled.object.slides.forEach((slide, index) => {
+      usage.inputTokens += filled.usage.inputTokens;
+      usage.outputTokens += filled.usage.outputTokens;
+      filled.slides.forEach((props, index) => {
         slides.push({
           layout: chunkLayouts[index],
-          props: parsePropsJson(slide.propsJson),
+          props,
         });
       });
       await updateSkillRun(run.id, {
@@ -266,6 +253,94 @@ export async function executePptStudioRun(run: typeof schema.skillRuns.$inferSel
   } finally {
     clearInterval(cancellationTimer);
   }
+}
+
+type GenerateModel = Parameters<typeof generateObject>[0]["model"];
+
+/**
+ * 模型输出必须先通过 inspect-layout 的机器契约，才允许进入 Dashi 渲染器。
+ * 首次不合规时把结构化问题交给模型修正一次；规则完全来自契约，不包含版式特例。
+ */
+async function generateDashiSlideChunk(input: {
+  model: GenerateModel;
+  outline: OutlineSlide[];
+  layouts: string[];
+  inspections: unknown[];
+  language: "zh" | "en";
+  slideOffset: number;
+  signal: AbortSignal;
+}) {
+  const contracts = selectDashiInspections(input.inspections, input.layouts);
+  const schema = z.object({
+    slides: z
+      .array(
+        z.object({
+          propsJson: z
+            .string()
+            .min(2)
+            .max(50_000)
+            .describe("当前页面 props 的严格 JSON 对象字符串"),
+        })
+      )
+      .length(input.outline.length),
+  });
+  const usage = { inputTokens: 0, outputTokens: 0 };
+  let repairContext = "";
+  let lastIssues = "";
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const generated = await generateObject({
+      model: input.model,
+      schema,
+      prompt: [
+        "根据页面大纲和 Dashi 字段契约填写每页 propsJson。每个 propsJson 必须是可被 JSON.parse 解析的对象字符串，并与指定 layouts 按下标一一对应。",
+        "只写 fillPlan/propShapes 允许的文案、数组和公开 count 字段，不写样式字段。",
+        "契约中的 enum 是渲染器结构令牌，必须逐字使用，禁止翻译或改写；面向用户的状态文案写入对应 Labels 字段。",
+        "严格遵守 maxChars、硬 numericBounds、数组长度和 count 约束。所有可见示例文案都要替换。数字和事实只能来自用户主题与补充要求，不得编造来源。",
+        `语言：${input.language}。`,
+        `页面大纲：${JSON.stringify(input.outline)}`,
+        `指定 layouts：${JSON.stringify(input.layouts)}`,
+        `字段契约：${JSON.stringify(contracts).slice(0, 100_000)}`,
+        repairContext,
+      ].filter(Boolean).join("\n"),
+      abortSignal: input.signal,
+      maxOutputTokens: 6_000,
+    });
+    usage.inputTokens += generated.usage.inputTokens ?? 0;
+    usage.outputTokens += generated.usage.outputTokens ?? 0;
+
+    const slides: Record<string, unknown>[] = [];
+    const issues: string[] = [];
+    generated.object.slides.forEach((slide, index) => {
+      const parsed = tryParsePropsJson(slide.propsJson);
+      const page = input.slideOffset + index + 1;
+      if (!parsed.ok) {
+        issues.push(`第 ${page} 页 ${input.layouts[index]}：${parsed.error}`);
+        return;
+      }
+      slides[index] = parsed.props;
+      const contractIssues = validateDashiProps(parsed.props, contracts[index]);
+      if (contractIssues.length > 0) {
+        issues.push(
+          `第 ${page} 页 ${input.layouts[index]}：${formatDashiContractIssues(contractIssues)}`
+        );
+      }
+    });
+    if (issues.length === 0 && slides.length === input.layouts.length) {
+      return { slides, usage };
+    }
+
+    lastIssues = issues.join("\n");
+    repairContext = [
+      "上一版页面字段未通过 Dashi 机器契约。只修复列出的问题，仍需返回全部页面：",
+      lastIssues,
+      "上一版 propsJson：",
+      generated.object.slides
+        .map((slide, index) => `${input.layouts[index]}: ${slide.propsJson.slice(0, 6_000)}`)
+        .join("\n"),
+    ].join("\n");
+  }
+  throw new Error(`Dashi 页面内容连续两次未通过字段契约：${lastIssues.slice(0, 1_500)}`);
 }
 
 async function chooseLayouts(
@@ -371,22 +446,6 @@ function layoutCandidates(value: unknown): DashiLayoutCandidate[] {
   });
 }
 
-function inspectionsForLayouts(values: unknown[], layouts: string[]) {
-  const allowed = new Set(layouts);
-  return values.flatMap((value) => {
-    if (!value || typeof value !== "object") return [];
-    const items = (value as { layouts?: unknown }).layouts;
-    return Array.isArray(items)
-      ? items.filter(
-          (item) =>
-            item &&
-            typeof item === "object" &&
-            allowed.has(String((item as { layout?: unknown }).layout ?? ""))
-        )
-      : [];
-  });
-}
-
 function enforceOutlineRoles(slides: OutlineSlide[]) {
   return slides.map((slide, index) => ({
     ...slide,
@@ -417,17 +476,19 @@ function parseBrief(input: Record<string, unknown>) {
   return parsed.data;
 }
 
-function parsePropsJson(value: string): Record<string, unknown> {
+function tryParsePropsJson(
+  value: string
+): { ok: true; props: Record<string, unknown> } | { ok: false; error: string } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(value);
   } catch {
-    throw new Error("模型返回的 Dashi 页面字段不是有效 JSON，请重试");
+    return { ok: false, error: "propsJson 不是有效 JSON 对象" };
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("模型返回的 Dashi 页面字段必须是 JSON 对象，请重试");
+    return { ok: false, error: "propsJson 必须是 JSON 对象" };
   }
-  return parsed as Record<string, unknown>;
+  return { ok: true, props: parsed as Record<string, unknown> };
 }
 
 async function markCancelled(runId: string) {

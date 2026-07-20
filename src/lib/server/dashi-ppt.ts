@@ -41,6 +41,7 @@ const COMMAND_STDOUT_LIMIT = 512 * 1024;
 const COMMAND_STDERR_LIMIT = 128 * 1024;
 const QUERY_TIMEOUT_MS = 30_000;
 const RENDER_TIMEOUT_MS = 300_000;
+const MIN_DASHI_RUNTIME_VERSION = "0.4.4";
 const DASHI_THEMES = new Set(Array.from({ length: 12 }, (_, i) => `theme${String(i + 1).padStart(2, "0")}`));
 
 let activeRenderJobs = 0;
@@ -182,7 +183,43 @@ async function resolveDashiProject(skill: SkillPackage) {
   const packageJson = path.join(projectRoot, "package.json");
   const packageStat = await stat(packageJson).catch(() => null);
   if (!packageStat?.isFile()) throw new Error("Dashi PPT 运行时文件不完整");
+  await assertCompatibleDashiRuntime(packageJson);
   return projectRoot;
+}
+
+async function assertCompatibleDashiRuntime(packageJsonPath: string) {
+  let version = "";
+  try {
+    const parsed = JSON.parse(await readFile(packageJsonPath, "utf-8")) as {
+      name?: unknown;
+      version?: unknown;
+    };
+    if (parsed.name !== "dashi-ppt-runtime" || typeof parsed.version !== "string") {
+      throw new Error("invalid package metadata");
+    }
+    version = parsed.version;
+  } catch {
+    throw new Error("Dashi PPT 运行时 package.json 无效，请管理员重新安装技能包");
+  }
+  if (!isVersionAtLeast(version, MIN_DASHI_RUNTIME_VERSION)) {
+    throw new Error(
+      `Dashi PPT 运行时版本过低（当前 ${version}，至少需要 ${MIN_DASHI_RUNTIME_VERSION}），请管理员升级技能包`
+    );
+  }
+}
+
+function isVersionAtLeast(current: string, minimum: string) {
+  const parse = (value: string) => {
+    const match = value.match(/^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/u);
+    return match ? match.slice(1, 4).map(Number) : null;
+  };
+  const left = parse(current);
+  const right = parse(minimum);
+  if (!left || !right) return false;
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index] !== right[index]) return left[index] > right[index];
+  }
+  return true;
 }
 
 async function runNodeScript(
@@ -387,11 +424,32 @@ function safePathPart(value: string) {
 }
 
 function scrubRuntimeError(value: string) {
-  return value
+  const scrubbed = value
     .replaceAll(process.cwd(), "<linhub>")
     .replaceAll(DATA_SKILLS_ROOT, "<skills>")
-    .replaceAll(DATA_JOBS_ROOT, "<jobs>")
-    .slice(0, 4_000);
+    .replaceAll(DATA_JOBS_ROOT, "<jobs>");
+  const summary = summarizeDashiRuntimeError(scrubbed);
+  return (summary || scrubbed).slice(0, 4_000);
+}
+
+function summarizeDashiRuntimeError(value: string) {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value.trim());
+  } catch {
+    return "";
+  }
+  if (!parsed || typeof parsed !== "object") return "";
+  const report = parsed as Record<string, unknown>;
+  const errors = ["goalSpecErrors", "propErrors", "errors"].flatMap((key) =>
+    Array.isArray(report[key])
+      ? report[key].filter((item): item is string => typeof item === "string")
+      : []
+  );
+  if (errors.length === 0) return "";
+  const unique = Array.from(new Set(errors));
+  const suffix = unique.length > 8 ? `；另有 ${unique.length - 8} 项` : "";
+  return `Dashi 版式字段校验失败：${unique.slice(0, 8).join("；")}${suffix}`;
 }
 
 function uid() {
