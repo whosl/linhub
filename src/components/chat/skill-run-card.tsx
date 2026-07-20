@@ -88,15 +88,30 @@ export interface SkillRunCardProps {
   className?: string;
 }
 
+const TERMINAL_SKILL_RUN_STATUSES = new Set<SkillRunStatus>([
+  "success",
+  "completed",
+  "failed",
+  "error",
+  "stopped",
+  "cancelled",
+]);
+
+function isTerminalSkillRunStatus(status: SkillRunStatus) {
+  return TERMINAL_SKILL_RUN_STATUSES.has(status);
+}
+
 /** 通过可恢复 SSE 订阅持久 Skill Run；事件只携带结构化进度，不含模型思维过程。 */
 export function SkillRunLiveCard({
   runId,
   skillName,
   compact,
+  onOpenAttachment,
 }: {
   runId: string;
   skillName: string;
   compact?: boolean;
+  onOpenAttachment?: (attachment: SkillRunAttachment, runId: string) => void;
 }) {
   const [run, setRun] = React.useState<SkillRun>({
     id: runId,
@@ -105,6 +120,10 @@ export function SkillRunLiveCard({
     stageLabel: "正在连接任务…",
     progress: 0,
   });
+  const [streamRevision, restartStream] = React.useReducer(
+    (revision: number) => revision + 1,
+    0
+  );
   const refresh = React.useCallback(async () => {
     const response = await fetch(`/api/skill-runs/${encodeURIComponent(runId)}`, {
       cache: "no-store",
@@ -121,7 +140,16 @@ export function SkillRunLiveCard({
     source.addEventListener("snapshot", (event) => {
       if (disposed) return;
       try {
-        setRun(JSON.parse((event as MessageEvent<string>).data) as SkillRun);
+        const nextRun = JSON.parse(
+          (event as MessageEvent<string>).data
+        ) as SkillRun;
+        setRun(nextRun);
+        // EventSource 会在服务端正常关闭后自动重连。终态任务无需继续订阅，
+        // 否则每张历史任务卡都会永久产生 SSE + 快照请求。
+        if (isTerminalSkillRunStatus(nextRun.status)) {
+          disposed = true;
+          source.close();
+        }
       } catch {
         // 单个损坏事件不影响后续快照恢复。
       }
@@ -134,7 +162,7 @@ export function SkillRunLiveCard({
       disposed = true;
       source.close();
     };
-  }, [refresh, runId]);
+  }, [refresh, runId, streamRevision]);
 
   return (
     <SkillRunCard
@@ -151,10 +179,16 @@ export function SkillRunLiveCard({
           method: "POST",
         });
         await refresh();
+        // 终态快照会主动关闭 EventSource；重试后必须创建一条新订阅，
+        // 否则卡片只停留在首次 refresh 的 queued/running 快照。
+        restartStream();
       }}
-      onOpenAttachment={(attachment) => {
-        if (attachment.url) window.open(attachment.url, "_blank", "noopener,noreferrer");
-      }}
+      onOpenAttachment={
+        onOpenAttachment ??
+        ((attachment) => {
+          if (attachment.url) window.open(attachment.url, "_blank", "noopener,noreferrer");
+        })
+      }
     />
   );
 }
@@ -224,7 +258,7 @@ export function SkillRunCard({
     (step) => normalizeStatus(step.status) === "failed"
   );
   const canStop = visualStatus === "pending" || visualStatus === "running";
-  const canRetry = visualStatus === "failed";
+  const canRetry = visualStatus === "failed" || visualStatus === "stopped";
   const hasDetail =
     steps.length > 0 ||
     attachments.length > 0 ||

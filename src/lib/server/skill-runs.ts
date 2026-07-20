@@ -280,11 +280,22 @@ export async function requestSkillRunCancellation(runId: string, ownerId: string
 
 export async function resetSkillRun(runId: string, ownerId: string) {
   await ensureSkillRunTables();
+  const [existing] = await db
+    .select({
+      kind: schema.skillRuns.kind,
+      input: schema.skillRuns.input,
+    })
+    .from(schema.skillRuns)
+    .where(and(eq(schema.skillRuns.id, runId), eq(schema.skillRuns.ownerId, ownerId)))
+    .limit(1);
+  if (!existing) return false;
+  const returnToPptBrief =
+    existing.kind === "ppt-studio" && !hasSubmittedPptBrief(existing.input);
   const [run] = await db
     .update(schema.skillRuns)
     .set({
-      status: "queued",
-      stage: "等待重试",
+      status: returnToPptBrief ? "waiting_input" : "queued",
+      stage: returnToPptBrief ? "等待填写 PPT 需求" : "等待重试",
       progress: 0,
       error: null,
       result: null,
@@ -298,8 +309,57 @@ export async function resetSkillRun(runId: string, ownerId: string) {
     .where(and(eq(schema.skillRuns.id, runId), eq(schema.skillRuns.ownerId, ownerId)))
     .returning({ id: schema.skillRuns.id });
   if (!run) return false;
+  // 重试必须从干净步骤树开始，避免上一次失败/取消留下“执行中”或多余子任务。
+  await db
+    .delete(schema.skillRunSteps)
+    .where(eq(schema.skillRunSteps.runId, runId));
   await appendSkillRunEvent(runId, "run-retried");
   return true;
+}
+
+function hasSubmittedPptBrief(input: Record<string, unknown>) {
+  return (
+    typeof input.audience === "string" &&
+    input.audience.trim().length > 0 &&
+    typeof input.pageCount === "number" &&
+    input.pageCount >= 3 &&
+    input.pageCount <= 30 &&
+    typeof input.theme === "string" &&
+    typeof input.mediaPreference === "string" &&
+    typeof input.language === "string" &&
+    typeof input.outputFormat === "string"
+  );
+}
+
+export async function settleRunningSkillRunSteps(
+  runId: string,
+  status: "failed" | "cancelled",
+  error?: string
+) {
+  await ensureSkillRunTables();
+  const now = new Date();
+  const settled = await db
+    .update(schema.skillRunSteps)
+    .set({
+      status,
+      progress: 100,
+      error: status === "failed" ? error?.slice(0, 2_000) : null,
+      completedAt: now,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(schema.skillRunSteps.runId, runId),
+        eq(schema.skillRunSteps.status, "running")
+      )
+    )
+    .returning({ id: schema.skillRunSteps.id });
+  for (const step of settled) {
+    await appendSkillRunEvent(runId, "step-updated", {
+      stepId: step.id,
+      status,
+    });
+  }
 }
 
 export async function getSkillRunSnapshot(runId: string, ownerId?: string) {
@@ -319,7 +379,30 @@ export async function getSkillRunSnapshot(runId: string, ownerId?: string) {
     .orderBy(asc(schema.skillRunSteps.createdAt));
   const result = run.result ?? {};
   const attachments = Array.isArray(result.attachments)
-    ? (result.attachments as SkillRunAttachment[])
+    ? result.attachments.flatMap((value): SkillRunAttachment[] => {
+        if (!value || typeof value !== "object") return [];
+        const attachment = value as Record<string, unknown>;
+        if (typeof attachment.id !== "string" || typeof attachment.name !== "string") {
+          return [];
+        }
+        const rawSize =
+          typeof attachment.sizeBytes === "number"
+            ? attachment.sizeBytes
+            : attachment.size;
+        return [
+          {
+            id: attachment.id,
+            name: attachment.name,
+            url: typeof attachment.url === "string" ? attachment.url : undefined,
+            mimeType:
+              typeof attachment.mimeType === "string" ? attachment.mimeType : undefined,
+            sizeBytes:
+              typeof rawSize === "number" && Number.isFinite(rawSize) && rawSize >= 0
+                ? rawSize
+                : undefined,
+          },
+        ];
+      })
     : [];
   const sourceCount = steps.reduce((sum, step) => sum + step.sourceCount, 0);
   return {
