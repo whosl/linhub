@@ -13,8 +13,14 @@ import {
   UploadIcon,
 } from "lucide-react";
 import { getDataService } from "@/lib/data";
+import { clientRandomUUID } from "@/lib/client-id";
 import { FILE_ACCEPT, FILE_ACCEPT_LABEL } from "@/lib/file-types";
-import type { KnowledgeBase } from "@/lib/types";
+import type { KnowledgeBase, KnowledgeDocument } from "@/lib/types";
+import {
+  optimisticInsertRecord,
+  optimisticPatchRecords,
+  optimisticRemoveRecord,
+} from "@/lib/optimistic-query";
 import { cn, formatBytes, formatRelativeTime } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input, Textarea } from "@/components/ui/input";
@@ -79,17 +85,41 @@ export default function KnowledgePage() {
   });
 
   const create = async () => {
-    if (!name.trim()) return;
-    const kb = await getDataService().saveKnowledgeBase({
-      name: name.trim(),
-      description,
-    });
-    queryClient.invalidateQueries({ queryKey: ["knowledge-bases"] });
+    const cleanName = name.trim();
+    if (!cleanName) return;
+    const now = new Date().toISOString();
+    const temporary: KnowledgeBase = {
+      id: `optimistic-kb-${clientRandomUUID()}`,
+      name: cleanName,
+      description: description.trim() || undefined,
+      documentCount: 0,
+      totalChunks: 0,
+      createdAt: now,
+      updatedAt: now,
+      clientMutationState: "pending",
+    };
+    const optimistic = optimisticInsertRecord<KnowledgeBase>(
+      queryClient,
+      [["knowledge-bases"]],
+      temporary
+    );
     setCreateOpen(false);
     setName("");
     setDescription("");
-    setSelected(kb);
-    toast.success("知识库已创建");
+    setSelected(null);
+    try {
+      const kb = await getDataService().saveKnowledgeBase({
+        name: cleanName,
+        description,
+      });
+      optimistic.reconcile(kb);
+      setSelected(kb);
+      toast.success("知识库已创建");
+    } catch (error) {
+      optimistic.rollback();
+      setSelected(null);
+      toast.error(error instanceof Error ? error.message : "知识库创建失败");
+    }
   };
 
   const upload = async (files: FileList | File[]) => {
@@ -101,14 +131,45 @@ export default function KnowledgePage() {
     setUploading(true);
     let successCount = 0;
     const failures: string[] = [];
+    const optimisticCount = optimisticPatchRecords<KnowledgeBase>(
+      queryClient,
+      [["knowledge-bases"]],
+      selectedKb.id,
+      { documentCount: selectedKb.documentCount + list.length }
+    );
     try {
       for (const file of list) {
+        const temporary: KnowledgeDocument = {
+          id: `optimistic-kb-document-${clientRandomUUID()}`,
+          knowledgeBaseId: selectedKb.id,
+          name: file.name,
+          mimeType: file.type || "application/octet-stream",
+          size: file.size,
+          status: "processing",
+          chunkCount: 0,
+          createdAt: new Date().toISOString(),
+          clientMutationState: "pending",
+        };
+        const optimisticDocument = optimisticInsertRecord<KnowledgeDocument>(
+          queryClient,
+          [["kb-documents", selectedKb.id]],
+          temporary,
+          documents.length
+        );
         try {
-          await getDataService().uploadDocument(selectedKb.id, file);
+          const saved = await getDataService().uploadDocument(selectedKb.id, file);
+          optimisticDocument.reconcile(saved);
           successCount += 1;
         } catch (e) {
           const message = e instanceof Error ? e.message : "上传失败";
           failures.push(`${file.name}：${message}`);
+          optimisticDocument.reconcile({
+            ...temporary,
+            status: "error",
+            errorMessage: message,
+            clientMutationState: "failed",
+            clientMutationError: message,
+          });
         }
       }
       await Promise.all([
@@ -118,10 +179,18 @@ export default function KnowledgePage() {
       if (failures.length === 0) {
         toast.success("文档已上传，正在解析…");
       } else if (successCount > 0) {
+        queryClient.setQueryData<KnowledgeBase[]>(["knowledge-bases"], (current) =>
+          current?.map((kb) =>
+            kb.id === selectedKb.id
+              ? { ...kb, documentCount: selectedKb.documentCount + successCount }
+              : kb
+          )
+        );
         toast.warning(`已上传 ${successCount} 个文档，${failures.length} 个失败`, {
           description: formatUploadFailures(failures),
         });
       } else {
+        optimisticCount.rollback();
         toast.error(`${failures.length} 个文档上传失败`, {
           description: formatUploadFailures(failures),
         });
@@ -185,25 +254,52 @@ export default function KnowledgePage() {
   const confirmDelete = async () => {
     if (!deleteTarget || deleting) return;
     setDeleting(true);
-    try {
-      if (deleteTarget.kind === "document") {
+    if (deleteTarget.kind === "document") {
+      const optimisticDocument = optimisticRemoveRecord<KnowledgeDocument>(
+        queryClient,
+        [["kb-documents", deleteTarget.kbId]],
+        deleteTarget.docId
+      );
+      const kb = kbs.find((item) => item.id === deleteTarget.kbId);
+      const optimisticKb = kb
+        ? optimisticPatchRecords<KnowledgeBase>(
+            queryClient,
+            [["knowledge-bases"]],
+            kb.id,
+            { documentCount: Math.max(0, kb.documentCount - 1) }
+          )
+        : null;
+      setDeleteTarget(null);
+      try {
         await getDataService().deleteDocument(
           deleteTarget.kbId,
           deleteTarget.docId
         );
-        queryClient.invalidateQueries({
-          queryKey: ["kb-documents", deleteTarget.kbId],
-        });
-        queryClient.invalidateQueries({ queryKey: ["knowledge-bases"] });
         toast.success("文档已删除");
-      } else {
-        await getDataService().deleteKnowledgeBase(deleteTarget.kbId);
-        queryClient.invalidateQueries({ queryKey: ["knowledge-bases"] });
-        if (selected?.id === deleteTarget.kbId) setSelected(null);
-        toast.success("已删除");
+      } catch (error) {
+        optimisticDocument.rollback();
+        optimisticKb?.rollback();
+        toast.error(error instanceof Error ? error.message : "文档删除失败");
+      } finally {
+        setDeleting(false);
       }
-      setDeleteTarget(null);
+      return;
+    }
+
+    const removedKb = kbs.find((item) => item.id === deleteTarget.kbId);
+    const optimisticKb = optimisticRemoveRecord<KnowledgeBase>(
+      queryClient,
+      [["knowledge-bases"]],
+      deleteTarget.kbId
+    );
+    if (selected?.id === deleteTarget.kbId) setSelected(null);
+    setDeleteTarget(null);
+    try {
+        await getDataService().deleteKnowledgeBase(deleteTarget.kbId);
+        toast.success("已删除");
     } catch (e) {
+      optimisticKb.rollback();
+      if (removedKb) setSelected(removedKb);
       toast.error(e instanceof Error ? e.message : "删除失败");
     } finally {
       setDeleting(false);
@@ -232,7 +328,8 @@ export default function KnowledgePage() {
       ) : (
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
           {/* 知识库列表 */}
-          <div className="space-y-2">
+          <div className="-mx-4 overflow-x-auto px-4 pb-1 [scrollbar-width:none] lg:mx-0 lg:overflow-visible lg:px-0 lg:pb-0 [&::-webkit-scrollbar]:hidden">
+            <div className="flex gap-3 lg:block lg:space-y-2">
             {kbs.map((kb, i) => (
               <motion.div
                 key={kb.id}
@@ -241,16 +338,19 @@ export default function KnowledgePage() {
                 initial={{ opacity: 0, x: -8 }}
                 animate={{ opacity: 1, x: 0 }}
                 transition={{ delay: i * 0.04 }}
-                onClick={() => setSelected(kb)}
+                onClick={() => {
+                  if (kb.clientMutationState !== "pending") setSelected(kb);
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
-                    setSelected(kb);
+                    if (kb.clientMutationState !== "pending") setSelected(kb);
                   }
                 }}
                 aria-label={`选择知识库「${kb.name}」`}
+                aria-disabled={kb.clientMutationState === "pending"}
                 className={cn(
-                  "group w-full cursor-pointer rounded-2xl border bg-card p-4 text-left transition-all hover:border-primary/40",
+                  "group w-64 shrink-0 cursor-pointer rounded-2xl border bg-card p-4 text-left transition-all hover:border-primary/40 lg:w-full",
                   selected?.id === kb.id && "border-primary/60 ring-1 ring-primary/30"
                 )}
               >
@@ -268,7 +368,14 @@ export default function KnowledgePage() {
                     <Trash2Icon className="size-3.5" />
                   </button>
                 </div>
-                <h3 className="text-sm font-medium">{kb.name}</h3>
+                <h3 className="text-sm font-medium">
+                  {kb.name}
+                  {kb.clientMutationState === "pending" && (
+                    <span className="ml-2 text-xs font-normal text-muted-foreground">
+                      创建中…
+                    </span>
+                  )}
+                </h3>
                 {kb.description && (
                   <p className="mt-0.5 line-clamp-1 text-xs text-muted-foreground">
                     {kb.description}
@@ -279,6 +386,7 @@ export default function KnowledgePage() {
                 </p>
               </motion.div>
             ))}
+            </div>
           </div>
 
           {/* 文档面板 */}

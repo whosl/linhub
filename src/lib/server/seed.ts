@@ -1,6 +1,7 @@
 import { eq, sql } from "drizzle-orm";
 import { db, schema } from "./db";
 import { ensureSkillRuntimeReady } from "./skill-runtime";
+import { UNLIMITED_QUOTA_CENTS } from "@/lib/billing-plan";
 
 let seeded = false;
 let seedInFlight: Promise<void> | null = null;
@@ -26,6 +27,7 @@ async function seedDatabase() {
     .from(schema.settings)
     .limit(1);
   if (existingSettings) {
+    await ensureFamilyPassPlan();
     seeded = true;
     return;
   }
@@ -163,10 +165,37 @@ async function seedDatabase() {
           modelTier: "pro" as const,
           features: ["全部模型优先响应", "每月 ¥120 额度", "用户级 MCP", "Artifacts 分享", "优先客服"],
         },
+        {
+          id: "plan-family-pass",
+          name: "Family Pass",
+          description: "家庭与亲友专属通行证，不限制月度额度",
+          priceCentsPerMonth: 0,
+          monthlyQuotaCents: UNLIMITED_QUOTA_CENTS,
+          modelTier: "pro" as const,
+          features: ["全部模型", "无限月度额度", "图像生成", "知识库 RAG", "Artifacts 分享"],
+          enabled: false,
+        },
       ])
       .onConflictDoNothing();
   });
+  await ensureFamilyPassPlan();
   seeded = true;
+}
+
+async function ensureFamilyPassPlan() {
+  await db
+    .insert(schema.plans)
+    .values({
+      id: "plan-family-pass",
+      name: "Family Pass",
+      description: "家庭与亲友专属通行证，不限制月度额度",
+      priceCentsPerMonth: 0,
+      monthlyQuotaCents: UNLIMITED_QUOTA_CENTS,
+      modelTier: "pro",
+      features: ["全部模型", "无限月度额度", "图像生成", "知识库 RAG", "Artifacts 分享"],
+      enabled: false,
+    })
+    .onConflictDoNothing();
 }
 
 async function ensureSettingsColumns() {

@@ -2,6 +2,10 @@ import type { MessagePart } from "@/lib/types";
 
 const EDITED_IMAGE_CAPTION_PREFIX = "图片已按你的描述编辑：";
 
+export function messageHasImageUrl(parts: MessagePart[], url: string) {
+  return parts.some((part) => part.type === "image" && part.url === url);
+}
+
 function isImageCaptionText(text: string) {
   const value = text.trim();
   if (!value) return false;
@@ -33,9 +37,19 @@ export function replaceMessageImageParts(
   if (imageIndex === -1) return { parts, replaced: false };
 
   const caption = editedImageCaption(editPrompt);
+  const nextMediaAssetId = newUrl.match(/^\/api\/media\/([A-Za-z0-9._-]+)$/i)?.[1];
   const next = parts.map((part, index) =>
     index === imageIndex && part.type === "image"
-      ? { ...part, url: newUrl, alt: "编辑后的图片" }
+      ? (() => {
+          const image = { ...part };
+          delete image.mediaAssetId;
+          return {
+            ...image,
+            url: newUrl,
+            alt: "编辑后的图片",
+            ...(nextMediaAssetId ? { mediaAssetId: nextMediaAssetId } : {}),
+          };
+        })()
       : part
   );
 

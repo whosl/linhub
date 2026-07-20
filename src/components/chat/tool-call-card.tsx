@@ -23,7 +23,10 @@ import {
 import { cn } from "@/lib/utils";
 import { formatToolPreviewLabel } from "@/lib/chat-text";
 import type { ToolCallPart } from "@/lib/types";
-import { SkillRunLiveCard } from "./skill-run-card";
+import {
+  SkillRunLiveCard,
+  type SkillRunAttachment,
+} from "./skill-run-card";
 import { PptStudioBriefCard } from "./ppt-studio-brief-card";
 
 const TOOL_META: Record<string, { icon: React.ElementType; verb: string; label: (args: Record<string, unknown>) => string }> = {
@@ -50,6 +53,9 @@ const TOOL_META: Record<string, { icon: React.ElementType; verb: string; label: 
   pptx_extract_text: { icon: FileTextIcon, verb: "读取 PPT", label: () => "提取 PPT 内容" },
   pptx_analyze_template: { icon: FileTextIcon, verb: "分析 PPT", label: () => "分析 PPT 模板" },
   pptx_create_deck: { icon: FileTextIcon, verb: "生成 PPT", label: (a) => `生成 PPT「${a.title ?? ""}」` },
+  dashi_query_layouts: { icon: PaletteIcon, verb: "选择版式", label: (a) => `查询 ${a.theme ?? "Dashi"} 版式` },
+  dashi_inspect_layouts: { icon: ScanEyeIcon, verb: "检查版式", label: () => "检查 Dashi 页面字段" },
+  dashi_render_deck: { icon: FileTextIcon, verb: "生成 PPT", label: () => "渲染 Dashi PPT" },
 };
 
 function shortUrl(url: string): string {
@@ -77,9 +83,11 @@ function extractPreviewValue(raw: string): string | null {
 export function ToolCallCard({
   part,
   onOpenArtifact,
+  showDeliverables = true,
 }: {
   part: ToolCallPart;
   onOpenArtifact?: (artifactId: string) => void;
+  showDeliverables?: boolean;
 }) {
   const [manualOpen, setManualOpen] = React.useState<boolean | null>(null);
   const meta = TOOL_META[part.toolName] ?? {
@@ -94,7 +102,7 @@ export function ToolCallCard({
   const hasDetail =
     !!part.result?.sources?.length ||
     !!part.result?.chunks?.length ||
-    !!part.result?.attachments?.length ||
+    !!(showDeliverables && part.result?.attachments?.length) ||
     !!part.result?.text ||
     !!part.errorMessage;
   const detailOpen = hasDetail && (manualOpen ?? part.state === "error");
@@ -104,8 +112,8 @@ export function ToolCallCard({
   const isGenerating = part.state === "running" && part.inputPreview != null;
   const previewText = isGenerating ? extractPreviewValue(part.inputPreview!) : null;
 
-  // 持久 Skill Run 和 Artifact 使用结构化交付卡，不依赖模型手写链接。
-  if (skillRunId && part.state === "success") {
+  // Artifact 卡片：点击打开右侧面板
+  if (showDeliverables && skillRunId && part.state === "success") {
     if (part.toolName === "start_ppt_studio") {
       return (
         <PptStudioBriefCard
@@ -116,29 +124,14 @@ export function ToolCallCard({
       );
     }
     return (
-      <SkillRunLiveCard runId={skillRunId} skillName={part.result?.skillName ?? "Skill"} />
+      <SkillRunLiveCard
+        runId={skillRunId}
+        skillName={part.result?.skillName ?? "Skill"}
+      />
     );
   }
-  if (artifactId && part.state === "success") {
-    return (
-      <button
-        onClick={() => onOpenArtifact?.(artifactId)}
-        className="group/artifact my-2 flex w-full max-w-md items-center gap-3 rounded-xl border bg-card px-3.5 py-3 text-left transition-all first:mt-0 hover:-translate-y-px hover:border-primary/40 hover:shadow-sm"
-      >
-        <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-          <CodeIcon className="size-4.5" />
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-medium">
-            {String(artifactTitle)}
-          </span>
-          <span className="block text-xs text-muted-foreground">
-            点击打开 · 可预览与运行
-          </span>
-        </span>
-        <ChevronDownIcon className="size-4 shrink-0 -rotate-90 text-muted-foreground transition-transform group-hover/artifact:translate-x-0.5" />
-      </button>
-    );
+  if (showDeliverables && artifactId && part.state === "success") {
+    return <ArtifactDeliverable id={artifactId} title={String(artifactTitle)} onOpen={onOpenArtifact} />;
   }
 
   return (
@@ -254,7 +247,7 @@ export function ToolCallCard({
                   </span>
                 </div>
               ))}
-              {part.result?.attachments?.map((file) => (
+              {showDeliverables && part.result?.attachments?.map((file) => (
                 <a
                   key={file.id}
                   href={file.url}
@@ -277,5 +270,129 @@ export function ToolCallCard({
         )}
       </AnimatePresence>
     </div>
+  );
+}
+
+export function ToolResultDeliverables({
+  part,
+  onOpenArtifact,
+  onOpenAttachment,
+}: {
+  part: ToolCallPart;
+  onOpenArtifact?: (artifactId: string) => void;
+  onOpenAttachment?: (attachment: SkillRunAttachment, runId: string) => void;
+}) {
+  if (part.state !== "success") return null;
+  const skillRunId = part.result?.skillRunId;
+  if (skillRunId) {
+    if (part.toolName === "start_ppt_studio") {
+      return (
+        <PptStudioBriefCard
+          runId={skillRunId}
+          skillName={part.result?.skillName ?? "PPT 工作室"}
+          initialTopic={typeof part.args.topic === "string" ? part.args.topic : ""}
+          onOpenAttachment={onOpenAttachment}
+        />
+      );
+    }
+    return (
+      <SkillRunLiveCard
+        runId={skillRunId}
+        skillName={part.result?.skillName ?? "Skill"}
+        onOpenAttachment={onOpenAttachment}
+      />
+    );
+  }
+  const artifactId = part.result?.artifactId;
+  const artifactTitle = part.result?.artifactTitle ?? part.args.title ?? "作品";
+  const attachments = part.result?.attachments ?? [];
+  if (!artifactId && attachments.length === 0) return null;
+
+  return (
+    <div className="my-2 max-w-md space-y-2 first:mt-0">
+      {artifactId && (
+        <ArtifactDeliverable
+          id={artifactId}
+          title={String(artifactTitle)}
+          onOpen={onOpenArtifact}
+        />
+      )}
+      {attachments.map((file) => {
+        const content = (
+          <>
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+            <FileTextIcon className="size-4.5" />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-sm font-medium">{file.name}</span>
+            <span className="block truncate text-xs text-muted-foreground">
+              {file.mimeType || "生成文件"} · 点击下载
+            </span>
+          </span>
+          <DownloadIcon className="size-4 shrink-0 text-muted-foreground" />
+          </>
+        );
+        const className =
+          "flex w-full items-center gap-3 rounded-xl border bg-card px-3.5 py-3 text-left transition-colors hover:border-primary/40 hover:bg-accent/30";
+        return onOpenAttachment ? (
+          <button
+            key={file.id}
+            type="button"
+            onClick={() =>
+              onOpenAttachment(
+                {
+                  id: file.id,
+                  name: file.name,
+                  mimeType: file.mimeType,
+                  sizeBytes: file.size,
+                  url: file.url,
+                },
+                "tool-result"
+              )
+            }
+            className={className}
+          >
+            {content}
+          </button>
+        ) : (
+          <a
+            key={file.id}
+            href={file.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={className}
+          >
+            {content}
+          </a>
+        );
+      })}
+    </div>
+  );
+}
+
+function ArtifactDeliverable({
+  id,
+  title,
+  onOpen,
+}: {
+  id: string;
+  title: string;
+  onOpen?: (artifactId: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen?.(id)}
+      className="group/artifact flex w-full items-center gap-3 rounded-xl border bg-card px-3.5 py-3 text-left transition-all hover:-translate-y-px hover:border-primary/40 hover:shadow-sm"
+    >
+      <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+        <CodeIcon className="size-4.5" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-medium">{title}</span>
+        <span className="block text-xs text-muted-foreground">点击打开 · 可预览、运行与下载</span>
+      </span>
+      <ChevronDownIcon className="size-4 shrink-0 -rotate-90 text-muted-foreground transition-transform group-hover/artifact:translate-x-0.5" />
+    </button>
   );
 }

@@ -63,11 +63,11 @@ export async function POST(req: NextRequest) {
   if (typeof body.defaultChatModelId === "string")
     patch.defaultChatModelId = body.defaultChatModelId || null;
   if (typeof body.visionHelperModelId === "string")
-    patch.visionHelperModelId = body.visionHelperModelId;
+    patch.visionHelperModelId = body.visionHelperModelId || null;
   if (typeof body.toolRouterModelId === "string")
     patch.toolRouterModelId = body.toolRouterModelId || null;
   if (typeof body.embeddingModelId === "string")
-    patch.embeddingModelId = body.embeddingModelId;
+    patch.embeddingModelId = body.embeddingModelId || null;
   if (typeof body.mimoTtsVoice === "string") patch.mimoTtsVoice = body.mimoTtsVoice;
   if (typeof body.skillMarketRequiresReview === "boolean")
     patch.skillMarketRequiresReview = body.skillMarketRequiresReview;

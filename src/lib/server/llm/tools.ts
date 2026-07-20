@@ -27,7 +27,7 @@ import {
 import {
   analyzePptxTemplate,
   createPptxDeck,
-  extractPptxAttachmentText,
+  extractPptxTextFromBuffer,
   localAttachmentPath,
 } from "@/lib/server/pptx";
 import { openMediaStream } from "@/lib/server/media";
@@ -37,6 +37,11 @@ import {
   type SandboxInputFile,
   type SandboxLanguage,
 } from "@/lib/server/code-sandbox";
+import {
+  inspectDashiLayouts,
+  queryDashiLayouts,
+  renderDashiDeck,
+} from "@/lib/server/dashi-ppt";
 
 // ---------- Tavily ----------
 
@@ -177,6 +182,7 @@ export function buildWebTools(userId: string): ToolSet {
 
 const CODE_MAX_LENGTH = 8_000;
 const CODE_OUTPUT_MAX_LENGTH = 4_000;
+const SANDBOX_CONSOLE_PREVIEW_MAX_LENGTH = 12_000;
 const CODE_VALUE_PREVIEW_ITEMS = 50;
 const CODE_LOOP_MAX_ITERATIONS = 20_000;
 const CODE_RUNTIME_STRING_MAX_LENGTH = 100_000;
@@ -1125,6 +1131,8 @@ export function buildCodeTools(userId: string): ToolSet {
           inputFiles,
           limits: { timeoutMs: (timeoutSeconds ?? 30) * 1_000 },
         });
+        const stdout = truncateSandboxConsole(result.stdout);
+        const stderr = truncateSandboxConsole(result.stderr);
         const attachments = [];
         for (const output of result.outputFiles) {
           const attachment = await persistGeneratedAttachment({
@@ -1149,8 +1157,11 @@ export function buildCodeTools(userId: string): ToolSet {
           result.timedOut ? "状态：运行超时" : undefined,
           result.stdoutStderrLimitExceeded ? "状态：标准输出超过限制" : undefined,
           result.outputLimitExceeded ? "状态：部分输出文件超过限制，未保存" : undefined,
-          result.stdout ? `stdout:\n${result.stdout}` : "stdout：（无输出）",
-          result.stderr ? `stderr:\n${result.stderr}` : undefined,
+          stdout.text ? `stdout:\n${stdout.text}` : "stdout：（无输出）",
+          stderr.text ? `stderr:\n${stderr.text}` : undefined,
+          stdout.truncated || stderr.truncated
+            ? "状态：控制台预览已截断；如需完整结果请写入 /workspace/output 文件"
+            : undefined,
         ].filter((value): value is string => Boolean(value));
         return {
           text: summary.join("\n"),
@@ -1158,9 +1169,22 @@ export function buildCodeTools(userId: string): ToolSet {
           exitCode: result.exitCode,
           durationMs: result.durationMs,
           timedOut: result.timedOut,
+          stdoutStderrLimitExceeded: result.stdoutStderrLimitExceeded,
+          outputLimitExceeded: result.outputLimitExceeded,
+          consolePreviewTruncated: stdout.truncated || stderr.truncated,
         };
       },
     }),
+  };
+}
+
+function truncateSandboxConsole(value: string) {
+  if (value.length <= SANDBOX_CONSOLE_PREVIEW_MAX_LENGTH) {
+    return { text: value, truncated: false };
+  }
+  return {
+    text: `${value.slice(0, SANDBOX_CONSOLE_PREVIEW_MAX_LENGTH)}\n…（控制台输出已截断）`,
+    truncated: true,
   };
 }
 
@@ -1272,7 +1296,8 @@ function bufferToArrayBuffer(buffer: Buffer): ArrayBuffer {
 export async function saveRemoteGeneratedImage(
   userId: string,
   remoteUrl: string,
-  kind: "generated" | "edited" = "generated"
+  kind: "generated" | "edited" = "generated",
+  id?: string
 ): Promise<string> {
   const { buffer, ext } = await fetchSafeRemoteImage(remoteUrl);
   const { persistMedia } = await import("@/lib/server/media");
@@ -1284,6 +1309,7 @@ export async function saveRemoteGeneratedImage(
     kind,
     ext,
     sourceTool: kind === "edited" ? "edit_image" : "generate_image",
+    id,
   });
   return asset.url;
 }
@@ -1727,7 +1753,8 @@ export function buildImageTools(
 export async function saveGeneratedImage(
   userId: string,
   b64: string,
-  kind: "generated" | "edited" = "generated"
+  kind: "generated" | "edited" = "generated",
+  id?: string
 ): Promise<string> {
   const { persistMedia } = await import("@/lib/server/media");
   const asset = await persistMedia({
@@ -1738,6 +1765,7 @@ export async function saveGeneratedImage(
     kind,
     ext: ".png",
     sourceTool: kind === "edited" ? "edit_image" : "generate_image",
+    id,
   });
   return asset.url;
 }
@@ -2367,14 +2395,20 @@ export function buildSkillPackTools(
     }),
     read_skill_resource: tool({
       description: "读取当前 Skill Pack 的单个资源内容。只能读取当前技能声明的资源。",
-      inputSchema: z.object({ resourceId: z.string().describe("资源 id") }),
+      inputSchema: z.object({
+        resourceId: z.string().describe("资源 id"),
+      }),
       execute: async ({ resourceId }) => {
         const resource = await readSkillResource(skill, resourceId);
-        return { text: `资源「${resource.name}」：\n${resource.text}`, resource };
+        return {
+          text: `资源「${resource.name}」：\n${resource.text}`,
+          resource,
+        };
       },
     }),
     run_skill_script: tool({
-      description: "运行当前 Skill Pack 审核通过且显式允许的脚本。普通用户技能和未审核技能不能使用。",
+      description:
+        "运行当前 Skill Pack 审核通过且显式允许的脚本。普通用户技能和未审核技能不能使用。",
       inputSchema: z.object({
         script: z.string().describe("脚本文件名，必须在技能清单中声明"),
         input: z.record(z.string(), z.unknown()).optional().describe("传给脚本的 JSON 输入"),
@@ -2385,7 +2419,8 @@ export function buildSkillPackTools(
   if (skill.id === "skill-deep-research") {
     Object.assign(tools, {
       start_deep_research: tool({
-        description: "启动可刷新恢复的深度调研任务。用户要求深度调研、行业研究、竞品研究、尽调或带引用报告时必须调用；任务会在后台并行运行。",
+        description:
+          "启动可刷新恢复的深度调研任务。用户要求深度调研、行业研究、竞品研究、尽调或带引用报告时必须调用；任务会在后台并行运行。",
         inputSchema: z.object({
           query: z.string().min(5).max(4_000).describe("完整研究问题和范围"),
           mode: z.enum(["quick", "deep"]).default("deep"),
@@ -2411,6 +2446,7 @@ export function buildSkillPackTools(
         },
       }),
     });
+    return tools;
   }
   if (skill.id === "skill-data-analyst") {
     Object.assign(tools, {
@@ -2464,8 +2500,26 @@ export function buildSkillPackTools(
           "在信息流中打开 PPT 工作室需求卡。用户要求制作或生成 PPT/演示文稿时先调用，让用户填写受众、页数、主题、媒体偏好、语言和输出格式；提交前不会渲染。",
         inputSchema: z.object({
           topic: z.string().min(2).max(200).describe("从用户请求提取的演示主题"),
+          audience: z.string().min(1).max(200).optional().describe("用户已明确的目标受众"),
+          pageCount: z.number().int().min(3).max(30).optional().describe("用户已明确的页数"),
+          mediaPreference: z
+            .enum(["auto", "image-heavy", "text-first", "no-media"])
+            .optional()
+            .describe("用户已明确的媒体偏好"),
+          language: z.enum(["zh", "en"]).optional().describe("用户已明确的输出语言"),
+          outputFormat: z
+            .enum(["pptx", "html"])
+            .optional()
+            .describe("用户已明确的输出格式"),
         }),
-        execute: async ({ topic }) => {
+        execute: async ({
+          topic,
+          audience,
+          pageCount,
+          mediaPreference,
+          language,
+          outputFormat,
+        }) => {
           if (!context) throw new Error("当前会话无法创建 PPT 工作室任务");
           const { createSkillRun } = await import("@/lib/server/skill-runs");
           const run = await createSkillRun({
@@ -2477,7 +2531,15 @@ export function buildSkillPackTools(
             skillName: skill.name,
             status: "waiting_input",
             stage: "等待填写 PPT 需求",
-            payload: { topic, modelId: context.modelId },
+            payload: {
+              topic,
+              audience,
+              pageCount,
+              mediaPreference,
+              language,
+              outputFormat,
+              modelId: context.modelId,
+            },
           });
           if (!run) throw new Error("PPT 工作室任务创建失败");
           return {
@@ -2490,6 +2552,93 @@ export function buildSkillPackTools(
     });
     return tools;
   }
+  if (skill.id !== "skill-dashi-ppt") return tools;
+
+  Object.assign(tools, {
+    dashi_query_layouts: tool({
+      description:
+        "按主题和页面角色查询 Dashi PPT 候选版式。生成前必须先查询；需要图片槽时设置 needsMedia。",
+      inputSchema: z.object({
+        theme: z
+          .enum([
+            "theme01",
+            "theme02",
+            "theme03",
+            "theme04",
+            "theme05",
+            "theme06",
+            "theme07",
+            "theme08",
+            "theme09",
+            "theme10",
+            "theme11",
+            "theme12",
+          ])
+          .describe("Dashi PPT 主题"),
+        role: z.string().min(1).max(40).describe("页面角色，如 cover、agenda、metrics、comparison、timeline、closing"),
+        limit: z.number().int().min(1).max(12).optional(),
+        needsMedia: z.boolean().optional().describe("是否只查包含图片或视频槽的版式"),
+      }),
+      execute: async (input) => ({
+        text: "已查询 Dashi PPT 候选版式。",
+        result: await queryDashiLayouts(skill, input),
+      }),
+    }),
+    dashi_inspect_layouts: tool({
+      description:
+        "检查 Dashi PPT 版式可填写字段、文案长度、数组形状和媒体槽。写入 props 前必须检查复杂版式。",
+      inputSchema: z.object({
+        layouts: z
+          .array(z.string().regex(/^theme\d{2}_page\d{3}$/u))
+          .min(1)
+          .max(12),
+      }),
+      execute: async ({ layouts }) => ({
+        text: "已读取 Dashi PPT 版式字段契约。",
+        result: await inspectDashiLayouts(skill, layouts),
+      }),
+    }),
+    dashi_render_deck: tool({
+      description:
+        "根据已查询并检查的唯一版式与 props 渲染 Dashi PPT，完成校验后导出可下载 PPTX 或浏览器可编辑 HTML 离线包。",
+      inputSchema: z.object({
+        format: z.enum(["pptx", "html"]).default("pptx"),
+        goal: z.object({
+          title: z.string().min(1).max(120),
+          goal: z.string().min(1).max(1000),
+          audience: z.string().min(1).max(300),
+          owner: z.string().max(200).optional(),
+          randomSeed: z.string().min(3).max(120),
+          pageCount: z.number().int().min(1).max(30).optional(),
+          themePack: z.enum([
+            "theme01",
+            "theme02",
+            "theme03",
+            "theme04",
+            "theme05",
+            "theme06",
+            "theme07",
+            "theme08",
+            "theme09",
+            "theme10",
+            "theme11",
+            "theme12",
+          ]),
+          language: z.enum(["zh", "en"]).optional(),
+          slides: z
+            .array(
+              z.object({
+                layout: z.string().regex(/^theme\d{2}_page\d{3}$/u),
+                props: z.record(z.string(), z.unknown()),
+              })
+            )
+            .min(1)
+            .max(30),
+        }),
+      }),
+      execute: async ({ goal, format }) => renderDashiDeck(skill, userId, goal, format),
+    }),
+  });
   return tools;
 }
 
@@ -2505,7 +2654,7 @@ export function buildPptxTools(userId: string): ToolSet {
       }),
       execute: async ({ attachmentId }) => {
         const att = await loadOwnedPptxAttachment(userId, attachmentId);
-        const result = await extractPptxAttachmentText(att.storagePath);
+        const result = await extractPptxTextFromBuffer(att.buffer);
         return {
           text: result.text.slice(0, 12_000),
           slideCount: result.slideCount,
@@ -2521,8 +2670,8 @@ export function buildPptxTools(userId: string): ToolSet {
       }),
       execute: async ({ attachmentId }) => {
         const att = await loadOwnedPptxAttachment(userId, attachmentId);
-        const result = await extractPptxAttachmentText(att.storagePath);
-        const template = await analyzePptxTemplateFromStorage(att.storagePath);
+        const result = await extractPptxTextFromBuffer(att.buffer);
+        const template = await analyzePptxTemplate(att.buffer);
         return {
           text: `${template.text}\n\n模板文字摘要：\n${result.text.slice(0, 6_000)}`,
           slideCount: template.slideCount,
@@ -2574,15 +2723,15 @@ async function loadOwnedPptxAttachment(userId: string, attachmentId: string) {
   if (!att.name.toLowerCase().endsWith(".pptx")) {
     throw new Error("请选择 .pptx 附件");
   }
-  return att;
-}
+  // 新上传附件存放在私有 media_assets，attachments.storagePath 只是鉴权 URL；
+  // 生成的旧式 PPT 则仍可能落在 data/uploads。两种路径都在完成所有权校验后读取。
+  const media = await openMediaStream(att.id, userId);
+  if (media) return { ...att, buffer: media.buffer };
 
-async function analyzePptxTemplateFromStorage(storagePath: string) {
+  const filePath = localAttachmentPath(att.storagePath);
+  if (!filePath) throw new Error("附件路径不可读取");
   const { readFile } = await import("node:fs/promises");
-  const { localAttachmentPath } = await import("@/lib/server/pptx");
-  const filePath = localAttachmentPath(storagePath);
-  if (!filePath) throw new Error("模板路径不可读取");
-  return analyzePptxTemplate(await readFile(filePath));
+  return { ...att, buffer: await readFile(filePath) };
 }
 
 // ---------- MCP ----------
@@ -2590,7 +2739,16 @@ async function analyzePptxTemplateFromStorage(storagePath: string) {
 export async function buildMcpTools(
   userId: string,
   enabledUserServerIds: string[]
-): Promise<{ tools: ToolSet; close: () => Promise<void> }> {
+): Promise<{
+  tools: ToolSet;
+  mountedServers: Array<{
+    id: string;
+    name: string;
+    scope: "global" | "user";
+    toolNames: string[];
+  }>;
+  close: () => Promise<void>;
+}> {
   const servers = await db
     .select()
     .from(schema.mcpServers)
@@ -2602,23 +2760,28 @@ export async function buildMcpTools(
     .where(eq(schema.userMcpPreferences.userId, userId));
   const prefByServer = new Map(prefs.map((p) => [p.serverId, p.enabled]));
   const selected = new Set(enabledUserServerIds);
+  const hasExplicitSelection = selected.size > 0;
 
   const active = servers.filter((s) => {
     const prefEnabled = prefByServer.get(s.id);
     if (s.scope === "user") {
       if (s.ownerId !== userId) return false;
-      return selected.has(s.id) || prefEnabled === true;
+      if (selected.has(s.id)) return true;
+      // 空选择是“默认全部”；用户点选某一个后，本轮只挂载该个人服务器。
+      return !hasExplicitSelection && prefEnabled !== false;
     }
-    // global：不自动挂载全部；需聊天勾选、用户偏好，或服务器 defaultEnabled
-    return (
-      selected.has(s.id) ||
-      prefEnabled === true ||
-      (prefEnabled === undefined && s.defaultEnabled)
-    );
+    // 全局 MCP 由管理员统一启停，对所有用户自动挂载。
+    return true;
   });
 
   const clients: Awaited<ReturnType<typeof createMCPClient>>[] = [];
   const tools: ToolSet = {};
+  const mountedServers: Array<{
+    id: string;
+    name: string;
+    scope: "global" | "user";
+    toolNames: string[];
+  }> = [];
 
   const timeout = <T,>(p: Promise<T>, ms: number) =>
     Promise.race([
@@ -2628,38 +2791,60 @@ export async function buildMcpTools(
       ),
     ]);
 
-  for (const server of active) {
-    try {
-      // SSRF 防护：禁止指向内网/元数据地址
-      const { assertSafeUrl } = await import("@/lib/server/net-guard");
-      await assertSafeUrl(server.url);
-      const headers = server.headersEncrypted
-        ? (JSON.parse(decryptSecret(server.headersEncrypted)) as Record<string, string>)
-        : undefined;
-      // 单服务器 10s 超时，防止慢/挂的 MCP 拖死整个聊天请求
-      const client = await timeout(
-        createMCPClient({
-          // I6: 按 server.transport 选择传输（'streamable-http' → 'http'）
-          transport: {
-            type: server.transport === "streamable-http" ? "http" : "sse",
-            url: server.url,
-            headers,
-          },
-        }),
-        10_000
-      );
-      clients.push(client);
-      const serverTools = (await timeout(client.tools(), 10_000)) as ToolSet;
-      for (const [name, t] of Object.entries(serverTools)) {
-        tools[`${server.name.replace(/\W+/g, "_")}_${name}`] = t;
+  // 多个远程 MCP 并行握手，避免全局自动挂载后逐个累加连接延迟。
+  const connections = await Promise.all(
+    active.map(async (server) => {
+      let client: Awaited<ReturnType<typeof createMCPClient>> | null = null;
+      try {
+        // SSRF 防护：禁止指向内网/元数据地址
+        const { assertSafeUrl } = await import("@/lib/server/net-guard");
+        await assertSafeUrl(server.url);
+        const headers = server.headersEncrypted
+          ? (JSON.parse(decryptSecret(server.headersEncrypted)) as Record<string, string>)
+          : undefined;
+        // 单服务器 10s 超时，防止慢/挂的 MCP 拖死整个聊天请求
+        client = await timeout(
+          createMCPClient({
+            // I6: 按 server.transport 选择传输（'streamable-http' → 'http'）
+            transport: {
+              type: server.transport === "streamable-http" ? "http" : "sse",
+              url: server.url,
+              headers,
+            },
+          }),
+          10_000
+        );
+        const serverTools = (await timeout(client.tools(), 10_000)) as ToolSet;
+        return { server, client, serverTools };
+      } catch {
+        await client?.close().catch(() => {});
+        return null;
       }
-    } catch {
-      // MCP 服务器不可用时跳过，不阻塞聊天
+    })
+  );
+
+  for (const connection of connections) {
+    if (!connection) continue;
+    const { server, client, serverTools } = connection;
+    clients.push(client);
+    const prefix = server.name.replace(/\W+/g, "_").replace(/^_+|_+$/g, "");
+    const toolNames: string[] = [];
+    for (const [name, tool] of Object.entries(serverTools)) {
+      const exposedName = `${prefix}_${name}`;
+      tools[exposedName] = tool;
+      toolNames.push(exposedName);
     }
+    mountedServers.push({
+      id: server.id,
+      name: server.name,
+      scope: server.scope,
+      toolNames,
+    });
   }
 
   return {
     tools,
+    mountedServers,
     close: async () => {
       await Promise.allSettled(clients.map((c) => c.close()));
     },

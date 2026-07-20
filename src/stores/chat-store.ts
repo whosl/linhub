@@ -3,6 +3,7 @@
 import { create } from "zustand";
 import { getDataService } from "@/lib/data";
 import { replaceMessageImageParts } from "@/lib/message-image";
+import { clientRandomUUID } from "@/lib/client-id";
 import type {
   Message,
   MessagePart,
@@ -13,6 +14,8 @@ import type {
 // I10: ensureSession 并发去重，按 conversationId 复用 in-flight promise
 const ensureSessionInflight = new Map<string, Promise<void>>();
 const resumeSessionInflight = new Map<string, Promise<void>>();
+const optimisticId = (prefix: "c" | "msg" | "cg") =>
+  `${prefix}-${clientRandomUUID().replace(/-/g, "").slice(0, 16)}`;
 
 export interface ChatSession {
   conversationId: string;
@@ -37,6 +40,7 @@ interface ChatState {
   ensureSession: (conversationId: string) => Promise<void>;
   resume: (conversationId: string) => Promise<void>;
   send: (input: SendMessageInput) => Promise<void>;
+  retrySend: (conversationId: string, userMessageId: string) => Promise<void>;
   stop: (conversationId?: string) => Promise<void>;
   regenerate: (
     conversationId: string,
@@ -148,6 +152,7 @@ export const useChatStore = create<ChatState>((set, get) => {
   const localOwnedStreams = new Set<string>();
   // 删除/重置会话时递增版本，旧异步流或加载 promise 只能写回同版本的会话。
   const sessionVersions = new Map<string, number>();
+  const failedSendInputs = new Map<string, SendMessageInput>();
   const sessionVersion = (conversationId: string) =>
     sessionVersions.get(conversationId) ?? 0;
   const bumpSessionVersion = (conversationId: string) => {
@@ -216,6 +221,120 @@ export const useChatStore = create<ChatState>((set, get) => {
   const mergeLoadedMessages = (current: Message[], incoming: Message[]) =>
     incoming.reduce((messages, message) => upsertMessage(messages, message), current);
 
+  const prepareOptimisticSend = (rawInput: SendMessageInput) => {
+    const conversationId =
+      rawInput.conversationId ?? rawInput.clientConversationId ?? optimisticId("c");
+    const clientGenerationId = rawInput.clientGenerationId ?? optimisticId("cg");
+    const userMessageId = rawInput.clientUserMessageId ?? optimisticId("msg");
+    const assistantMessageId = rawInput.clientAssistantMessageId ?? optimisticId("msg");
+    const session = get().sessions[conversationId] ?? emptySession(conversationId);
+    const parentId =
+      rawInput.parentId !== undefined
+        ? rawInput.parentId
+        : session.currentLeafId ?? null;
+    const input: SendMessageInput = {
+      ...rawInput,
+      clientGenerationId,
+      clientConversationId: rawInput.conversationId ? undefined : conversationId,
+      clientUserMessageId: userMessageId,
+      clientAssistantMessageId: assistantMessageId,
+      parentId,
+    };
+    const createdAt = new Date().toISOString();
+    const userMessage: Message = {
+      id: userMessageId,
+      conversationId,
+      parentId,
+      role: "user",
+      parts: [
+        ...(input.images ?? []),
+        ...(input.attachments ?? []),
+        { type: "text", text: input.text },
+        { type: "tool-config", tools: input.tools },
+      ],
+      quotedText: input.quotedText,
+      createdAt,
+      status: "complete",
+      deliveryState: "sending",
+      clientOperationId: clientGenerationId,
+    };
+    const assistantMessage: Message = {
+      id: assistantMessageId,
+      conversationId,
+      parentId: userMessageId,
+      role: "assistant",
+      modelId: input.modelId,
+      parts: [],
+      createdAt,
+      status: "streaming",
+      clientOperationId: clientGenerationId,
+    };
+    updateSession(conversationId, (current) => ({
+      ...current,
+      loaded: true,
+      loadError: undefined,
+      streamError: undefined,
+      status: "streaming",
+      streamingMessageId: assistantMessageId,
+      currentLeafId: assistantMessageId,
+      messages: upsertMessage(
+        upsertMessage(current.messages, userMessage),
+        assistantMessage
+      ),
+    }));
+    failedSendInputs.set(userMessageId, input);
+    return { input, conversationId, userMessageId, assistantMessageId };
+  };
+
+  const failOptimisticSend = (
+    conversationId: string,
+    userMessageId: string,
+    assistantMessageId: string,
+    message: string,
+    accepted: boolean
+  ) => {
+    updateSession(conversationId, (session) => ({
+      ...session,
+      status: "idle",
+      streamingMessageId:
+        session.streamingMessageId === assistantMessageId
+          ? undefined
+          : session.streamingMessageId,
+      currentLeafId:
+        session.currentLeafId === assistantMessageId
+          ? accepted
+            ? assistantMessageId
+            : userMessageId
+          : session.currentLeafId,
+      streamError: message,
+      messages: session.messages.map((item) => {
+        if (item.id === userMessageId) {
+          return accepted
+            ? { ...item, deliveryState: "accepted" as const, deliveryError: undefined }
+            : {
+                ...item,
+                deliveryState: "failed" as const,
+                deliveryError: message,
+              };
+        }
+        if (item.id === assistantMessageId) {
+          return accepted
+            ? {
+                ...item,
+                status: "error" as const,
+                parts:
+                  item.parts.length > 0
+                    ? item.parts
+                    : [{ type: "text" as const, text: `⚠️ ${message}` }],
+              }
+            : item;
+        }
+        return item;
+      }).filter((item) => accepted || item.id !== assistantMessageId),
+    }));
+    if (accepted) failedSendInputs.delete(userMessageId);
+  };
+
   const messageVisibleProgress = (parts: MessagePart[]) =>
     parts.reduce((total, part) => {
       if (part.type === "text" || part.type === "reasoning") {
@@ -246,7 +365,24 @@ export const useChatStore = create<ChatState>((set, get) => {
       case "user-message":
       case "assistant-start":
       case "assistant-snapshot": {
-        const message = event.message;
+        const existing = get().sessions[conversationId]?.messages.find(
+          (item) => item.id === event.message.id
+        );
+        const message =
+          event.type === "user-message"
+            ? {
+                ...event.message,
+                deliveryState: "accepted" as const,
+                deliveryError: undefined,
+                clientOperationId: existing?.clientOperationId,
+              }
+            : {
+                ...event.message,
+                clientOperationId: existing?.clientOperationId,
+              };
+        if (event.type === "user-message") {
+          failedSendInputs.delete(message.id);
+        }
         update((s) => ({
           ...s,
           ...(event.type === "user-message"
@@ -254,6 +390,38 @@ export const useChatStore = create<ChatState>((set, get) => {
             : applyAssistantMessageEventSessionPatch(s, event.type, message)),
           messages: upsertMessage(s.messages, message),
           streamError: undefined,
+        }));
+        break;
+      }
+      case "routing-decision": {
+        update((s) => ({
+          ...s,
+          streamError: undefined,
+          messages: s.messages.map((m) => {
+            if (m.id !== event.messageId) return m;
+            const parts = [...m.parts];
+            const index = parts.findIndex((part) => part.type === "tool-config");
+            const nextConfig: MessagePart = {
+              type: "tool-config",
+              tools: event.decision.finalTools,
+              routing: event.decision,
+            };
+            if (index >= 0) {
+              const existing = parts[index];
+              parts[index] =
+                existing.type === "tool-config"
+                  ? {
+                      ...existing,
+                      originalTools: existing.originalTools ?? existing.tools,
+                      tools: event.decision.finalTools,
+                      routing: event.decision,
+                    }
+                  : nextConfig;
+            } else {
+              parts.push(nextConfig);
+            }
+            return { ...m, parts };
+          }),
         }));
         break;
       }
@@ -563,12 +731,16 @@ export const useChatStore = create<ChatState>((set, get) => {
       } else if (get().isStartingNew) {
         return;
       }
+      const optimistic = prepareOptimisticSend(input);
+      input = optimistic.input;
       // I11: 新会话首条响应标记进行中，用于在 / 页面显示停止按钮
       const isNewConversation = !input.conversationId;
       if (isNewConversation) set({ isStartingNew: true, startError: undefined });
-      let conversationId = input.conversationId;
-      let expectedVersion = conversationId ? sessionVersion(conversationId) : 0;
-      if (conversationId) localOwnedStreams.add(conversationId);
+      let conversationId = optimistic.conversationId;
+      let expectedVersion = sessionVersion(conversationId);
+      let accepted = false;
+      let terminal = false;
+      localOwnedStreams.add(conversationId);
       try {
         for await (const event of getDataService().sendMessage(input)) {
           if (event.type === "conversation-created") {
@@ -579,7 +751,7 @@ export const useChatStore = create<ChatState>((set, get) => {
               sessions: {
                 ...state.sessions,
                 [conversationId!]: {
-                  ...emptySession(conversationId!),
+                  ...(state.sessions[conversationId!] ?? emptySession(conversationId!)),
                   loaded: true,
                 },
               },
@@ -587,23 +759,59 @@ export const useChatStore = create<ChatState>((set, get) => {
             }));
             continue;
           }
-          if (!conversationId && event.type === "error") {
-            set({ startError: event.message });
-            continue;
+          if (event.type === "user-message" && event.message.id === optimistic.userMessageId) {
+            accepted = true;
           }
-          if (conversationId) {
-            if (sessionVersion(conversationId) !== expectedVersion) break;
-            applyEvent(conversationId, event, expectedVersion);
+          if (event.type === "done" || event.type === "error") terminal = true;
+          if (event.type === "error") {
+            if (isNewConversation) set({ startError: event.message });
+            failOptimisticSend(
+              conversationId,
+              optimistic.userMessageId,
+              optimistic.assistantMessageId,
+              event.message,
+              accepted
+            );
           }
+          if (sessionVersion(conversationId) !== expectedVersion) break;
+          applyEvent(conversationId, event, expectedVersion);
         }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "连接中断";
+        failOptimisticSend(
+          conversationId,
+          optimistic.userMessageId,
+          optimistic.assistantMessageId,
+          message,
+          accepted
+        );
       } finally {
-        if (conversationId) localOwnedStreams.delete(conversationId);
+        if (!terminal && !accepted) {
+          failOptimisticSend(
+            conversationId,
+            optimistic.userMessageId,
+            optimistic.assistantMessageId,
+            "连接中断，请重试",
+            false
+          );
+        }
+        localOwnedStreams.delete(conversationId);
         if (isNewConversation) set({ isStartingNew: false });
       }
     },
 
+    retrySend: async (conversationId, userMessageId) => {
+      const input = failedSendInputs.get(userMessageId);
+      if (!input) return;
+      updateSession(conversationId, (session) => ({
+        ...session,
+        status: "idle",
+        streamError: undefined,
+      }));
+      await get().send(input);
+    },
+
     stop: async (conversationId) => {
-      await getDataService().stopGeneration(conversationId);
       // abort 后 fetch 会抛 AbortError，streamNdjson 静默吞掉，
       // done/error 事件不会到达，session 会永远卡在 streaming → 下次发送被守卫拒绝。
       // 这里主动把状态重置回 idle，并把进行中的消息标记为 stopped。
@@ -621,33 +829,85 @@ export const useChatStore = create<ChatState>((set, get) => {
       } else {
         set({ startError: undefined });
       }
+      await getDataService().stopGeneration(conversationId);
     },
 
     regenerate: async (conversationId, assistantMessageId, modelId) => {
       // I8: 并发守卫——同 send
       const s = get().sessions[conversationId];
       if (s?.status === "streaming") return;
+      const target = s?.messages.find((message) => message.id === assistantMessageId);
+      if (!target?.parentId) return;
+      const clientGenerationId = optimisticId("cg");
+      const clientAssistantMessageId = optimisticId("msg");
+      const optimisticAssistant: Message = {
+        id: clientAssistantMessageId,
+        conversationId,
+        parentId: target.parentId,
+        role: "assistant",
+        modelId: modelId ?? target.modelId,
+        parts: [],
+        createdAt: new Date().toISOString(),
+        status: "streaming",
+        clientOperationId: clientGenerationId,
+      };
+      updateSession(conversationId, (session) => ({
+        ...session,
+        status: "streaming",
+        streamingMessageId: clientAssistantMessageId,
+        currentLeafId: clientAssistantMessageId,
+        streamError: undefined,
+        messages: upsertMessage(session.messages, optimisticAssistant),
+      }));
       localOwnedStreams.add(conversationId);
       const expectedVersion = sessionVersion(conversationId);
+      let terminal = false;
       try {
         for await (const event of getDataService().regenerate(
           conversationId,
           assistantMessageId,
-          modelId
+          modelId,
+          { clientGenerationId, clientAssistantMessageId }
         )) {
+          if (event.type === "done" || event.type === "error") terminal = true;
           if (sessionVersion(conversationId) !== expectedVersion) break;
           applyEvent(conversationId, event, expectedVersion);
         }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "连接中断";
+        applyEvent(
+          conversationId,
+          { type: "error", messageId: clientAssistantMessageId, message },
+          expectedVersion
+        );
       } finally {
+        if (!terminal) {
+          applyEvent(
+            conversationId,
+            {
+              type: "error",
+              messageId: clientAssistantMessageId,
+              message: "连接中断，请重新生成",
+            },
+            expectedVersion
+          );
+        }
         localOwnedStreams.delete(conversationId);
       }
     },
 
     switchBranch: (conversationId, leafId) => {
+      const previousLeafId = get().sessions[conversationId]?.currentLeafId;
       updateSession(conversationId, (s) => ({ ...s, currentLeafId: leafId }));
-      void getDataService().updateConversation(conversationId, {
-        currentLeafId: leafId,
-      });
+      void getDataService()
+        .updateConversation(conversationId, { currentLeafId: leafId })
+        .catch(() => {
+          updateSession(conversationId, (session) =>
+            session.currentLeafId === leafId
+              ? { ...session, currentLeafId: previousLeafId }
+              : session
+          );
+        });
     },
 
     replaceMessageImage: async (conversationId, messageId, oldUrl, newUrl, editPrompt) => {

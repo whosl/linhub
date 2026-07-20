@@ -38,7 +38,7 @@ export const canceledClientIds = (globalChatState.__linhubCanceledClientIds ??=
 export const pendingGenerationKeys =
   (globalChatState.__linhubPendingGenerationKeys ??= new Map());
 
-export const PENDING_GENERATION_STALE_MS = 300_000;
+export const PENDING_GENERATION_STALE_MS = 1_800_000;
 
 export function isLiveTask(task: ChatGenerationTask | undefined, userId?: string) {
   return (

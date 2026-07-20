@@ -1,5 +1,6 @@
 import type {
   AppSettings,
+  AdminUserDetail,
   EngineTestInput,
   EngineTestResult,
   Artifact,
@@ -78,7 +79,11 @@ export interface DataService {
   regenerate(
     conversationId: string,
     assistantMessageId: string,
-    modelId?: string
+    modelId?: string,
+    optimisticIds?: {
+      clientGenerationId: string;
+      clientAssistantMessageId: string;
+    }
   ): AsyncIterable<StreamEvent>;
   setFeedback(messageId: string, feedback: "up" | "down" | null): Promise<void>;
   replaceMessageImage(
@@ -91,6 +96,7 @@ export interface DataService {
     image: string;
     mask?: string | null;
     prompt: string;
+    operationKey?: string;
   }): Promise<{ url: string }>;
 
   // ---- Artifacts ----
@@ -183,7 +189,13 @@ export interface AdminService {
   ): Promise<AppSettings>;
   testEngineConnection(input: EngineTestInput): Promise<EngineTestResult>;
   listUsers(): Promise<User[]>;
+  getUserDetail(userId: string): Promise<AdminUserDetail>;
   grantBalance(userId: string, amountCents: number, note?: string): Promise<void>;
+  updateUserSubscription(
+    userId: string,
+    input: { planId: string | null; expiresInDays?: number }
+  ): Promise<AdminUserDetail>;
+  deleteUser(userId: string): Promise<void>;
   listAllPlans(): Promise<Plan[]>;
   savePlan(p: Partial<Plan> & { name: string }): Promise<Plan>;
   deletePlan(id: string): Promise<void>;

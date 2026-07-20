@@ -1,0 +1,11 @@
+WARNING: Running on Emulator
+Benchmark is running on an emulator, which is not representative of
+real user devices. Use a physical device to benchmark. Emulator
+benchmark improvements might not carry over to a real user's
+experience (or even regress real device performance).
+
+StreamingChatBenchmark_renderOneHundredTwentyStreamingFrames
+frameCount           [min 174.0](file://StreamingChatBenchmark_renderOneHundredTwentyStreamingFrames_iter000_2026-07-13-23-25-36.perfetto-trace),   [median 195.5](file://StreamingChatBenchmark_renderOneHundredTwentyStreamingFrames_iter005_2026-07-13-23-26-42.perfetto-trace),   [max 207.0](file://StreamingChatBenchmark_renderOneHundredTwentyStreamingFrames_iter005_2026-07-13-23-26-42.perfetto-trace)
+frameDurationCpuMs   P50   22.4,   P90   83.6,   P95  156.4,   P99  211.7
+frameOverrunMs       P50   19.7,   P90  156.8,   P95  188.6,   P99  225.6
+Traces: Iteration [0](file://StreamingChatBenchmark_renderOneHundredTwentyStreamingFrames_iter000_2026-07-13-23-25-36.perfetto-trace) [1](file://StreamingChatBenchmark_renderOneHundredTwentyStreamingFrames_iter001_2026-07-13-23-25-49.perfetto-trace) [2](file://StreamingChatBenchmark_renderOneHundredTwentyStreamingFrames_iter002_2026-07-13-23-26-03.perfetto-trace) [3](file://StreamingChatBenchmark_renderOneHundredTwentyStreamingFrames_iter003_2026-07-13-23-26-17.perfetto-trace) [4](file://StreamingChatBenchmark_renderOneHundredTwentyStreamingFrames_iter004_2026-07-13-23-26-30.perfetto-trace) [5](file://StreamingChatBenchmark_renderOneHundredTwentyStreamingFrames_iter005_2026-07-13-23-26-42.perfetto-trace) [6](file://StreamingChatBenchmark_renderOneHundredTwentyStreamingFrames_iter006_2026-07-13-23-26-56.perfetto-trace) [7](file://StreamingChatBenchmark_renderOneHundredTwentyStreamingFrames_iter007_2026-07-13-23-27-10.perfetto-trace) [8](file://StreamingChatBenchmark_renderOneHundredTwentyStreamingFrames_iter008_2026-07-13-23-27-24.perfetto-trace) [9](file://StreamingChatBenchmark_renderOneHundredTwentyStreamingFrames_iter009_2026-07-13-23-27-38.perfetto-trace)

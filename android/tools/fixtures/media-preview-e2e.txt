@@ -1,0 +1,3 @@
+LinHub Android 文件中心纯文本预览
+验收口令：LNHUB-MEDIA-TEXT-417
+这一行用于确认选择、滚动与下载后的 UTF-8 内容保持一致。

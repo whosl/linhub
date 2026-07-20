@@ -1,5 +1,6 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
+import { bearer } from "better-auth/plugins";
 import { eq, sql } from "drizzle-orm";
 import { headers } from "next/headers";
 import { db, schema } from "./db";
@@ -34,6 +35,7 @@ export const auth = betterAuth({
     },
     usePlural: true,
   }),
+  plugins: [bearer()],
   emailAndPassword: {
     enabled: true,
     minPasswordLength: 8,

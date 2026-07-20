@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { DropdownMenu as DropdownMenuPrimitive } from "radix-ui";
-import { CheckIcon, ChevronRightIcon } from "lucide-react";
+import { CheckIcon, ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const DropdownMenu = DropdownMenuPrimitive.Root;
@@ -112,11 +112,15 @@ function DropdownMenuSeparator({
 function DropdownMenuSubTrigger({
   className,
   inset,
+  arrowDirection = "right",
   children,
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.SubTrigger> & {
   inset?: boolean;
+  arrowDirection?: "left" | "right";
 }) {
+  const ArrowIcon = arrowDirection === "left" ? ChevronLeftIcon : ChevronRightIcon;
+
   return (
     <DropdownMenuPrimitive.SubTrigger
       className={cn(
@@ -127,7 +131,7 @@ function DropdownMenuSubTrigger({
       {...props}
     >
       {children}
-      <ChevronRightIcon className="ml-auto size-4" />
+      <ArrowIcon className="ml-auto size-4" />
     </DropdownMenuPrimitive.SubTrigger>
   );
 }

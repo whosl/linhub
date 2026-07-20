@@ -13,6 +13,7 @@ const ALLOWED_FRONTMATTER_FIELDS = new Set([
 const RESOURCE_DIRECTORIES = ["scripts", "references", "assets", "agents"] as const;
 const NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const WINDOWS_ABSOLUTE_PATH_PATTERN = /^[a-zA-Z]:[\\/]/;
+const OS_METADATA_NAMES = new Set([".DS_Store", "Thumbs.db", "desktop.ini", "__MACOSX"]);
 
 export const AGENT_SKILL_LIMITS = {
   name: 64,
@@ -552,6 +553,9 @@ async function inspectPackageTree(
   digestFiles: InspectedFile[]
 ): Promise<void> {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
+    // Finder/ZIP 可能夹带 AppleDouble 与系统索引文件；它们不属于 Skill 包内容，
+    // 不应进入资源清单或影响 package digest。
+    if (isOsMetadataEntry(entry.name)) continue;
     const absolutePath = path.join(directory, entry.name);
     assertInsideRoot(rootPath, absolutePath);
     const stats = await lstat(absolutePath);
@@ -648,6 +652,7 @@ async function discoverSkillDirectories(
   errors: AgentSkillScanError[]
 ): Promise<void> {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (isOsMetadataEntry(entry.name)) continue;
     const absolutePath = path.join(directory, entry.name);
     assertInsideRoot(rootPath, absolutePath);
     const stats = await lstat(absolutePath);
@@ -661,6 +666,10 @@ async function discoverSkillDirectories(
       directories.push(directory);
     }
   }
+}
+
+function isOsMetadataEntry(name: string): boolean {
+  return name.startsWith("._") || OS_METADATA_NAMES.has(name);
 }
 
 async function assertRealDirectory(targetPath: string, label: string): Promise<void> {

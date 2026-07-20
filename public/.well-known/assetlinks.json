@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.linhub.android.debug",
+      "sha256_cert_fingerprints": [
+        "C4:5C:E7:D3:72:3E:41:1A:D2:96:7A:AC:94:8E:33:5E:7D:CB:64:66:05:77:99:13:91:86:63:F5:FA:6F:C0:C0"
+      ]
+    }
+  }
+]

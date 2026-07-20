@@ -4,7 +4,7 @@ import * as React from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { BrainIcon, ChevronDownIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { stripHtmlComments } from "@/lib/chat-text";
+import { sanitizeReasoningText } from "@/lib/chat-text";
 import type { ReasoningPart } from "@/lib/types";
 
 export function ReasoningBlock({
@@ -19,7 +19,7 @@ export function ReasoningBlock({
   keepOpen?: boolean;
 }) {
   const [open, setOpen] = React.useState(false);
-  const displayText = stripHtmlComments(part.text);
+  const displayText = sanitizeReasoningText(part.text);
   const hasText = displayText.length > 0;
 
   // 思考和正文仍在流式生成时保持展开；整条消息完成后自动收起。

@@ -14,6 +14,22 @@ async function ownedConversation(id: string, userId: string) {
   return c ?? null;
 }
 
+function toUiConversation(c: typeof schema.conversations.$inferSelect) {
+  return {
+    id: c.id,
+    title: c.title,
+    projectId: c.projectId ?? undefined,
+    skillId: c.skillId ?? undefined,
+    modelId: c.modelId,
+    styleId: c.styleId ?? undefined,
+    pinned: c.pinned,
+    archived: c.archived,
+    currentLeafId: c.currentLeafId ?? undefined,
+    createdAt: c.createdAt.toISOString(),
+    updatedAt: c.updatedAt.toISOString(),
+  };
+}
+
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -31,19 +47,7 @@ export async function GET(
     .orderBy(asc(schema.messages.createdAt));
 
   return Response.json({
-    conversation: {
-      id: c.id,
-      title: c.title,
-      projectId: c.projectId ?? undefined,
-      skillId: c.skillId ?? undefined,
-      modelId: c.modelId,
-      styleId: c.styleId ?? undefined,
-      pinned: c.pinned,
-      archived: c.archived,
-      currentLeafId: c.currentLeafId ?? undefined,
-      createdAt: c.createdAt.toISOString(),
-      updatedAt: c.updatedAt.toISOString(),
-    },
+    conversation: toUiConversation(c),
     messages: msgs.map((m) => ({
       id: m.id,
       conversationId: m.conversationId,
@@ -122,14 +126,15 @@ export async function PATCH(
   }
 
   if (Object.keys(patch).length === 0) {
-    return Response.json({ ok: true });
+    return Response.json(toUiConversation(c));
   }
 
-  await db
+  const [updated] = await db
     .update(schema.conversations)
     .set({ ...patch, updatedAt: new Date() })
-    .where(eq(schema.conversations.id, id));
-  return Response.json({ ok: true });
+    .where(eq(schema.conversations.id, id))
+    .returning();
+  return Response.json(toUiConversation(updated));
 }
 
 export async function DELETE(

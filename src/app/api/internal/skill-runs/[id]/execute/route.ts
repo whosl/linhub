@@ -5,6 +5,7 @@ import { computeCostCents, resolveModel } from "@/lib/server/llm/registry";
 import {
   getSkillRunRecord,
   isSkillRunCancellationRequested,
+  settleRunningSkillRunSteps,
   updateSkillRun,
   upsertSkillRunStep,
 } from "@/lib/server/skill-runs";
@@ -55,6 +56,20 @@ export async function POST(
     return Response.json({ ok: true });
   } catch (error) {
     const message = error instanceof Error ? error.message.slice(0, 2_000) : "Skill 执行失败";
+    const cancelled =
+      (error instanceof Error && error.name === "AbortError") ||
+      (await isSkillRunCancellationRequested(id));
+    if (cancelled) {
+      await settleRunningSkillRunSteps(id, "cancelled");
+      await updateSkillRun(id, {
+        status: "cancelled",
+        stage: "已停止",
+        progress: 100,
+        error: null,
+      });
+      return Response.json({ ok: true, status: "cancelled" });
+    }
+    await settleRunningSkillRunSteps(id, "failed", message);
     await updateSkillRun(id, { status: "failed", stage: "执行失败", error: message });
     return Response.json({ error: message }, { status: 500 });
   }

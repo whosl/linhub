@@ -9,7 +9,13 @@
     "lint": "eslint",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
-    "backfill:media": "node scripts/backfill-media.mjs"
+    "backfill:media": "node scripts/backfill-media.mjs",
+    "verify:billing-idempotency": "node scripts/verify-billing-idempotency.mjs",
+    "verify:image-edit-idempotency": "node scripts/verify-image-edit-idempotency.mjs",
+    "verify:image-edit-route": "node scripts/verify-image-edit-route.mjs",
+    "verify:optimistic-query": "node --experimental-strip-types scripts/verify-optimistic-query.mjs",
+    "verify:android-parity": "node android/tools/verify-web-android-parity.mjs",
+    "verify:android-delivery": "node android/tools/verify-android-delivery.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.8",

@@ -3,16 +3,24 @@ import { db, schema } from "@/lib/server/db";
 import { getSession } from "@/lib/server/auth";
 import { ensureSeeded } from "@/lib/server/seed";
 import { getActiveSubscription } from "@/lib/server/billing";
+import { getOwnedMedia } from "@/lib/server/media";
 
 export async function PATCH(req: Request) {
   const session = await getSession().catch(() => null);
   if (!session) return Response.json({ error: "unauthorized" }, { status: 401 });
   const patch = (await req.json()) as {
     name?: string;
-    avatarUrl?: string;
+    avatarUrl?: string | null;
     /** 设置个人默认对话模型；传 null 清除 */
     defaultModelId?: string | null;
   };
+  if (patch.avatarUrl !== undefined && patch.avatarUrl !== null) {
+    const mediaId = /^\/api\/media\/([A-Za-z0-9._-]+)$/.exec(patch.avatarUrl)?.[1];
+    const media = mediaId ? await getOwnedMedia(mediaId, session.user.id) : null;
+    if (!media || !media.mimeType.startsWith("image/")) {
+      return Response.json({ error: "头像图片无效" }, { status: 400 });
+    }
+  }
   if (patch.defaultModelId) {
     const [model] = await db
       .select({
@@ -46,7 +54,7 @@ export async function PATCH(req: Request) {
     .update(schema.users)
     .set({
       ...(patch.name ? { name: patch.name } : {}),
-      ...(patch.avatarUrl ? { image: patch.avatarUrl } : {}),
+      ...(patch.avatarUrl !== undefined ? { image: patch.avatarUrl || null } : {}),
       ...(patch.defaultModelId !== undefined
         ? { defaultModelId: patch.defaultModelId || null }
         : {}),

@@ -5,6 +5,7 @@ import type {
 } from "@/lib/data/service";
 import type {
   AppSettings,
+  AdminUserDetail,
   Artifact,
   ChatStyle,
   Conversation,
@@ -201,10 +202,63 @@ class MockAdminService implements AdminService {
     await sleep(120);
     return [...this.s.users];
   }
+  async getUserDetail(userId: string): Promise<AdminUserDetail> {
+    await sleep(120);
+    const user = this.s.users.find((x) => x.id === userId);
+    if (!user) throw new Error("用户不存在");
+    return {
+      user: { ...user },
+      usageRecords: this.s.usageRecords
+        .filter((x) => x.userId === userId)
+        .map((x) => ({ ...x })),
+      ledger: this.s.ledger.filter((x) => x.userId === userId).map((x) => ({ ...x })),
+    };
+  }
   async grantBalance(userId: string, amountCents: number) {
     await sleep(200);
     const u = this.s.users.find((x) => x.id === userId);
-    if (u) u.balance += amountCents;
+    if (!u) throw new Error("用户不存在");
+    u.balance += amountCents;
+    this.s.ledger.unshift({
+      id: `lg-${uid()}`,
+      userId,
+      amountCents,
+      balanceAfterCents: u.balance,
+      reason: "grant",
+      description: "管理员赠送",
+      createdAt: nowIso(),
+    });
+  }
+  async updateUserSubscription(
+    userId: string,
+    input: { planId: string | null; expiresInDays?: number }
+  ) {
+    await sleep(200);
+    const user = this.s.users.find((x) => x.id === userId);
+    if (!user) throw new Error("用户不存在");
+    if (!input.planId) {
+      user.subscription = undefined;
+      return this.getUserDetail(userId);
+    }
+    const plan = this.s.plans.find((x) => x.id === input.planId);
+    if (!plan) throw new Error("套餐不存在");
+    const days = input.expiresInDays ?? 30;
+    user.subscription = {
+      planId: plan.id,
+      planName: plan.name,
+      modelTier: plan.modelTier,
+      startedAt: nowIso(),
+      expiresAt: new Date(Date.now() + days * 86_400_000).toISOString(),
+      usedQuotaCents: 0,
+      monthlyQuotaCents: plan.monthlyQuotaCents,
+    };
+    return this.getUserDetail(userId);
+  }
+  async deleteUser(userId: string) {
+    await sleep(200);
+    this.s.users = this.s.users.filter((x) => x.id !== userId);
+    this.s.usageRecords = this.s.usageRecords.filter((x) => x.userId !== userId);
+    this.s.ledger = this.s.ledger.filter((x) => x.userId !== userId);
   }
   async listAllPlans() {
     await sleep(100);
@@ -406,8 +460,10 @@ export class MockDataService implements DataService {
       (this.s.models.find((m) => m.enabled && !m.capabilities.includes("image-generation"))?.id ??
         "");
     if (isNew) {
-      conversation = {
-        id: `c-${uid()}`,
+      const requestedId = input.clientConversationId ?? `c-${uid()}`;
+      const existing = this.s.conversations.find((item) => item.id === requestedId);
+      conversation = existing ?? {
+        id: requestedId,
         title: "新对话",
         modelId: effectiveModelId,
         projectId: input.projectId,
@@ -418,8 +474,10 @@ export class MockDataService implements DataService {
         createdAt: nowIso(),
         updatedAt: nowIso(),
       };
-      this.s.conversations.unshift(conversation);
-      this.s.messages[conversation.id] = [];
+      if (!existing) {
+        this.s.conversations.unshift(conversation);
+        this.s.messages[conversation.id] = [];
+      }
       yield { type: "conversation-created", conversation: { ...conversation } };
     } else {
       conversation = this.s.conversations.find((c) => c.id === input.conversationId)!;
@@ -430,8 +488,10 @@ export class MockDataService implements DataService {
     const parentId =
       input.parentId !== undefined ? input.parentId : conversation.currentLeafId ?? null;
 
-    const userMessage: Message = {
-      id: `msg-${uid()}`,
+    const userMessage: Message = msgs.find(
+      (message) => message.id === input.clientUserMessageId
+    ) ?? {
+      id: input.clientUserMessageId ?? `msg-${uid()}`,
       conversationId: conversation.id,
       parentId,
       role: "user",
@@ -445,10 +505,18 @@ export class MockDataService implements DataService {
       createdAt: nowIso(),
       status: "complete",
     };
-    msgs.push(userMessage);
+    if (!msgs.some((message) => message.id === userMessage.id)) msgs.push(userMessage);
     yield { type: "user-message", message: { ...userMessage } };
 
-    yield* this.streamAssistant(conversation, userMessage.id, effectiveModelId, input.text, input.extendedThinking);
+    yield* this.streamAssistant(
+      conversation,
+      userMessage.id,
+      effectiveModelId,
+      input.text,
+      input.extendedThinking,
+      input.thinkingEffort,
+      input.clientAssistantMessageId
+    );
 
     if (isNew) {
       await sleep(300);
@@ -462,13 +530,29 @@ export class MockDataService implements DataService {
     parentId: string,
     modelId: string,
     userText: string,
-    extendedThinking: boolean
+    extendedThinking: boolean,
+    thinkingEffort?: SendMessageInput["thinkingEffort"],
+    clientAssistantMessageId?: string
   ): AsyncIterable<StreamEvent> {
     const msgs = this.s.messages[conversation.id];
     this.s.aborted.delete(conversation.id);
 
-    const assistant: Message = {
-      id: `msg-${uid()}`,
+    const existing = clientAssistantMessageId
+      ? msgs.find((message) => message.id === clientAssistantMessageId)
+      : undefined;
+    if (existing && existing.status !== "streaming") {
+      yield { type: "assistant-snapshot", message: { ...existing } };
+      yield {
+        type: "done",
+        messageId: existing.id,
+        usage: existing.usage,
+        status: existing.status,
+      };
+      return;
+    }
+
+    const assistant: Message = existing ?? {
+      id: clientAssistantMessageId ?? `msg-${uid()}`,
       conversationId: conversation.id,
       parentId,
       role: "assistant",
@@ -477,7 +561,7 @@ export class MockDataService implements DataService {
       createdAt: nowIso(),
       status: "streaming",
     };
-    msgs.push(assistant);
+    if (!existing) msgs.push(assistant);
     conversation.currentLeafId = assistant.id;
     yield { type: "assistant-start", message: { ...assistant } };
 
@@ -485,13 +569,22 @@ export class MockDataService implements DataService {
 
     // 1. 思考过程
     if (extendedThinking) {
+      const effortDelay =
+        {
+          minimal: 12,
+          low: 18,
+          medium: 25,
+          high: 32,
+          xhigh: 38,
+          max: 44,
+        }[thinkingEffort ?? "minimal"] ?? 12;
       const start = Date.now();
       let reasoning = "";
       for (const delta of chunked(MOCK_REASONING, 5)) {
         if (stopped()) break;
         reasoning += delta;
         yield { type: "reasoning-delta", messageId: assistant.id, delta };
-        await sleep(25);
+        await sleep(effortDelay);
       }
       assistant.parts.push({ type: "reasoning", text: reasoning, durationMs: Date.now() - start });
       yield { type: "reasoning-done", messageId: assistant.id, durationMs: Date.now() - start };
@@ -565,7 +658,11 @@ export class MockDataService implements DataService {
   async *regenerate(
     conversationId: string,
     assistantMessageId: string,
-    modelId?: string
+    modelId?: string,
+    optimisticIds?: {
+      clientGenerationId: string;
+      clientAssistantMessageId: string;
+    }
   ): AsyncIterable<StreamEvent> {
     const conversation = this.s.conversations.find((c) => c.id === conversationId);
     const msgs = this.s.messages[conversationId];
@@ -585,7 +682,9 @@ export class MockDataService implements DataService {
         this.s.models.find((m) => m.enabled && !m.capabilities.includes("image-generation"))?.id ??
         "",
       userText,
-      true
+      true,
+      undefined,
+      optimisticIds?.clientAssistantMessageId
     );
   }
 
@@ -613,7 +712,12 @@ export class MockDataService implements DataService {
     }
     throw new Error("图片不存在");
   }
-  async editImage(input: { image: string; mask?: string | null; prompt: string }) {
+  async editImage(input: {
+    image: string;
+    mask?: string | null;
+    prompt: string;
+    operationKey?: string;
+  }) {
     await sleep(600);
     void input.mask;
     void input.prompt;

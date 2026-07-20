@@ -1,13 +1,15 @@
 "use client";
 
 import * as React from "react";
-import { motion } from "motion/react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   ArrowUpIcon,
   BookOpenIcon,
   BrainIcon,
   CheckIcon,
   ChevronDownIcon,
+  ChevronLeftIcon,
+  ChevronUpIcon,
   GlobeIcon,
   ImageIcon,
   Loader2Icon,
@@ -22,9 +24,9 @@ import {
   XIcon,
 } from "lucide-react";
 import { cn, formatBytes } from "@/lib/utils";
+import { clientRandomUUID } from "@/lib/client-id";
 import { FILE_ACCEPT } from "@/lib/file-types";
 import type {
-  ChatStyle,
   ChatToolToggles,
   FilePart,
   ImagePart,
@@ -33,6 +35,7 @@ import type {
   Model,
   Project,
   Skill,
+  ThinkingEffort,
 } from "@/lib/types";
 import { getDataService } from "@/lib/data";
 import { ImageMaskEditor } from "./image-mask-editor";
@@ -44,15 +47,26 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/misc";
 import { toast } from "sonner";
+import {
+  getRecommendedThinkingEffort,
+  getThinkingEffortOptionsForModel,
+  modelSupportsThinking,
+  modelSupportsThinkingEffort,
+  resolveModelThinkingEffort,
+  THINKING_EFFORT_LABELS,
+} from "@/lib/model-thinking";
 
 export interface ComposerState {
   modelId: string;
   styleId: string;
   extendedThinking: boolean;
+  thinkingEffort: ThinkingEffort;
   tools: ChatToolToggles;
 }
 
@@ -67,11 +81,43 @@ const PROVIDER_LABELS: Record<string, string> = {
   "xiaomi-token-plan": "小米 (Token Plan)",
 };
 
+type ModelMenuView = "root" | "models" | "thinking";
+type ToolMenuView = "root" | "knowledge" | "tools";
+type ScopeChoiceState = "default" | "selected" | "off" | "locked";
+
+type ComposerUpload = {
+  id: string;
+  file: File;
+  isImage: boolean;
+  previewUrl?: string;
+  status: "uploading" | "failed";
+  error?: string;
+};
+
+function useMediaQuery(query: string) {
+  const subscribe = React.useCallback(
+    (onStoreChange: () => void) => {
+      if (typeof window === "undefined") return () => {};
+      const media = window.matchMedia(query);
+      media.addEventListener("change", onStoreChange);
+      return () => media.removeEventListener("change", onStoreChange);
+    },
+    [query]
+  );
+  const getSnapshot = React.useCallback(
+    () => typeof window !== "undefined" && window.matchMedia(query).matches,
+    [query]
+  );
+  return React.useSyncExternalStore(subscribe, getSnapshot, () => false);
+}
+
 export function ChatInput({
   models,
-  styles,
   composer,
   onComposerChange,
+  modelThinkingEfforts = {},
+  onSetModelThinkingEffort,
+  onResetModelThinkingEffort,
   quotedText,
   onClearQuote,
   isStreaming,
@@ -82,14 +128,20 @@ export function ChatInput({
   onSetDefaultModel,
   knowledgeBases = [],
   activeProject,
+  pendingProject,
   activeSkill,
+  isAdmin = false,
 }: {
   models: Model[];
-  styles: ChatStyle[];
   knowledgeBases?: KnowledgeBase[];
   activeProject?: Project | null;
+  /** 新对话 URL 预选的项目；用于项目内输入提示 */
+  pendingProject?: Project | null;
   composer: ComposerState;
   onComposerChange: (patch: Partial<ComposerState>) => void;
+  modelThinkingEfforts?: Record<string, ThinkingEffort>;
+  onSetModelThinkingEffort?: (modelId: string, effort: ThinkingEffort) => void;
+  onResetModelThinkingEffort?: (modelId: string) => void;
   quotedText?: string;
   onClearQuote?: () => void;
   isStreaming: boolean;
@@ -101,21 +153,25 @@ export function ChatInput({
   /** 把指定模型设为用户默认 */
   onSetDefaultModel?: (modelId: string) => void;
   activeSkill?: Skill;
+  /** 管理员可查看全局 MCP；普通用户仅看到自己的服务器。 */
+  isAdmin?: boolean;
 }) {
   const [text, setText] = React.useState("");
   const [images, setImages] = React.useState<ImagePart[]>([]);
   const [files, setFiles] = React.useState<FilePart[]>([]);
+  const [pendingUploads, setPendingUploads] = React.useState<ComposerUpload[]>([]);
   const [recording, setRecording] = React.useState(false);
   const [modelMenuOpen, setModelMenuOpen] = React.useState(false);
+  const [modelMenuView, setModelMenuView] = React.useState<ModelMenuView>("root");
+  const [toolMenuOpen, setToolMenuOpen] = React.useState(false);
+  const [toolMenuView, setToolMenuView] = React.useState<ToolMenuView>("root");
   const [pendingUploadCount, setPendingUploadCount] = React.useState(0);
   // 图片编辑器：记录当前要编辑的图片 URL。
   const [editingImage, setEditingImage] = React.useState<string | null>(null);
-  const knowledgeScopeHintId = React.useId();
-  const mcpScopeHintId = React.useId();
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
-  const imageEditInputRef = React.useRef<HTMLInputElement>(null);
   const pendingUploadCountRef = React.useRef(0);
+  const cancelledUploadIdsRef = React.useRef<Set<string>>(new Set());
   // C4: 追踪本地创建的 blob URL（服务端返回的 url 不应 revoke），卸载时统一释放。
   const localBlobUrls = React.useRef<Set<string>>(new Set());
   const [mcpServers, setMcpServers] = React.useState<McpServer[]>([]);
@@ -139,7 +195,7 @@ export function ChatInput({
         const ds = getDataService();
         const [userServers, globalServers] = await Promise.all([
           ds.listMcpServers("user"),
-          ds.listMcpServers("global"),
+          isAdmin ? ds.listMcpServers("global") : Promise.resolve([]),
         ]);
         if (!cancelled) {
           setMcpServers(
@@ -153,64 +209,136 @@ export function ChatInput({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [isAdmin]);
 
   const chatModels = models.filter((m) => !m.capabilities.includes("image-generation"));
+  // 两列 Radix 子菜单至少需要约 680px；窄屏和平板统一在单个弹层内切换。
+  const compactModelMenu = useMediaQuery("(max-width: 767px)");
+  const prefersReducedMotion = useReducedMotion();
+  const nestedMenuTransition = prefersReducedMotion
+    ? { duration: 0.01 }
+    : { duration: 0.145, ease: [0.2, 0.82, 0.18, 1] as const };
+  const modelGroups = React.useMemo(
+    () =>
+      Object.entries(
+        chatModels.reduce<Record<string, Model[]>>((acc, m) => {
+          const key = m.providerKind;
+          (acc[key] ??= []).push(m);
+          return acc;
+        }, {})
+      ),
+    [chatModels]
+  );
   const currentModel =
     chatModels.find((m) => m.id === composer.modelId) ??
     (defaultModelId ? chatModels.find((m) => m.id === defaultModelId) : undefined);
-  const currentStyle = styles.find((s) => s.id === composer.styleId);
+  const currentModelSupportsThinking = modelSupportsThinking(currentModel);
+  const currentRecommendedThinkingEffort =
+    getRecommendedThinkingEffort(currentModel);
+  const currentModelThinkingEffort =
+    currentModel ? resolveModelThinkingEffort(currentModel, modelThinkingEfforts) : composer.thinkingEffort;
+  const currentEffectiveThinkingEffort =
+    currentModel && modelSupportsThinkingEffort(currentModel, composer.thinkingEffort)
+      ? composer.thinkingEffort
+      : currentModelThinkingEffort;
+  const currentThinkingLabel =
+    THINKING_EFFORT_LABELS[currentEffectiveThinkingEffort];
+  const thinkingEffortOptions = getThinkingEffortOptionsForModel(currentModel);
+  const currentModelThinkingOverridden =
+    !!currentModel &&
+    modelThinkingEfforts[currentModel.id] !== undefined &&
+    modelSupportsThinkingEffort(currentModel, modelThinkingEfforts[currentModel.id]) &&
+    modelThinkingEfforts[currentModel.id] !== currentRecommendedThinkingEffort;
+  const showModelMenuView = React.useCallback((view: ModelMenuView) => {
+    setModelMenuView(view);
+  }, []);
+
+  React.useEffect(() => {
+    if (composer.thinkingEffort === currentEffectiveThinkingEffort) return;
+    onComposerChange({ thinkingEffort: currentEffectiveThinkingEffort });
+  }, [composer.thinkingEffort, currentEffectiveThinkingEffort, onComposerChange]);
+
+  const selectModel = (model: Model) => {
+    const thinkingEffort = resolveModelThinkingEffort(model, modelThinkingEfforts);
+    onComposerChange({
+      modelId: model.id,
+      extendedThinking: modelSupportsThinking(model),
+      thinkingEffort,
+    });
+    setModelMenuOpen(false);
+  };
+
+  const selectThinkingEffort = (effort: ThinkingEffort) => {
+    if (currentModel) onSetModelThinkingEffort?.(currentModel.id, effort);
+    onComposerChange({
+      extendedThinking: currentModelSupportsThinking,
+      thinkingEffort: effort,
+    });
+    setModelMenuOpen(false);
+  };
+
+  const resetThinkingEffort = () => {
+    if (!currentModel) return;
+    onResetModelThinkingEffort?.(currentModel.id);
+    onComposerChange({
+      extendedThinking: currentModelSupportsThinking,
+      thinkingEffort: currentRecommendedThinkingEffort,
+    });
+    setModelMenuOpen(false);
+  };
   const knowledgeSearchEnabled = composer.tools.knowledgeSearch ?? true;
   const selectedKnowledgeBaseIds = composer.tools.knowledgeBaseIds ?? [];
+  const projectKnowledgeBaseIds = activeProject?.knowledgeBaseIds ?? [];
+  const projectKnowledgeBaseIdSet = new Set(projectKnowledgeBaseIds);
+  const selectedExtraKnowledgeBaseIds = selectedKnowledgeBaseIds.filter(
+    (id) => !projectKnowledgeBaseIdSet.has(id)
+  );
   const projectKnowledgeBaseCount = activeProject?.knowledgeBaseIds.length ?? 0;
   const projectFileCount = activeProject?.files.length ?? 0;
   const selectedMcpServerIds = composer.tools.mcpServerIds ?? [];
+  const selectedMcpServerIdSet = new Set(selectedMcpServerIds);
+  const userMcpServers = mcpServers.filter((server) => server.scope === "user");
+  const globalMcpServers = mcpServers.filter((server) => server.scope === "global");
   const knowledgeScopeText = !knowledgeSearchEnabled
     ? "已关闭"
-    : selectedKnowledgeBaseIds.length > 0
-      ? projectKnowledgeBaseCount > 0
-        ? `项目 ${projectKnowledgeBaseCount} + 已选 ${selectedKnowledgeBaseIds.length}`
-        : `已选 ${selectedKnowledgeBaseIds.length} 个`
-      : projectKnowledgeBaseCount > 0
-        ? `项目 ${projectKnowledgeBaseCount} 个`
-        : "全部资料";
-  const knowledgeScopeHint = !knowledgeSearchEnabled
-    ? "关闭后模型不会检索知识库。"
-    : selectedKnowledgeBaseIds.length > 0
-      ? projectKnowledgeBaseCount > 0
-        ? "本轮会检索项目关联知识库和已勾选知识库。"
-        : "取消全部选择后恢复检索全部知识库。"
-      : projectKnowledgeBaseCount > 0
-        ? "本轮默认检索项目关联知识库。"
-        : "当前未限定范围，模型会默认检索全部知识库。可勾选具体知识库来限定检索范围。";
+    : activeProject
+      ? selectedExtraKnowledgeBaseIds.length > 0
+        ? `项目 + ${selectedExtraKnowledgeBaseIds.length}`
+        : "项目资料"
+      : selectedKnowledgeBaseIds.length > 0
+        ? `已选 ${selectedKnowledgeBaseIds.length} 个`
+        : "全部知识库";
   const mcpScopeText =
     selectedMcpServerIds.length > 0
-      ? `已选 ${selectedMcpServerIds.length} 个`
-      : "未启用";
-  const mcpScopeHint =
-    selectedMcpServerIds.length > 0
-      ? "已勾选的 MCP 服务器会在本轮对话中挂载。"
-      : "勾选后模型可调用对应 MCP 工具；默认不自动挂载全局服务器。";
+      ? mcpServers.find((server) => selectedMcpServerIdSet.has(server.id))?.name ??
+        `已选 ${selectedMcpServerIds.length} 个`
+      : "全部工具";
 
-  const toggleKnowledgeBase = (id: string, checked: boolean) => {
+  const selectKnowledgeBase = (id: string) => {
+    if (projectKnowledgeBaseIdSet.has(id)) return;
+    const restoreDefault =
+      selectedExtraKnowledgeBaseIds.length === 1 &&
+      selectedExtraKnowledgeBaseIds[0] === id;
     onComposerChange({
       tools: {
         ...composer.tools,
         knowledgeSearch: true,
-        knowledgeBaseIds: checked
-          ? Array.from(new Set([...selectedKnowledgeBaseIds, id]))
-          : selectedKnowledgeBaseIds.filter((kbId) => kbId !== id),
+        // 空数组是默认范围；单独点选时只保留当前知识库。
+        knowledgeBaseIds: restoreDefault ? [] : [id],
       },
     });
   };
 
-  const toggleMcpServer = (id: string, checked: boolean) => {
+  const selectMcpServer = (id: string) => {
+    const server = userMcpServers.find((item) => item.id === id);
+    if (!server) return;
+    const restoreDefault =
+      selectedMcpServerIds.length === 1 && selectedMcpServerIds[0] === id;
     onComposerChange({
       tools: {
         ...composer.tools,
-        mcpServerIds: checked
-          ? Array.from(new Set([...selectedMcpServerIds, id]))
-          : selectedMcpServerIds.filter((serverId) => serverId !== id),
+        // 空数组表示默认挂载全部个人 MCP；点选后只挂载当前服务器。
+        mcpServerIds: restoreDefault ? [] : [id],
       },
     });
   };
@@ -258,18 +386,19 @@ export function ChatInput({
     setPendingUploadCount(pendingUploadCountRef.current);
   }, []);
 
-  const handleFiles = async (
-    fileList: FileList | File[],
-    options?: { openFirstImageEditor?: boolean }
+  const processComposerUpload = async (
+    item: ComposerUpload,
+    options?: { openEditor?: boolean }
   ) => {
-    let openedEditor = false;
-    for (const file of Array.from(fileList)) {
-      const isImage = file.type.startsWith("image/");
-      if (options?.openFirstImageEditor && !isImage) {
-        toast.warning("请选择图片文件进行编辑");
-        continue;
-      }
-      // 真实模式：先上传到服务端拿到可持久访问的 URL / 附件 id
+      const { file, isImage } = item;
+      cancelledUploadIdsRef.current.delete(item.id);
+      setPendingUploads((current) =>
+        current.map((upload) =>
+          upload.id === item.id
+            ? { ...upload, status: "uploading", error: undefined }
+            : upload
+        )
+      );
       let uploaded: {
         id: string;
         url?: string;
@@ -287,23 +416,38 @@ export function ChatInput({
           }
           uploaded = (await res.json()) as { id: string; url?: string; hasText?: boolean };
         } catch (e) {
-          toast.error(e instanceof Error ? e.message : "上传失败");
-          continue;
+          const message = e instanceof Error ? e.message : "上传失败";
+          setPendingUploads((current) =>
+            current.map((upload) =>
+              upload.id === item.id
+                ? { ...upload, status: "failed", error: message }
+                : upload
+            )
+          );
+          toast.error(`${file.name}：${message}`);
+          return;
         } finally {
           finishUpload();
         }
+      }
+      if (cancelledUploadIdsRef.current.has(item.id)) {
+        revokeUrl(item.previewUrl);
+        setPendingUploads((current) =>
+          current.filter((upload) => upload.id !== item.id)
+        );
+        return;
       }
       if (isImage) {
         let url: string;
         if (uploaded?.url) {
           url = uploaded.url;
+          revokeUrl(item.previewUrl);
         } else {
-          url = URL.createObjectURL(file);
-          localBlobUrls.current.add(url); // C4: 标记为本地创建，需手动 revoke
+          url = item.previewUrl ?? URL.createObjectURL(file);
+          localBlobUrls.current.add(url);
         }
         setImages((prev) => [...prev, { type: "image", url, alt: file.name }]);
-        if (options?.openFirstImageEditor && !openedEditor) {
-          openedEditor = true;
+        if (options?.openEditor) {
           setEditingImage(url);
         }
       } else {
@@ -323,7 +467,48 @@ export function ChatInput({
           },
         ]);
       }
+      setPendingUploads((current) =>
+        current.filter((upload) => upload.id !== item.id)
+      );
+  };
+
+  const handleFiles = async (
+    fileList: FileList | File[],
+    options?: { openFirstImageEditor?: boolean }
+  ) => {
+    let editorAssigned = false;
+    const queued: Array<{ item: ComposerUpload; openEditor: boolean }> = [];
+    for (const file of Array.from(fileList)) {
+      const isImage = file.type.startsWith("image/");
+      if (options?.openFirstImageEditor && !isImage) {
+        toast.warning("请选择图片文件进行编辑");
+        continue;
+      }
+      const previewUrl = isImage ? URL.createObjectURL(file) : undefined;
+      if (previewUrl) localBlobUrls.current.add(previewUrl);
+      const openEditor: boolean =
+        !!options?.openFirstImageEditor && !editorAssigned;
+      editorAssigned ||= openEditor;
+      const item: ComposerUpload = {
+        id: `composer-upload-${clientRandomUUID()}`,
+        file,
+        isImage,
+        previewUrl,
+        status: "uploading",
+      };
+      queued.push({ item, openEditor });
+      if (openEditor && previewUrl) setEditingImage(previewUrl);
     }
+    if (queued.length === 0) return;
+    setPendingUploads((current) => [
+      ...current,
+      ...queued.map(({ item }) => item),
+    ]);
+    await Promise.all(
+      queued.map(({ item, openEditor }) =>
+        processComposerUpload(item, { openEditor })
+      )
+    );
   };
 
   // WAV 录音：AudioContext + ScriptProcessor 录 PCM16，编码成 WAV（MiMo ASR 只支持 wav/mp3）
@@ -429,6 +614,320 @@ export function ChatInput({
     }
   };
 
+  const renderModelMenuItems = () => (
+    <>
+      <DropdownMenuLabel>选择模型</DropdownMenuLabel>
+      {modelGroups.map(([kind, group]) => (
+        <React.Fragment key={kind}>
+          <DropdownMenuLabel className="text-xs text-muted-foreground">
+            {PROVIDER_LABELS[kind] ?? kind}
+          </DropdownMenuLabel>
+          {group.map((m) => (
+            <DropdownMenuItem
+              key={m.id}
+              onSelect={() => selectModel(m)}
+              className="min-h-12"
+            >
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-1.5 text-sm">
+                  <span className="min-w-0 truncate">{m.displayName}</span>
+                  {m.capabilities.includes("vision") && (
+                    <ImageIcon className="size-3 shrink-0 text-muted-foreground" />
+                  )}
+                  {m.capabilities.includes("reasoning") && (
+                    <BrainIcon className="size-3 shrink-0 text-muted-foreground" />
+                  )}
+                  {m.capabilities.includes("web-search-native") && (
+                    <GlobeIcon className="size-3 shrink-0 text-muted-foreground" />
+                  )}
+                </span>
+                {m.description && (
+                  <span className="line-clamp-1 text-xs text-muted-foreground">
+                    {m.description}
+                  </span>
+                )}
+              </span>
+              {onSetDefaultModel && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onSetDefaultModel(m.id);
+                  }}
+                  className={cn(
+                    "rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
+                    defaultModelId === m.id && "text-amber-500"
+                  )}
+                  aria-label={defaultModelId === m.id ? "默认模型" : "设为默认"}
+                  title={defaultModelId === m.id ? "默认模型" : "设为默认"}
+                >
+                  <StarIcon className="size-3.5" />
+                </button>
+              )}
+              {composer.modelId === m.id && <CheckIcon className="size-4 shrink-0" />}
+            </DropdownMenuItem>
+          ))}
+        </React.Fragment>
+      ))}
+      <DropdownMenuSeparator />
+      <DropdownMenuLabel className="font-normal">
+        生图由工具菜单中的图像能力自动调用
+      </DropdownMenuLabel>
+    </>
+  );
+
+  const renderThinkingMenuItems = () => (
+    <>
+      <DropdownMenuLabel>选择思考强度</DropdownMenuLabel>
+      <DropdownMenuLabel className="font-normal leading-5">
+        {currentModelSupportsThinking
+          ? `当前模型：${currentModel?.displayName ?? "未选择"}`
+          : "当前模型没有声明推理能力，偏好会保存；发送时不启用思考。"}
+      </DropdownMenuLabel>
+      {thinkingEffortOptions.map((option) => {
+        const selected = currentEffectiveThinkingEffort === option.value;
+        return (
+          <DropdownMenuItem
+            key={option.value}
+            onSelect={() => selectThinkingEffort(option.value)}
+            className="min-h-11"
+          >
+            <span className="min-w-0 flex-1">
+              <span className="block">{option.label}</span>
+              <span className="line-clamp-1 text-xs text-muted-foreground">
+                {option.description}
+              </span>
+            </span>
+            {selected && <CheckIcon className="size-4 shrink-0" />}
+          </DropdownMenuItem>
+        );
+      })}
+      {currentModel && (
+        <>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            disabled={!currentModelThinkingOverridden}
+            onSelect={resetThinkingEffort}
+          >
+            恢复模型默认（{THINKING_EFFORT_LABELS[currentRecommendedThinkingEffort]}）
+          </DropdownMenuItem>
+        </>
+      )}
+    </>
+  );
+
+  const renderCompactModelMenu = () => {
+    let content: React.ReactNode;
+
+    if (modelMenuView === "models") {
+      content = (
+        <div
+          className="overflow-y-auto overscroll-contain"
+          style={{
+            maxHeight:
+              "min(31rem, calc(100dvh - 7rem), calc(var(--radix-dropdown-menu-content-available-height) - 0.5rem))",
+          }}
+        >
+          <NestedMenuHeader label="选择模型" onBack={() => showModelMenuView("root")} />
+          <DropdownMenuSeparator />
+          {renderModelMenuItems()}
+        </div>
+      );
+    } else if (modelMenuView === "thinking") {
+      content = (
+        <div
+          className="overflow-y-auto overscroll-contain"
+          style={{
+            maxHeight:
+              "min(31rem, calc(100dvh - 7rem), calc(var(--radix-dropdown-menu-content-available-height) - 0.5rem))",
+          }}
+        >
+          <NestedMenuHeader
+            label="选择思考强度"
+            onBack={() => showModelMenuView("root")}
+          />
+          <DropdownMenuSeparator />
+          {renderThinkingMenuItems()}
+        </div>
+      );
+    } else {
+      content = (
+        <>
+          <DropdownMenuLabel>模型与思考</DropdownMenuLabel>
+          <DropdownMenuItem
+            className="py-2.5"
+            onSelect={(event) => {
+              event.preventDefault();
+              showModelMenuView("models");
+            }}
+          >
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm">选择模型</span>
+              <span className="block truncate text-xs text-muted-foreground">
+                {currentModel?.displayName ?? "未选择"}
+              </span>
+            </span>
+            <ChevronUpIcon className="size-4 shrink-0 text-muted-foreground" />
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            className="py-2.5"
+            onSelect={(event) => {
+              event.preventDefault();
+              showModelMenuView("thinking");
+            }}
+          >
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm">选择思考强度</span>
+              <span className="block truncate text-xs text-muted-foreground">
+                {currentModelSupportsThinking
+                  ? `${currentThinkingLabel}${currentModelThinkingOverridden ? " · 已自定义" : " · 模型默认"}`
+                  : `${currentThinkingLabel} · 不启用`}
+              </span>
+            </span>
+            <ChevronUpIcon className="size-4 shrink-0 text-muted-foreground" />
+          </DropdownMenuItem>
+        </>
+      );
+    }
+
+    return (
+      <AnimatePresence mode="wait" initial={false}>
+        <motion.div
+          key={modelMenuView}
+          layout
+          initial={{
+            opacity: 0,
+            scale: prefersReducedMotion ? 1 : 0.992,
+            filter: prefersReducedMotion ? "none" : "blur(2px)",
+          }}
+          animate={{
+            opacity: 1,
+            scale: 1,
+            filter: "blur(0px)",
+          }}
+          exit={{
+            opacity: 0,
+            scale: prefersReducedMotion ? 1 : 0.992,
+            filter: prefersReducedMotion ? "none" : "blur(1px)",
+          }}
+          transition={nestedMenuTransition}
+          className="min-w-0 will-change-transform"
+        >
+          {content}
+        </motion.div>
+      </AnimatePresence>
+    );
+  };
+
+  const renderKnowledgeSettings = (showBack: boolean) => (
+    <>
+      {showBack && (
+        <NestedMenuHeader label="资料检索" onBack={() => setToolMenuView("root")} />
+      )}
+      <ToolToggleRow
+        icon={BookOpenIcon}
+        label="开启资料检索"
+        checked={knowledgeSearchEnabled}
+        onChange={(v) =>
+          onComposerChange({ tools: { ...composer.tools, knowledgeSearch: v } })
+        }
+      />
+      {activeProject && (projectFileCount > 0 || projectKnowledgeBaseCount > 0) && (
+        <p className="px-2 pb-1 pt-1 text-[11px] leading-4 text-muted-foreground">
+          {activeProject.name}：{projectFileCount} 个项目文件
+          {projectKnowledgeBaseCount > 0
+            ? ` · ${projectKnowledgeBaseCount} 个关联知识库`
+            : ""}
+        </p>
+      )}
+      <div className="mt-1 max-h-[min(19rem,55dvh)] overflow-y-auto border-t pt-1 pr-1">
+        {knowledgeBases.length === 0 ? (
+          <p className="px-2 py-4 text-center text-xs text-muted-foreground">
+            暂无可检索的知识库
+          </p>
+        ) : (
+          knowledgeBases.map((kb) => {
+            const projectMounted = projectKnowledgeBaseIdSet.has(kb.id);
+            const specificallySelected = selectedExtraKnowledgeBaseIds.includes(kb.id);
+            const choiceState: ScopeChoiceState = projectMounted
+              ? "locked"
+              : selectedExtraKnowledgeBaseIds.length === 0
+                ? activeProject
+                  ? "off"
+                  : "default"
+                : specificallySelected
+                  ? "selected"
+                  : "off";
+            return (
+              <ScopeChoiceRow
+                key={kb.id}
+                title={kb.name}
+                subtitle={`${kb.documentCount} 个文档 · ${kb.totalChunks} 个片段`}
+                state={choiceState}
+                disabled={!knowledgeSearchEnabled || projectMounted}
+                badge={projectMounted ? "项目" : undefined}
+                onSelect={() => selectKnowledgeBase(kb.id)}
+                reducedMotion={!!prefersReducedMotion}
+              />
+            );
+          })
+        )}
+      </div>
+    </>
+  );
+
+  const renderToolSettings = (showBack: boolean) => (
+    <>
+      {showBack && (
+        <NestedMenuHeader label="工具设置" onBack={() => setToolMenuView("root")} />
+      )}
+      <ToolToggleRow
+        icon={TerminalIcon}
+        label="开启代码运行"
+        checked={composer.tools.codeRunner}
+        onChange={(v) =>
+          onComposerChange({ tools: { ...composer.tools, codeRunner: v } })
+        }
+      />
+      <div className="mt-1 max-h-[min(19rem,55dvh)] overflow-y-auto border-t pt-1 pr-1">
+        {isAdmin && globalMcpServers.map((server) => (
+          <ScopeChoiceRow
+            key={server.id}
+            title={server.name}
+            subtitle={`全局自动启用 · ${server.tools.length} 个工具`}
+            state="locked"
+            disabled
+            onSelect={() => undefined}
+            reducedMotion={!!prefersReducedMotion}
+          />
+        ))}
+        {userMcpServers.map((server) => {
+          const state: ScopeChoiceState = selectedMcpServerIds.length === 0
+            ? "default"
+            : selectedMcpServerIdSet.has(server.id)
+              ? "selected"
+              : "off";
+          return (
+            <ScopeChoiceRow
+              key={server.id}
+              title={server.name}
+              subtitle={`我的 · ${server.tools.length} 个工具`}
+              state={state}
+              onSelect={() => selectMcpServer(server.id)}
+              reducedMotion={!!prefersReducedMotion}
+            />
+          );
+        })}
+        {globalMcpServers.length === 0 && userMcpServers.length === 0 && (
+          <p className="px-2 py-4 text-center text-xs text-muted-foreground">
+            暂无可配置的个人 MCP 服务器
+          </p>
+        )}
+      </div>
+    </>
+  );
+
   return (
     <div className="mx-auto w-full max-w-3xl px-4 pb-4">
       <motion.div
@@ -461,8 +960,71 @@ export function ChatInput({
         )}
 
         {/* 附件预览 */}
-        {(images.length > 0 || files.length > 0) && (
+        {(images.length > 0 || files.length > 0 || pendingUploads.length > 0) && (
           <div className="flex flex-wrap gap-2 px-4 pt-3">
+            {pendingUploads.map((upload) => (
+              <div
+                key={upload.id}
+                className={cn(
+                  "group/att relative flex min-h-16 items-center gap-2 rounded-xl border bg-muted/40 px-3 py-2 pr-8",
+                  upload.status === "failed" && "border-destructive/40 bg-destructive/5"
+                )}
+              >
+                {upload.previewUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={upload.previewUrl}
+                    alt={upload.file.name}
+                    className="size-11 rounded-lg object-cover opacity-80"
+                  />
+                ) : (
+                  <PaperclipIcon className="size-4 text-primary" />
+                )}
+                <div className="min-w-0">
+                  <p className="max-w-36 truncate text-xs font-medium">
+                    {upload.file.name}
+                  </p>
+                  <p
+                    className={cn(
+                      "max-w-44 truncate text-[10px] text-muted-foreground",
+                      upload.status === "failed" && "text-destructive"
+                    )}
+                    title={upload.error}
+                  >
+                    {upload.status === "uploading"
+                      ? "上传中…"
+                      : upload.error ?? "上传失败"}
+                  </p>
+                  {upload.status === "failed" && (
+                    <button
+                      type="button"
+                      className="mt-0.5 text-[10px] font-medium text-primary hover:underline"
+                      onClick={() => void processComposerUpload(upload)}
+                    >
+                      重试
+                    </button>
+                  )}
+                </div>
+                {upload.status === "uploading" && (
+                  <Loader2Icon className="size-3.5 animate-spin text-muted-foreground" />
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    cancelledUploadIdsRef.current.add(upload.id);
+                    revokeUrl(upload.previewUrl);
+                    if (editingImage === upload.previewUrl) setEditingImage(null);
+                    setPendingUploads((current) =>
+                      current.filter((item) => item.id !== upload.id)
+                    );
+                  }}
+                  aria-label={`移除上传「${upload.file.name}」`}
+                  className="absolute right-1 top-1 flex size-6 items-center justify-center rounded-full bg-foreground text-background shadow-sm"
+                >
+                  <XIcon className="size-3.5" />
+                </button>
+              </div>
+            ))}
             {images.map((img, i) => (
               <div key={i} className="group/att relative">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -534,7 +1096,13 @@ export function ChatInput({
               handleFiles(e.clipboardData.files);
             }
           }}
-          placeholder={recording ? "正在聆听…" : "给 LinHub 发消息…"}
+          placeholder={
+            recording
+              ? "正在聆听…"
+              : pendingProject
+                ? `在「${pendingProject.name}」中发消息…`
+                : "给 LinHub 发消息…"
+          }
           autoFocus={autoFocus}
           rows={1}
           className="w-full resize-none bg-transparent px-4 pb-1 pt-3.5 text-[15px] leading-relaxed outline-none placeholder:text-muted-foreground"
@@ -553,17 +1121,6 @@ export function ChatInput({
               e.target.value = "";
             }}
           />
-          <input
-            ref={imageEditInputRef}
-            type="file"
-            accept="image/*"
-            hidden
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) void handleFiles([file], { openFirstImageEditor: true });
-              e.target.value = "";
-            }}
-          />
           <div className="flex shrink-0 items-center gap-1">
             <Tooltip label="上传文件或图片">
               <button
@@ -575,356 +1132,294 @@ export function ChatInput({
                 <PaperclipIcon className="size-4" />
               </button>
             </Tooltip>
-            <Tooltip label="选择图片并编辑">
-              <button
-                type="button"
-                onClick={() => imageEditInputRef.current?.click()}
-                aria-label="编辑图片"
-                className="flex h-9 items-center gap-1.5 rounded-lg px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-              >
-                <PencilIcon className="size-4" />
-                <span className="hidden sm:inline">编辑图片</span>
-              </button>
-            </Tooltip>
 
           {/* 工具开关 */}
-          <Popover>
+          <DropdownMenu
+            dir="rtl"
+            open={toolMenuOpen}
+            onOpenChange={(open) => {
+              setToolMenuOpen(open);
+              if (open) setToolMenuView("root");
+            }}
+          >
             <Tooltip label="工具">
-              <PopoverTrigger asChild>
+              <DropdownMenuTrigger asChild>
                 <button type="button" aria-label="工具" className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
                   <SlidersHorizontalIcon className="size-4" />
                 </button>
-              </PopoverTrigger>
+              </DropdownMenuTrigger>
             </Tooltip>
-            <PopoverContent align="start" className="w-64 p-2">
-              <p className="px-2 pb-1.5 pt-1 text-xs font-medium text-muted-foreground">
-                模型可自主调用的工具
-              </p>
-              <ToolToggleRow
-                icon={GlobeIcon}
-                label="联网搜索"
-                checked={composer.tools.webSearch}
-                onChange={(v) =>
-                  onComposerChange({ tools: { ...composer.tools, webSearch: v } })
-                }
-              />
-              <ToolToggleRow
-                icon={ImageIcon}
-                label="生成图片 / 编辑图片"
-                checked={composer.tools.imageGeneration}
-                onChange={(v) =>
-                  onComposerChange({ tools: { ...composer.tools, imageGeneration: v } })
-                }
-              />
-              <ToolToggleRow
-                icon={TerminalIcon}
-                label="代码运行"
-                checked={composer.tools.codeRunner}
-                onChange={(v) =>
-                  onComposerChange({ tools: { ...composer.tools, codeRunner: v } })
-                }
-              />
-              {knowledgeBases.length > 0 && (
-                <ToolToggleRow
-                  icon={BookOpenIcon}
-                  label="资料检索"
-                  checked={knowledgeSearchEnabled}
-                  onChange={(v) =>
-                    onComposerChange({ tools: { ...composer.tools, knowledgeSearch: v } })
-                  }
-                />
-              )}
-              {knowledgeBases.length > 0 && (
-                <fieldset
-                  aria-describedby={knowledgeScopeHintId}
-                  disabled={!knowledgeSearchEnabled}
-                  className="mt-1 border-t pt-1.5 disabled:opacity-60"
-                >
-                  <legend className="flex w-full items-center gap-1.5 px-2 pb-1 text-xs font-medium text-muted-foreground">
-                    <BookOpenIcon className="size-3.5 shrink-0" />
-                    <span className="min-w-0 flex-1 truncate">资料检索</span>
-                    <span className="shrink-0 rounded-full border bg-muted px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
-                      {knowledgeScopeText}
-                    </span>
-                  </legend>
-                  {activeProject && (projectFileCount > 0 || projectKnowledgeBaseCount > 0) && (
-                    <p className="px-2 pb-1 text-[11px] leading-4 text-muted-foreground">
-                      {activeProject.name}：{projectFileCount} 个项目资料
-                      {projectKnowledgeBaseCount > 0
-                        ? ` · ${projectKnowledgeBaseCount} 个关联知识库`
-                        : ""}
-                    </p>
-                  )}
-                  <p
-                    id={knowledgeScopeHintId}
-                    className="px-2 pb-1.5 text-[11px] leading-4 text-muted-foreground"
-                  >
-                    {knowledgeScopeHint}
-                  </p>
-                  <div className="max-h-40 overflow-y-auto pr-1">
-                    {knowledgeBases.map((kb) => {
-                      const checked = selectedKnowledgeBaseIds.includes(kb.id);
-                      return (
-                        <label
-                          key={kb.id}
-                          className="flex cursor-pointer items-start gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-accent"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={(event) => toggleKnowledgeBase(kb.id, event.target.checked)}
-                            aria-describedby={knowledgeScopeHintId}
-                            disabled={!knowledgeSearchEnabled}
-                            className="mt-0.5 size-4 shrink-0 accent-[var(--primary)]"
-                          />
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate">{kb.name}</span>
-                            <span className="block text-xs text-muted-foreground">
-                              {kb.documentCount} 个文档 · {kb.totalChunks} 个片段
-                            </span>
-                          </span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                </fieldset>
-              )}
-              {mcpServers.length > 0 && (
-                <fieldset
-                  aria-describedby={mcpScopeHintId}
-                  className="mt-1 border-t pt-1.5"
-                >
-                  <legend className="flex w-full items-center gap-1.5 px-2 pb-1 text-xs font-medium text-muted-foreground">
-                    <PlugIcon className="size-3.5 shrink-0" />
-                    <span className="min-w-0 flex-1 truncate">MCP 服务器</span>
-                    <span className="shrink-0 rounded-full border bg-muted px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
-                      {mcpScopeText}
-                    </span>
-                  </legend>
-                  <p
-                    id={mcpScopeHintId}
-                    className="px-2 pb-1.5 text-[11px] leading-4 text-muted-foreground"
-                  >
-                    {mcpScopeHint}
-                  </p>
-                  <div className="max-h-40 overflow-y-auto pr-1">
-                    {mcpServers.map((server) => {
-                      const checked = selectedMcpServerIds.includes(server.id);
-                      return (
-                        <label
-                          key={server.id}
-                          className="flex cursor-pointer items-start gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-accent"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={(event) =>
-                              toggleMcpServer(server.id, event.target.checked)
-                            }
-                            aria-describedby={mcpScopeHintId}
-                            className="mt-0.5 size-4 shrink-0 accent-[var(--primary)]"
-                          />
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate">{server.name}</span>
-                            <span className="block text-xs text-muted-foreground">
-                              {server.scope === "global" ? "全局" : "我的"} ·{" "}
-                              {server.tools.length} 个工具
-                            </span>
-                          </span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                </fieldset>
-              )}
-            </PopoverContent>
-          </Popover>
-
-          {/* Extended thinking */}
-          <Tooltip label={composer.extendedThinking ? "深度思考：开" : "深度思考：关"}>
-            <button
-              type="button"
-              onClick={() =>
-                onComposerChange({ extendedThinking: !composer.extendedThinking })
-              }
-              aria-label={composer.extendedThinking ? "关闭深度思考" : "开启深度思考"}
-              className={cn(
-                "flex items-center gap-1 rounded-lg p-2 text-sm transition-colors",
-                composer.extendedThinking
-                  ? "bg-primary/10 text-primary"
-                  : "text-muted-foreground hover:bg-accent hover:text-foreground"
-              )}
+            <DropdownMenuContent
+              align={compactModelMenu ? "center" : "end"}
+              collisionPadding={compactModelMenu ? 20 : 12}
+              className="w-[min(calc(100vw-2.5rem),20rem)] max-w-[calc(100vw-2.5rem)] overflow-hidden p-1"
+              style={{ direction: "ltr" }}
             >
-              <BrainIcon className="size-4" />
-            </button>
-          </Tooltip>
+              {compactModelMenu ? (
+                <AnimatePresence mode="wait" initial={false}>
+                  <motion.div
+                    key={toolMenuView}
+                    layout
+                    initial={{
+                      opacity: 0,
+                      scale: prefersReducedMotion ? 1 : 0.992,
+                      filter: prefersReducedMotion ? "none" : "blur(2px)",
+                    }}
+                    animate={{ opacity: 1, scale: 1, filter: "blur(0px)" }}
+                    exit={{
+                      opacity: 0,
+                      scale: prefersReducedMotion ? 1 : 0.992,
+                      filter: prefersReducedMotion ? "none" : "blur(1px)",
+                    }}
+                    transition={nestedMenuTransition}
+                    className="min-w-0 will-change-transform"
+                  >
+                    {toolMenuView === "root" && (
+                      <>
+                        <DropdownMenuLabel>模型可自主调用的工具</DropdownMenuLabel>
+                        <ToolToggleRow
+                          icon={GlobeIcon}
+                          label="联网搜索"
+                          checked={composer.tools.webSearch}
+                          onChange={(v) =>
+                            onComposerChange({ tools: { ...composer.tools, webSearch: v } })
+                          }
+                        />
+                        <ToolToggleRow
+                          icon={ImageIcon}
+                          label="生成图片 / 编辑图片"
+                          checked={composer.tools.imageGeneration}
+                          onChange={(v) =>
+                            onComposerChange({ tools: { ...composer.tools, imageGeneration: v } })
+                          }
+                        />
+                        <DropdownMenuItem
+                          className="py-2.5"
+                          onSelect={(event) => {
+                            event.preventDefault();
+                            setToolMenuView("knowledge");
+                          }}
+                        >
+                          <BookOpenIcon />
+                          <span className="min-w-0 flex-1">资料检索</span>
+                          <span className="max-w-28 truncate text-[11px] text-muted-foreground">
+                            {knowledgeScopeText}
+                          </span>
+                          <ChevronUpIcon />
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          className="py-2.5"
+                          onSelect={(event) => {
+                            event.preventDefault();
+                            setToolMenuView("tools");
+                          }}
+                        >
+                          <PlugIcon />
+                          <span className="min-w-0 flex-1">工具设置</span>
+                          <span className="max-w-28 truncate text-[11px] text-muted-foreground">
+                            {mcpScopeText}
+                          </span>
+                          <ChevronUpIcon />
+                        </DropdownMenuItem>
+                      </>
+                    )}
+                    {toolMenuView === "knowledge" && renderKnowledgeSettings(true)}
+                    {toolMenuView === "tools" && renderToolSettings(true)}
+                  </motion.div>
+                </AnimatePresence>
+              ) : (
+                <>
+                  <DropdownMenuLabel>模型可自主调用的工具</DropdownMenuLabel>
+                  <ToolToggleRow
+                    icon={GlobeIcon}
+                    label="联网搜索"
+                    checked={composer.tools.webSearch}
+                    onChange={(v) =>
+                      onComposerChange({ tools: { ...composer.tools, webSearch: v } })
+                    }
+                  />
+                  <ToolToggleRow
+                    icon={ImageIcon}
+                    label="生成图片 / 编辑图片"
+                    checked={composer.tools.imageGeneration}
+                    onChange={(v) =>
+                      onComposerChange({ tools: { ...composer.tools, imageGeneration: v } })
+                    }
+                  />
+                  <DropdownMenuSub>
+                    <DropdownMenuSubTrigger arrowDirection="left" className="py-2">
+                      <BookOpenIcon />
+                      <span className="min-w-0 flex-1">资料检索</span>
+                      <span className="max-w-28 truncate text-[11px] text-muted-foreground">
+                        {knowledgeScopeText}
+                      </span>
+                    </DropdownMenuSubTrigger>
+                    <DropdownMenuSubContent
+                      sideOffset={12}
+                      collisionPadding={12}
+                      className="w-[min(calc(100vw-1rem),20rem)] p-1 text-left"
+                      style={{ direction: "ltr" }}
+                    >
+                      {renderKnowledgeSettings(false)}
+                    </DropdownMenuSubContent>
+                  </DropdownMenuSub>
+                  <DropdownMenuSub>
+                    <DropdownMenuSubTrigger arrowDirection="left" className="py-2">
+                      <PlugIcon />
+                      <span className="min-w-0 flex-1">工具设置</span>
+                      <span className="max-w-28 truncate text-[11px] text-muted-foreground">
+                        {mcpScopeText}
+                      </span>
+                    </DropdownMenuSubTrigger>
+                    <DropdownMenuSubContent
+                      sideOffset={12}
+                      collisionPadding={12}
+                      className="w-[min(calc(100vw-1rem),20rem)] p-1 text-left"
+                      style={{ direction: "ltr" }}
+                    >
+                      {renderToolSettings(false)}
+                    </DropdownMenuSubContent>
+                  </DropdownMenuSub>
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
 
           </div>
-          <div className="ml-auto flex min-w-fit items-center gap-1">
+          <div className="ml-auto flex min-w-0 max-w-full items-center gap-1">
 
-          {/* 风格选择 */}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button
-                type="button"
-                aria-label={`回复风格：${currentStyle?.name ?? "标准"}`}
-                className="flex max-w-[5.5rem] items-center gap-1 whitespace-nowrap rounded-lg px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground sm:max-w-[10rem]"
-              >
-                <span className="min-w-0 truncate">{currentStyle?.name ?? "标准"}</span>
-                <ChevronDownIcon className="size-3 shrink-0" />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="max-h-[45dvh] w-52 overflow-y-auto">
-              <DropdownMenuLabel>回复风格</DropdownMenuLabel>
-              {styles.map((s) => (
-                <DropdownMenuItem
-                  key={s.id}
-                  onClick={() => onComposerChange({ styleId: s.id })}
-                >
-                  <span className="flex-1">
-                    <span className="block text-sm">{s.name}</span>
-                    <span className="block text-xs text-muted-foreground">
-                      {s.description}
-                    </span>
-                  </span>
-                  {composer.styleId === s.id && <CheckIcon className="size-4" />}
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
-
-          {/* 模型选择 */}
-          <DropdownMenu open={modelMenuOpen} onOpenChange={setModelMenuOpen}>
-            <DropdownMenuTrigger asChild>
-              <button
-                type="button"
-                aria-label={`当前模型：${currentModel?.displayName ?? "未选择"}`}
-                className="flex max-w-[4.5rem] items-center gap-1 whitespace-nowrap rounded-lg px-2 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent sm:max-w-[7rem]"
-              >
-                <span className="min-w-0 truncate">{currentModel?.displayName}</span>
-                <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground" />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="max-h-[45dvh] w-72 overflow-y-auto">
-              <DropdownMenuLabel>选择模型</DropdownMenuLabel>
-              {/* 按 providerKind 分组展示 */}
-              {Object.entries(
-                chatModels.reduce<Record<string, typeof chatModels>>((acc, m) => {
-                  const key = m.providerKind;
-                  (acc[key] ??= []).push(m);
-                  return acc;
-                }, {})
-              ).map(([kind, group]) => (
-                <React.Fragment key={kind}>
-                  <DropdownMenuLabel className="text-xs text-muted-foreground">
-                    {PROVIDER_LABELS[kind] ?? kind}
-                  </DropdownMenuLabel>
-                  {group.map((m) => (
-                    <DropdownMenuItem
-                      key={m.id}
-                      onClick={() => {
-                        onComposerChange({ modelId: m.id });
-                        setModelMenuOpen(false);
-                      }}
-                    >
-                      <span className="flex-1">
-                        <span className="flex items-center gap-1.5 text-sm">
-                          {m.displayName}
-                          {m.capabilities.includes("vision") && (
-                            <ImageIcon className="size-3 text-muted-foreground" />
-                          )}
-                          {m.capabilities.includes("reasoning") && (
-                            <BrainIcon className="size-3 text-muted-foreground" />
-                          )}
-                          {m.capabilities.includes("web-search-native") && (
-                            <GlobeIcon className="size-3 text-muted-foreground" />
-                          )}
-                        </span>
-                        {m.description && (
-                          <span className="block text-xs text-muted-foreground">
-                            {m.description}
-                          </span>
-                        )}
-                      </span>
-                      {/* 设为默认 */}
-                      {onSetDefaultModel && (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onSetDefaultModel(m.id);
-                          }}
-                          className={cn(
-                            "rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
-                            defaultModelId === m.id && "text-amber-500"
-                          )}
-                          aria-label={defaultModelId === m.id ? "默认模型" : "设为默认"}
-                          title={defaultModelId === m.id ? "默认模型" : "设为默认"}
-                        >
-                          <StarIcon className="size-3.5" />
-                        </button>
-                      )}
-                      {composer.modelId === m.id && <CheckIcon className="size-4" />}
-                    </DropdownMenuItem>
-                  ))}
-                </React.Fragment>
-              ))}
-              <DropdownMenuSeparator />
-              <DropdownMenuLabel className="font-normal">
-                生图由模型自动调用 GPT Image 2
-              </DropdownMenuLabel>
-            </DropdownMenuContent>
-          </DropdownMenu>
-
-          {/* 语音输入 */}
-          <Tooltip label={recording ? "停止录音" : "语音输入"}>
-            <button
-              type="button"
-              onClick={toggleRecording}
-              aria-label={recording ? "停止录音" : "语音输入"}
-              className={cn(
-                "rounded-lg p-2 transition-colors",
-                recording
-                  ? "animate-pulse bg-destructive/10 text-destructive"
-                  : "text-muted-foreground hover:bg-accent hover:text-foreground"
-              )}
+            {/* 模型选择 */}
+            <DropdownMenu
+              dir="rtl"
+              open={modelMenuOpen}
+              onOpenChange={(open) => {
+                setModelMenuOpen(open);
+                if (open) showModelMenuView("root");
+              }}
             >
-              <MicIcon className="size-4" />
-            </button>
-          </Tooltip>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  aria-label={`当前模型：${currentModel?.displayName ?? "未选择"}`}
+                  className="flex min-w-0 max-w-[calc(100vw-9rem)] items-center gap-1 rounded-lg px-2 py-1.5 text-left text-xs font-medium leading-4 text-foreground transition-colors hover:bg-accent sm:max-w-[16rem]"
+                >
+                  <span className="min-w-0 whitespace-normal break-words">
+                    {currentModel?.displayName ?? "未选择"}
+                  </span>
+                  <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground" />
+                </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align={compactModelMenu ? "center" : "end"}
+              collisionPadding={compactModelMenu ? 20 : 8}
+              className="w-[min(calc(100vw-2.5rem),22rem)] max-w-[calc(100vw-2.5rem)] overflow-hidden p-1 sm:w-[18rem] sm:max-w-[calc(100vw-1rem)]"
+              style={{
+                direction: "ltr",
+                maxHeight: compactModelMenu
+                  ? "min(34rem, calc(100dvh - 4rem), var(--radix-dropdown-menu-content-available-height))"
+                  : "min(78dvh, var(--radix-dropdown-menu-content-available-height))",
+              }}
+            >
+                {compactModelMenu ? (
+                  renderCompactModelMenu()
+                ) : (
+                  <>
+                    <DropdownMenuLabel>模型与思考</DropdownMenuLabel>
+                    <DropdownMenuSub>
+                      <DropdownMenuSubTrigger arrowDirection="left" className="py-2">
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-sm">选择模型</span>
+                          <span className="block truncate text-xs text-muted-foreground">
+                            {currentModel?.displayName ?? "未选择"}
+                          </span>
+                        </span>
+                      </DropdownMenuSubTrigger>
+                      <DropdownMenuSubContent
+                        sideOffset={12}
+                        collisionPadding={12}
+                        className="w-[min(calc(100vw-1rem),22rem)] overflow-y-auto overscroll-contain p-1 text-left"
+                        style={{
+                          direction: "ltr",
+                          maxHeight:
+                            "min(72dvh, var(--radix-dropdown-menu-content-available-height))",
+                        }}
+                      >
+                        {renderModelMenuItems()}
+                      </DropdownMenuSubContent>
+                    </DropdownMenuSub>
+                    <DropdownMenuSub>
+                      <DropdownMenuSubTrigger arrowDirection="left" className="py-2">
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-sm">选择思考强度</span>
+                          <span className="block truncate text-xs text-muted-foreground">
+                            {currentModelSupportsThinking
+                              ? `${currentThinkingLabel}${currentModelThinkingOverridden ? " · 已自定义" : " · 模型默认"}`
+                              : `${currentThinkingLabel} · 不启用`}
+                          </span>
+                        </span>
+                      </DropdownMenuSubTrigger>
+                      <DropdownMenuSubContent
+                        sideOffset={12}
+                        className="w-[min(calc(100vw-1rem),18rem)] p-1 text-left"
+                        style={{ direction: "ltr" }}
+                      >
+                        {renderThinkingMenuItems()}
+                      </DropdownMenuSubContent>
+                    </DropdownMenuSub>
+                  </>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
 
-          {/* 发送 / 停止 */}
-          {isStreaming ? (
-            <Tooltip label="停止生成">
+            {/* 语音输入 */}
+            <Tooltip label={recording ? "停止录音" : "语音输入"}>
               <button
                 type="button"
-                onClick={onStop}
-                aria-label="停止生成"
-                className="rounded-full bg-foreground p-2 text-background transition-transform hover:scale-105 active:scale-95"
+                onClick={toggleRecording}
+                aria-label={recording ? "停止录音" : "语音输入"}
+                className={cn(
+                  "rounded-lg p-2 transition-colors",
+                  recording
+                    ? "animate-pulse bg-destructive/10 text-destructive"
+                    : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                )}
               >
-                <SquareIcon className="size-4 fill-current" />
+                <MicIcon className="size-4" />
               </button>
             </Tooltip>
-          ) : (
-            <button
-              type="button"
-              onClick={doSend}
-              disabled={!canSend}
-              aria-label={isUploading ? "附件上传中" : "发送"}
-              className={cn(
-                "rounded-full p-2 transition-all",
-                canSend
-                  ? "bg-primary text-primary-foreground hover:scale-105 hover:bg-primary/90 active:scale-95"
-                : "bg-muted text-muted-foreground"
-              )}
-            >
-              {isUploading ? (
-                <Loader2Icon className="size-4 animate-spin" />
-              ) : (
-                <ArrowUpIcon className="size-4" />
-              )}
-            </button>
-          )}
+
+            {/* 发送 / 停止 */}
+            {isStreaming ? (
+              <Tooltip label="停止生成">
+                <button
+                  type="button"
+                  onClick={onStop}
+                  aria-label="停止生成"
+                  className="rounded-full bg-foreground p-2 text-background transition-transform hover:scale-105 active:scale-95"
+                >
+                  <SquareIcon className="size-4 fill-current" />
+                </button>
+              </Tooltip>
+            ) : (
+              <button
+                type="button"
+                onClick={doSend}
+                disabled={!canSend}
+                aria-label={isUploading ? "附件上传中" : "发送"}
+                className={cn(
+                  "rounded-full p-2 transition-all",
+                  canSend
+                    ? "bg-primary text-primary-foreground hover:scale-105 hover:bg-primary/90 active:scale-95"
+                    : "bg-muted text-muted-foreground"
+                )}
+              >
+                {isUploading ? (
+                  <Loader2Icon className="size-4 animate-spin" />
+                ) : (
+                  <ArrowUpIcon className="size-4" />
+                )}
+              </button>
+            )}
           </div>
         </div>
       </motion.div>
@@ -971,6 +1466,89 @@ function ToolToggleRow({
         onCheckedChange={onChange}
       />
     </label>
+  );
+}
+
+function NestedMenuHeader({ label, onBack }: { label: string; onBack: () => void }) {
+  return (
+    <div className="flex items-center gap-1 px-1 pb-1.5">
+      <button
+        type="button"
+        onClick={onBack}
+        aria-label="返回工具菜单"
+        className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+      >
+        <ChevronLeftIcon className="size-4" />
+      </button>
+      <span className="text-sm font-medium">{label}</span>
+    </div>
+  );
+}
+
+function ScopeChoiceRow({
+  title,
+  subtitle,
+  state,
+  disabled = false,
+  badge,
+  onSelect,
+  reducedMotion,
+}: {
+  title: string;
+  subtitle: string;
+  state: ScopeChoiceState;
+  disabled?: boolean;
+  badge?: string;
+  onSelect: () => void;
+  reducedMotion: boolean;
+}) {
+  const checked = state !== "off";
+  const highlighted = state === "selected";
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      disabled={disabled}
+      aria-pressed={checked}
+      className={cn(
+        "flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors",
+        disabled ? "cursor-default" : "hover:bg-accent"
+      )}
+    >
+      <motion.span
+        aria-hidden="true"
+        initial={false}
+        animate={
+          reducedMotion
+            ? undefined
+            : highlighted
+              ? { scale: [0.82, 1.16, 1] }
+              : { scale: 1 }
+        }
+        transition={{ duration: 0.28, ease: "easeOut" }}
+        className={cn(
+          "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-[5px] border transition-colors duration-200",
+          highlighted
+            ? "border-primary bg-primary text-primary-foreground shadow-sm"
+            : checked
+              ? "border-border bg-muted text-muted-foreground"
+              : "border-border bg-transparent text-transparent"
+        )}
+      >
+        <CheckIcon className="size-3" strokeWidth={3} />
+      </motion.span>
+      <span className="min-w-0 flex-1">
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="block min-w-0 flex-1 truncate text-sm">{title}</span>
+          {badge && (
+            <span className="shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">
+              {badge}
+            </span>
+          )}
+        </span>
+        <span className="block truncate text-xs text-muted-foreground">{subtitle}</span>
+      </span>
+    </button>
   );
 }
 

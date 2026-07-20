@@ -12,7 +12,13 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import { getDataService } from "@/lib/data";
-import type { ChatStyle, McpServer, MemoryEntry } from "@/lib/types";
+import { clientRandomUUID } from "@/lib/client-id";
+import type { ChatStyle, McpServer, MemoryEntry, User } from "@/lib/types";
+import {
+  optimisticInsertRecord,
+  optimisticPatchRecords,
+  optimisticRemoveRecord,
+} from "@/lib/optimistic-query";
 import { formatRelativeTime } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input, Textarea } from "@/components/ui/input";
@@ -37,12 +43,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { PageContainer, PageHeader } from "@/components/shell/page-header";
+import { useUiStore } from "@/stores/ui-store";
 import { toast } from "sonner";
 
 export default function SettingsPage() {
   return (
     <PageContainer>
-      <PageHeader title="设置" description="账户、记忆、回复风格与连接器" />
+      <PageHeader title="设置" description="账户、界面、记忆、回复风格与连接器" />
       <Tabs defaultValue="account">
         <TabsList className="mb-1">
           <TabsTrigger value="account">账户</TabsTrigger>
@@ -71,6 +78,7 @@ export default function SettingsPage() {
 
 function AccountTab() {
   const queryClient = useQueryClient();
+  const { messageRailEnabled, setMessageRailEnabled } = useUiStore();
   const { data: user } = useQuery({
     queryKey: ["current-user"],
     queryFn: () => getDataService().getCurrentUser(),
@@ -84,9 +92,23 @@ function AccountTab() {
   if (!user) return null;
 
   const save = async () => {
-    await getDataService().updateProfile({ name });
-    queryClient.invalidateQueries({ queryKey: ["current-user"] });
-    toast.success("已保存");
+    const cleanName = name.trim();
+    if (!cleanName) return;
+    const optimistic = optimisticPatchRecords<User>(
+      queryClient,
+      [["current-user"]],
+      user.id,
+      { name: cleanName }
+    );
+    try {
+      const saved = await getDataService().updateProfile({ name: cleanName });
+      optimistic.reconcile(saved);
+      toast.success("已保存");
+    } catch (error) {
+      optimistic.rollback();
+      setName(user.name);
+      toast.error(error instanceof Error ? error.message : "保存失败");
+    }
   };
 
   return (
@@ -130,6 +152,23 @@ function AccountTab() {
       </Card>
 
       <Card className="space-y-3 p-5">
+        <p className="text-sm font-medium">界面</p>
+        <div className="flex items-center justify-between gap-4 rounded-lg border bg-muted/25 px-3 py-2.5">
+          <div className="min-w-0">
+            <p className="text-sm font-medium">聊天消息导航条</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              在聊天页右侧显示消息导航，点击可跳转到对应用户消息。
+            </p>
+          </div>
+          <Switch
+            checked={messageRailEnabled}
+            onCheckedChange={setMessageRailEnabled}
+            aria-label="启用聊天消息导航条"
+          />
+        </div>
+      </Card>
+
+      <Card className="space-y-3 p-5">
         <p className="text-sm font-medium">数据</p>
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" onClick={() => toast.info("将导出全部会话为 Markdown（P2 后可用）")}>
@@ -161,22 +200,48 @@ function MemoryTab() {
   });
 
   const add = async () => {
-    if (!newMemory.trim()) return;
-    await getDataService().saveMemory({ content: newMemory.trim() });
-    queryClient.invalidateQueries({ queryKey: ["memories"] });
+    const content = newMemory.trim();
+    if (!content) return;
+    const now = new Date().toISOString();
+    const temporary: MemoryEntry = {
+      id: `optimistic-memory-${clientRandomUUID()}`,
+      content,
+      createdAt: now,
+      updatedAt: now,
+      clientMutationState: "pending",
+    };
+    const optimistic = optimisticInsertRecord<MemoryEntry>(
+      queryClient,
+      [["memories"]],
+      temporary
+    );
     setNewMemory("");
-    toast.success("记忆已添加");
+    try {
+      const saved = await getDataService().saveMemory({ content });
+      optimistic.reconcile(saved);
+      toast.success("记忆已添加");
+    } catch (error) {
+      optimistic.rollback();
+      setNewMemory(content);
+      toast.error(error instanceof Error ? error.message : "记忆添加失败");
+    }
   };
 
   const remove = async () => {
     if (!deleteTarget || deleting) return;
     setDeleting(true);
+    const target = deleteTarget;
+    const optimistic = optimisticRemoveRecord<MemoryEntry>(
+      queryClient,
+      [["memories"]],
+      target.id
+    );
+    setDeleteTarget(null);
     try {
-      await getDataService().deleteMemory(deleteTarget.id);
-      queryClient.invalidateQueries({ queryKey: ["memories"] });
-      setDeleteTarget(null);
+      await getDataService().deleteMemory(target.id);
       toast.success("记忆已删除");
     } catch (e) {
+      optimistic.rollback();
       toast.error(e instanceof Error ? e.message : "删除失败");
     } finally {
       setDeleting(false);
@@ -215,6 +280,7 @@ function MemoryTab() {
                 <p className="text-sm">{m.content}</p>
                 <p className="mt-0.5 text-xs text-muted-foreground">
                   {formatRelativeTime(m.updatedAt)}
+                  {m.clientMutationState === "pending" && " · 保存中…"}
                 </p>
               </div>
               <button
@@ -247,6 +313,7 @@ function MemoryTab() {
 
 function StylesTab() {
   const queryClient = useQueryClient();
+  const { defaultReplyStyleId, setDefaultReplyStyleId } = useUiStore();
   const [editorOpen, setEditorOpen] = React.useState(false);
   const [form, setForm] = React.useState({ name: "", description: "", prompt: "" });
   const [deleteTarget, setDeleteTarget] = React.useState<ChatStyle | null>(null);
@@ -255,24 +322,53 @@ function StylesTab() {
     queryKey: ["styles"],
     queryFn: () => getDataService().listStyles(),
   });
+  const effectiveDefaultStyleId =
+    styles.find((style) => style.id === defaultReplyStyleId)?.id ??
+    styles.find((style) => style.id === "style-normal")?.id ??
+    styles[0]?.id ??
+    "";
 
   const save = async () => {
-    await getDataService().saveStyle(form);
-    queryClient.invalidateQueries({ queryKey: ["styles"] });
+    const temporary: ChatStyle = {
+      id: `optimistic-style-${clientRandomUUID()}`,
+      name: form.name.trim(),
+      description: form.description.trim(),
+      prompt: form.prompt,
+      builtIn: false,
+      clientMutationState: "pending",
+    };
+    const optimistic = optimisticInsertRecord<ChatStyle>(
+      queryClient,
+      [["styles"]],
+      temporary
+    );
     setEditorOpen(false);
     setForm({ name: "", description: "", prompt: "" });
-    toast.success("风格已创建");
+    try {
+      const saved = await getDataService().saveStyle(form);
+      optimistic.reconcile(saved);
+      toast.success("风格已创建");
+    } catch (error) {
+      optimistic.rollback();
+      toast.error(error instanceof Error ? error.message : "风格创建失败");
+    }
   };
 
   const remove = async () => {
     if (!deleteTarget || deleting) return;
     setDeleting(true);
+    const target = deleteTarget;
+    const optimistic = optimisticRemoveRecord<ChatStyle>(
+      queryClient,
+      [["styles"]],
+      target.id
+    );
+    setDeleteTarget(null);
     try {
-      await getDataService().deleteStyle(deleteTarget.id);
-      queryClient.invalidateQueries({ queryKey: ["styles"] });
-      setDeleteTarget(null);
+      await getDataService().deleteStyle(target.id);
       toast.success("风格已删除");
     } catch (e) {
+      optimistic.rollback();
       toast.error(e instanceof Error ? e.message : "删除失败");
     } finally {
       setDeleting(false);
@@ -283,17 +379,38 @@ function StylesTab() {
     <div className="space-y-4">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <p className="text-sm text-muted-foreground">
-          风格决定回复的语气与详略，可在输入框随时切换。
+          风格决定回复的语气与详略，新对话会使用你选择的默认风格。
         </p>
         <Button size="sm" onClick={() => setEditorOpen(true)} className="self-start">
           <PlusIcon /> 自定义风格
         </Button>
       </div>
+      {styles.length > 0 && (
+        <Card className="space-y-2 p-4">
+          <label className="text-sm font-medium">默认回复风格</label>
+          <Select
+            value={effectiveDefaultStyleId}
+            onValueChange={setDefaultReplyStyleId}
+            options={styles.map((style) => ({
+              value: style.id,
+              label: style.name,
+            }))}
+            className="max-w-xs"
+          />
+        </Card>
+      )}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {styles.map((s) => (
           <Card key={s.id} className="group p-4">
             <div className="flex items-start justify-between">
-              <h3 className="text-sm font-medium">{s.name}</h3>
+              <h3 className="text-sm font-medium">
+                {s.name}
+                {s.clientMutationState === "pending" && (
+                  <span className="ml-2 text-xs font-normal text-muted-foreground">
+                    保存中…
+                  </span>
+                )}
+              </h3>
               {s.builtIn ? (
                 <Badge variant="outline">内置</Badge>
               ) : (
@@ -379,11 +496,37 @@ function McpTab() {
   });
 
   const add = async () => {
-    await getDataService().saveMcpServer({ ...form, scope: "user" });
-    queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+    const temporary: McpServer = {
+      id: `optimistic-mcp-${clientRandomUUID()}`,
+      scope: "user",
+      name: form.name.trim(),
+      url: form.url.trim(),
+      transport: form.transport,
+      enabled: false,
+      status: "unknown",
+      tools: [],
+      clientMutationState: "pending",
+    };
+    const optimistic = optimisticInsertRecord<McpServer>(
+      queryClient,
+      [["mcp-servers", "user"]],
+      temporary
+    );
     setAddOpen(false);
     setForm({ name: "", url: "", transport: "streamable-http" });
-    toast.success("MCP 服务器已添加");
+    try {
+      const saved = await getDataService().saveMcpServer({
+        ...form,
+        name: form.name.trim(),
+        url: form.url.trim(),
+        scope: "user",
+      });
+      optimistic.reconcile(saved);
+      toast.success("MCP 服务器已添加");
+    } catch (error) {
+      optimistic.rollback();
+      toast.error(error instanceof Error ? error.message : "添加失败");
+    }
   };
 
   const test = async (id: string) => {
@@ -398,12 +541,18 @@ function McpTab() {
   const remove = async () => {
     if (!deleteTarget || deleting) return;
     setDeleting(true);
+    const target = deleteTarget;
+    const optimistic = optimisticRemoveRecord<McpServer>(
+      queryClient,
+      [["mcp-servers"]],
+      target.id
+    );
+    setDeleteTarget(null);
     try {
-      await getDataService().deleteMcpServer(deleteTarget.id);
-      queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
-      setDeleteTarget(null);
+      await getDataService().deleteMcpServer(target.id);
       toast.success("MCP 服务器已删除");
     } catch (e) {
+      optimistic.rollback();
       toast.error(e instanceof Error ? e.message : "删除失败");
     } finally {
       setDeleting(false);
@@ -411,8 +560,27 @@ function McpTab() {
   };
 
   const toggle = async (server: McpServer) => {
-    await getDataService().saveMcpServer({ ...server, enabled: !server.enabled });
-    queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+    const enabled = !server.enabled;
+    const optimistic = optimisticPatchRecords<McpServer>(
+      queryClient,
+      [["mcp-servers"]],
+      server.id,
+      { enabled }
+    );
+    try {
+      const saved = await getDataService().saveMcpServer({
+        id: server.id,
+        name: server.name,
+        url: server.url,
+        transport: server.transport,
+        scope: server.scope,
+        enabled,
+      });
+      optimistic.reconcile(saved);
+    } catch (error) {
+      optimistic.rollback();
+      toast.error(error instanceof Error ? error.message : "保存失败");
+    }
   };
 
   return (
@@ -441,6 +609,11 @@ function McpTab() {
                 <div className="min-w-0 flex-1 basis-48">
                   <p className="flex items-center gap-2 text-sm font-medium">
                     {s.name}
+                    {s.clientMutationState === "pending" && (
+                      <span className="text-xs font-normal text-muted-foreground">
+                        添加中…
+                      </span>
+                    )}
                     {s.status === "connected" && (
                       <CheckCircle2Icon className="size-3.5 text-success" />
                     )}

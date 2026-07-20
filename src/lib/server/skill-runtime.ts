@@ -188,6 +188,7 @@ async function seedDashiPptSkill(ownerId: string) {
       source: "chuspeeism/dashi-ppt-skill",
       manifest: {
         id: "dashi-ppt",
+        internal: true,
         title: "Dashi PPT",
         version: "0.4.4",
         license: "AGPL-3.0",
@@ -230,6 +231,7 @@ async function seedDashiPptSkill(ownerId: string) {
         source: "chuspeeism/dashi-ppt-skill",
         manifest: {
           id: "dashi-ppt",
+          internal: true,
           title: "Dashi PPT",
           version: "0.4.4",
           license: "AGPL-3.0",
@@ -294,7 +296,8 @@ export function mergeSkillToggles(
   skill: SkillRow | undefined
 ): ChatToolToggles {
   const merged: ChatToolToggles = {
-    autoRouting: base?.autoRouting ?? true,
+    // 默认手动模式；Skill 只叠加明确声明的工具能力，不改变用户的路由选择。
+    autoRouting: base?.autoRouting ?? false,
     webSearch: base?.webSearch ?? false,
     imageGeneration: base?.imageGeneration ?? false,
     codeRunner: base?.codeRunner ?? false,

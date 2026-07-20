@@ -1,12 +1,16 @@
 "use client";
 
 import * as React from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { cn } from "@/lib/utils";
+import {
+  normalizeMarkdownBlockBoundaries,
+  normalizeTrustedLinHubUrl,
+} from "@/lib/markdown-normalization";
 import { CodeBlock } from "./code-block";
 import { MermaidBlock } from "./mermaid-block";
 
@@ -52,16 +56,22 @@ export const MarkdownRenderer = React.memo(function MarkdownRenderer({
   className?: string;
   isStreaming?: boolean;
 }) {
+  const normalizedContent = React.useMemo(
+    () => normalizeMarkdownBlockBoundaries(content),
+    [content]
+  );
+
   return (
     <div
       className={cn(
-        "prose-chat max-w-none text-[15px] leading-[1.75]",
+        "prose-chat max-w-none text-[15px] leading-[1.75] [overflow-wrap:anywhere]",
         className
       )}
     >
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex]}
+        urlTransform={(url) => defaultUrlTransform(normalizeTrustedLinHubUrl(url))}
         components={{
           h1: (p) => <h1 className="mb-3 mt-6 text-2xl font-semibold first:mt-0" {...p} />,
           h2: (p) => <h2 className="mb-2.5 mt-5 text-xl font-semibold first:mt-0" {...p} />,
@@ -146,7 +156,7 @@ export const MarkdownRenderer = React.memo(function MarkdownRenderer({
           pre: (p) => <>{p.children}</>,
         }}
       >
-        {content}
+        {normalizedContent}
       </ReactMarkdown>
     </div>
   );

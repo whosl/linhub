@@ -109,7 +109,9 @@ async function getMimoFallback() {
   const legacy = await getProviderSecret("xiaomi");
   return {
     apiKey: tokenPlan.apiKey ?? legacy.apiKey,
-    baseURL: tokenPlan.baseURL ?? legacy.baseURL ?? "https://token-plan-cn.xiaomimimo.com/v1",
+    // 旧 Xiaomi 对话供应商只兼容回退密钥，不能复用其对话模型地址。
+    // TTS/ASR 必须始终走 token-plan 端点，与正式语音链路保持一致。
+    baseURL: tokenPlan.baseURL ?? "https://token-plan-cn.xiaomimimo.com/v1",
   };
 }
 

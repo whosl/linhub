@@ -7,7 +7,10 @@ import { toast } from "sonner";
 export function PwaRegister() {
   useEffect(() => {
     if ("serviceWorker" in navigator && process.env.NODE_ENV === "production") {
-      navigator.serviceWorker.register("/sw.js").catch(() => {});
+      navigator.serviceWorker
+        .register("/sw.js", { updateViaCache: "none" })
+        .then((registration) => registration.update())
+        .catch(() => {});
     }
     const onOffline = () => toast.warning("网络已断开，部分功能不可用");
     const onOnline = () => toast.success("网络已恢复");

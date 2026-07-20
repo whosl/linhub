@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { getDataService } from "@/lib/data";
 import { cn, formatCents, formatTokens } from "@/lib/utils";
+import { formatQuotaCents, isUnlimitedQuota } from "@/lib/billing-plan";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -57,23 +58,37 @@ export default function BillingPage() {
             <ReceiptIcon className="size-3.5" /> 本月订阅额度
           </p>
           {user?.subscription ? (
-            <>
-              <p className="mt-1 text-2xl font-semibold tabular-nums">
-                {formatCents(user.subscription.usedQuotaCents)}
-                <span className="text-sm font-normal text-muted-foreground">
-                  {" "}
-                  / {formatCents(user.subscription.monthlyQuotaCents)}
-                </span>
-              </p>
-              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
-                <div
-                  className="h-full rounded-full bg-primary transition-all"
-                  style={{
-                    width: `${Math.min(100, (user.subscription.usedQuotaCents / user.subscription.monthlyQuotaCents) * 100)}%`,
-                  }}
-                />
-              </div>
-            </>
+            isUnlimitedQuota(user.subscription.monthlyQuotaCents) ? (
+              <>
+                <p className="mt-1 text-2xl font-semibold">无限额度</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  本月已用 {formatCents(user.subscription.usedQuotaCents)}
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="mt-1 text-2xl font-semibold tabular-nums">
+                  {formatCents(user.subscription.usedQuotaCents)}
+                  <span className="text-sm font-normal text-muted-foreground">
+                    {" "}
+                    / {formatCents(user.subscription.monthlyQuotaCents)}
+                  </span>
+                </p>
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full rounded-full bg-primary transition-all"
+                    style={{
+                      width: `${Math.min(
+                        100,
+                        (user.subscription.usedQuotaCents /
+                          user.subscription.monthlyQuotaCents) *
+                          100
+                      )}%`,
+                    }}
+                  />
+                </div>
+              </>
+            )
           ) : (
             <p className="mt-1 text-2xl font-semibold">—</p>
           )}
@@ -154,6 +169,9 @@ function PlansTab({ currentPlanId }: { currentPlanId?: string }) {
               {p.priceCentsPerMonth > 0 && (
                 <span className="text-sm font-normal text-muted-foreground"> /月</span>
               )}
+            </p>
+            <p className="mt-3 text-sm font-medium text-primary">
+              {formatQuotaCents(p.monthlyQuotaCents)}额度
             </p>
             <ul className="mt-4 flex-1 space-y-2">
               {p.features.map((f) => (

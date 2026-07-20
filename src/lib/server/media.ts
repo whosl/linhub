@@ -37,6 +37,8 @@ export interface MediaAssetDto {
   messageId?: string;
   projectId?: string;
   sourceTool?: string;
+  /** 是否存在可按需读取的服务端提取文本；列表接口不携带正文。 */
+  extractedTextAvailable: boolean;
   extractedText?: string;
   createdAt: string;
 }
@@ -81,6 +83,7 @@ export function toMediaDto(
     messageId: row.messageId ?? undefined,
     projectId: row.projectId ?? undefined,
     sourceTool: row.sourceTool ?? undefined,
+    extractedTextAvailable: row.extractedText !== null,
     extractedText: row.extractedText ?? undefined,
     createdAt: row.createdAt.toISOString(),
   };
@@ -180,8 +183,23 @@ export async function listMedia(
     conditions.push(sql`${schema.mediaAssets.name} ILIKE ${q}`);
   }
 
+  // 文件列表只读取卡片需要的轻量字段。Office/PDF 的提取正文可能达到
+  // 100k 字符；若每页 60 项全部下发，会拖慢 Web/Android 首屏并放大 Room 缓存。
   const rows = await db
-    .select()
+    .select({
+      id: schema.mediaAssets.id,
+      ownerId: schema.mediaAssets.ownerId,
+      kind: schema.mediaAssets.kind,
+      name: schema.mediaAssets.name,
+      mimeType: schema.mediaAssets.mimeType,
+      size: schema.mediaAssets.size,
+      conversationId: schema.mediaAssets.conversationId,
+      messageId: schema.mediaAssets.messageId,
+      projectId: schema.mediaAssets.projectId,
+      sourceTool: schema.mediaAssets.sourceTool,
+      extractedTextAvailable: sql<boolean>`${schema.mediaAssets.extractedText} is not null`,
+      createdAt: schema.mediaAssets.createdAt,
+    })
     .from(schema.mediaAssets)
     .where(and(...conditions))
     .orderBy(desc(schema.mediaAssets.createdAt))
@@ -190,7 +208,21 @@ export async function listMedia(
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
   return {
-    items: page.map(toMediaDto),
+    items: page.map((row) => ({
+      id: row.id,
+      ownerId: row.ownerId,
+      kind: row.kind,
+      name: row.name,
+      mimeType: row.mimeType,
+      size: row.size,
+      url: mediaPublicUrl(row.id),
+      conversationId: row.conversationId ?? undefined,
+      messageId: row.messageId ?? undefined,
+      projectId: row.projectId ?? undefined,
+      sourceTool: row.sourceTool ?? undefined,
+      extractedTextAvailable: row.extractedTextAvailable,
+      createdAt: row.createdAt.toISOString(),
+    } satisfies MediaAssetDto)),
     nextCursor: hasMore
       ? page[page.length - 1]?.createdAt.toISOString()
       : undefined,

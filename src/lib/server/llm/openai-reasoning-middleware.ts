@@ -1,5 +1,6 @@
 import type { LanguageModelV4Middleware } from "@ai-sdk/provider";
 import type { JSONObject, LanguageModelV4StreamPart } from "@ai-sdk/provider";
+import { sanitizeReasoningText } from "@/lib/chat-text";
 
 /**
  * 中转网关 OpenAI Chat Completions 兼容层。
@@ -403,15 +404,7 @@ function toReasoningDelta(content: unknown): { present: boolean; delta?: string 
   };
 }
 
-/** 推理摘要里偶发出现的空 HTML 注释和无信息英文计划标题，入库前剥掉 */
+/** 推理摘要里偶发出现的工具调用草稿、空 HTML 注释和无信息英文计划标题，入库前剥掉 */
 function sanitizeReasoningDelta(text: string): string {
-  const cleaned = text.replace(/<!--[\s\S]*?-->/g, "").trim();
-  if (
-    /^\*\*(?:Planning|Preparing|Requesting|Retrying|Explaining|Analyzing|Considering|Checking|Reviewing|Reading)\b[^*]{0,160}\*\*$/i.test(
-      cleaned
-    )
-  ) {
-    return "";
-  }
-  return cleaned;
+  return sanitizeReasoningText(text);
 }

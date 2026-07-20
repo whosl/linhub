@@ -17,6 +17,7 @@ import type {
   UsageRecord,
   User,
 } from "@/lib/types";
+import { UNLIMITED_QUOTA_CENTS } from "@/lib/billing-plan";
 
 const now = Date.now();
 const iso = (offsetMs: number) => new Date(now - offsetMs).toISOString();
@@ -928,6 +929,16 @@ export const mockPlans: Plan[] = [
     modelTier: "pro",
     features: ["全部模型优先响应", "每月 ¥120 额度", "用户级 MCP", "Artifacts 分享", "优先客服"],
     enabled: true,
+  },
+  {
+    id: "plan-family-pass",
+    name: "Family Pass",
+    description: "家庭与亲友专属通行证，不限制月度额度",
+    priceCentsPerMonth: 0,
+    monthlyQuotaCents: UNLIMITED_QUOTA_CENTS,
+    modelTier: "pro",
+    features: ["全部模型", "无限月度额度", "图像生成", "知识库 RAG", "Artifacts 分享"],
+    enabled: false,
   },
 ];
 

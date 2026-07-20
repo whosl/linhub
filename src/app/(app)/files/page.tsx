@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { motion } from "motion/react";
+import { AnimatePresence, motion } from "motion/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   FileIcon,
@@ -14,7 +14,10 @@ import {
 } from "lucide-react";
 import { getDataService } from "@/lib/data";
 import type { MediaAsset } from "@/lib/types";
+import { optimisticRemoveRecord } from "@/lib/optimistic-query";
 import { cn, formatBytes, formatRelativeTime } from "@/lib/utils";
+import { MediaPreviewPanel } from "@/components/artifacts/media-preview-panel";
+import { ImageLightbox } from "@/components/chat/image-lightbox";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { EmptyState } from "@/components/ui/misc";
 import { PageContainer, PageHeader } from "@/components/shell/page-header";
@@ -42,6 +45,8 @@ export default function FilesPage() {
   const queryClient = useQueryClient();
   const [filter, setFilter] = React.useState<FilterKind>("all");
   const [deleteTarget, setDeleteTarget] = React.useState<MediaAsset | null>(null);
+  const [previewAsset, setPreviewAsset] = React.useState<MediaAsset | null>(null);
+  const [lightboxAsset, setLightboxAsset] = React.useState<MediaAsset | null>(null);
   const [deleting, setDeleting] = React.useState(false);
 
   const { data, isLoading } = useQuery({
@@ -60,12 +65,18 @@ export default function FilesPage() {
   const confirmDelete = async () => {
     if (!deleteTarget) return;
     setDeleting(true);
+    const target = deleteTarget;
+    const optimistic = optimisticRemoveRecord<MediaAsset>(
+      queryClient,
+      [["media-assets"]],
+      target.id
+    );
+    setDeleteTarget(null);
     try {
-      await getDataService().deleteMediaAsset(deleteTarget.id);
-      await queryClient.invalidateQueries({ queryKey: ["media-assets"] });
+      await getDataService().deleteMediaAsset(target.id);
       toast.success("已删除");
-      setDeleteTarget(null);
     } catch (e) {
+      optimistic.rollback();
       toast.error(e instanceof Error ? e.message : "删除失败");
     } finally {
       setDeleting(false);
@@ -119,10 +130,20 @@ export default function FilesPage() {
                 {images.map((asset, i) => (
                   <motion.div
                     key={asset.id}
+                    role="button"
+                    tabIndex={0}
                     initial={{ opacity: 0, y: 8 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: i * 0.02, duration: 0.25 }}
-                    className="group relative overflow-hidden rounded-xl border bg-card"
+                    onClick={() => setLightboxAsset(asset)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setLightboxAsset(asset);
+                      }
+                    }}
+                    aria-label={`预览图片「${asset.name}」`}
+                    className="group relative cursor-pointer overflow-hidden rounded-xl border bg-card outline-none transition-colors hover:border-primary/40 focus-visible:ring-2 focus-visible:ring-ring/40"
                   >
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
@@ -140,6 +161,7 @@ export default function FilesPage() {
                           {asset.conversationId && (
                             <Link
                               href={`/chat/${asset.conversationId}`}
+                              onClick={(event) => event.stopPropagation()}
                               className="rounded p-1 text-white/90 hover:bg-white/20"
                               title="打开会话"
                             >
@@ -149,7 +171,10 @@ export default function FilesPage() {
                           <button
                             type="button"
                             aria-label="删除"
-                            onClick={() => setDeleteTarget(asset)}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setDeleteTarget(asset);
+                            }}
                             className="rounded p-1 text-white/90 hover:bg-white/20"
                           >
                             <Trash2Icon className="size-3.5" />
@@ -173,7 +198,17 @@ export default function FilesPage() {
                 {docs.map((asset) => (
                   <li
                     key={asset.id}
-                    className="flex items-center gap-3 px-4 py-3 hover:bg-muted/40"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setPreviewAsset(asset)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setPreviewAsset(asset);
+                      }
+                    }}
+                    aria-label={`预览文件「${asset.name}」`}
+                    className="flex cursor-pointer items-center gap-3 px-4 py-3 outline-none transition-colors hover:bg-muted/40 focus-visible:bg-muted/40"
                   >
                     <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted">
                       <FileTextIcon className="size-4 text-muted-foreground" />
@@ -189,6 +224,7 @@ export default function FilesPage() {
                       {asset.conversationId && (
                         <Link
                           href={`/chat/${asset.conversationId}`}
+                          onClick={(event) => event.stopPropagation()}
                           className="inline-flex h-8 items-center gap-1 rounded-md px-3 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
                         >
                           <MessageSquareIcon className="size-3.5" />
@@ -197,7 +233,10 @@ export default function FilesPage() {
                       )}
                       <button
                         type="button"
-                        onClick={() => setDeleteTarget(asset)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setDeleteTarget(asset);
+                        }}
                         aria-label="删除"
                         className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
                       >
@@ -225,6 +264,26 @@ export default function FilesPage() {
         loading={deleting}
         onConfirm={confirmDelete}
         destructive
+      />
+      <AnimatePresence>
+        {previewAsset && (
+          <MediaPreviewPanel
+            key={previewAsset.id}
+            asset={previewAsset}
+            onClose={() => setPreviewAsset(null)}
+          />
+        )}
+      </AnimatePresence>
+      <ImageLightbox
+        src={lightboxAsset?.url ?? ""}
+        alt={lightboxAsset?.name}
+        open={!!lightboxAsset}
+        onOpenChange={(open) => {
+          if (!open) setLightboxAsset(null);
+        }}
+        onEdited={async () => {
+          await queryClient.invalidateQueries({ queryKey: ["media-assets"] });
+        }}
       />
     </PageContainer>
   );

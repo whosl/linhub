@@ -3,6 +3,7 @@
 import * as React from "react";
 import { useRouter } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { clientRandomUUID } from "@/lib/client-id";
 import {
   AlertCircleIcon,
   BotIcon,
@@ -28,6 +29,8 @@ import {
 } from "lucide-react";
 import { getDataService } from "@/lib/data";
 import type {
+  AppSettings,
+  LedgerEntry,
   Model,
   ModelCapability,
   McpServer,
@@ -36,8 +39,17 @@ import type {
   Provider,
   ProviderKind,
   RemoteModel,
+  UsageRecord,
+  User,
 } from "@/lib/types";
+import {
+  optimisticInsertRecord,
+  optimisticPatchQuery,
+  optimisticPatchRecords,
+  optimisticRemoveRecord,
+} from "@/lib/optimistic-query";
 import { cn, formatCents, formatRelativeTime, formatTokens } from "@/lib/utils";
+import { formatQuotaCents, isUnlimitedQuota } from "@/lib/billing-plan";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
@@ -129,7 +141,7 @@ export default function AdminPage() {
         description="供应商、模型计价、套餐与系统设置 — 普通用户即开即用"
       />
       <Tabs defaultValue="providers">
-        <TabsList className="flex-wrap">
+        <TabsList className="justify-start">
           <TabsTrigger value="providers">供应商</TabsTrigger>
           <TabsTrigger value="models">模型与计价</TabsTrigger>
           <TabsTrigger value="plans">套餐</TabsTrigger>
@@ -208,8 +220,20 @@ function ProvidersTab() {
   };
 
   const toggle = async (p: Provider) => {
-    await getDataService().admin.saveProvider({ ...p, enabled: !p.enabled });
-    queryClient.invalidateQueries({ queryKey: ["admin-providers"] });
+    const enabled = !p.enabled;
+    const optimistic = optimisticPatchRecords<Provider>(
+      queryClient,
+      [["admin-providers"]],
+      p.id,
+      { enabled }
+    );
+    try {
+      const saved = await getDataService().admin.saveProvider({ ...p, enabled });
+      optimistic.reconcile(saved);
+    } catch (error) {
+      optimistic.rollback();
+      toast.error(error instanceof Error ? error.message : "供应商状态更新失败");
+    }
   };
 
   // 测试连接：调拉取模型接口，成功说明 endpoint + key 都通
@@ -542,9 +566,20 @@ function ModelsTab() {
   };
 
   const toggle = async (m: Model) => {
-    await getDataService().admin.saveModel({ id: m.id, enabled: !m.enabled });
-    queryClient.invalidateQueries({ queryKey: ["admin-models"] });
-    queryClient.invalidateQueries({ queryKey: ["models"] });
+    const enabled = !m.enabled;
+    const optimistic = optimisticPatchRecords<Model>(
+      queryClient,
+      [["admin-models"], ["models"]],
+      m.id,
+      { enabled }
+    );
+    try {
+      const saved = await getDataService().admin.saveModel({ id: m.id, enabled });
+      optimistic.reconcile(saved);
+    } catch (error) {
+      optimistic.rollback();
+      toast.error(error instanceof Error ? error.message : "模型状态更新失败");
+    }
   };
 
   const invalidate = () => {
@@ -1059,8 +1094,20 @@ function PlansAdminTab() {
   });
 
   const toggle = async (p: Plan) => {
-    await getDataService().admin.savePlan({ ...p, enabled: !p.enabled });
-    queryClient.invalidateQueries({ queryKey: ["admin-plans"] });
+    const enabled = !p.enabled;
+    const optimistic = optimisticPatchRecords<Plan>(
+      queryClient,
+      [["admin-plans"], ["plans"]],
+      p.id,
+      { enabled }
+    );
+    try {
+      const saved = await getDataService().admin.savePlan({ ...p, enabled });
+      optimistic.reconcile(saved);
+    } catch (error) {
+      optimistic.rollback();
+      toast.error(error instanceof Error ? error.message : "套餐状态更新失败");
+    }
   };
 
   return (
@@ -1076,7 +1123,7 @@ function PlansAdminTab() {
             <span className="text-xs font-normal text-muted-foreground">/月</span>
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
-            月额度 {formatCents(p.monthlyQuotaCents)} ·{" "}
+            月额度 {formatQuotaCents(p.monthlyQuotaCents)} ·{" "}
             {p.modelTier === "pro" ? "全部模型" : "基础模型"}
           </p>
         </Card>
@@ -1089,10 +1136,15 @@ function PlansAdminTab() {
 
 function UsersTab() {
   const queryClient = useQueryClient();
+  const [selectedUserId, setSelectedUserId] = React.useState<string | null>(null);
   const [grantTarget, setGrantTarget] = React.useState<{ id: string; name: string } | null>(null);
   const [grantYuan, setGrantYuan] = React.useState("10");
   const [granting, setGranting] = React.useState(false);
   const grantInFlightRef = React.useRef(false);
+  const { data: currentUser } = useQuery({
+    queryKey: ["current-user"],
+    queryFn: () => getDataService().getCurrentUser(),
+  });
   const { data: users = [] } = useQuery({
     queryKey: ["admin-users"],
     queryFn: () => getDataService().admin.listUsers(),
@@ -1117,6 +1169,9 @@ function UsersTab() {
     try {
       await getDataService().admin.grantBalance(target.id, amount);
       queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-user", target.id] });
+      queryClient.invalidateQueries({ queryKey: ["ledger"] });
+      queryClient.invalidateQueries({ queryKey: ["current-user"] });
       toast.success("已赠送");
       setGrantTarget(null);
     } finally {
@@ -1127,26 +1182,49 @@ function UsersTab() {
 
   return (
     <>
-    <Card className="divide-y overflow-hidden">
-      {users.map((u) => (
-        <div key={u.id} className="flex items-center gap-3 px-5 py-3">
-          <Avatar name={u.name} src={u.avatarUrl} />
-          <div className="min-w-0 flex-1">
-            <p className="flex items-center gap-2 text-sm font-medium">
-              {u.name}
-              {u.role === "admin" && <Badge>管理员</Badge>}
-            </p>
-            <p className="text-xs text-muted-foreground">
-              {u.email} · 注册于 {formatRelativeTime(u.createdAt)}
-            </p>
+    {selectedUserId ? (
+      <UserDetailView
+        userId={selectedUserId}
+        currentUserId={currentUser?.id}
+        onBack={() => setSelectedUserId(null)}
+        onGrant={openGrant}
+      />
+    ) : (
+      <Card className="divide-y overflow-hidden">
+        {users.map((u) => (
+          <div
+            key={u.id}
+            className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:px-5"
+          >
+            <button
+              type="button"
+              className="flex min-w-0 flex-1 items-center gap-3 rounded-lg text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40"
+              onClick={() => setSelectedUserId(u.id)}
+            >
+              <Avatar name={u.name} src={u.avatarUrl} />
+              <div className="min-w-0 flex-1">
+                <p className="flex items-center gap-2 text-sm font-medium">
+                  <span className="truncate">{u.name}</span>
+                  {u.role === "admin" && <Badge>管理员</Badge>}
+                  {u.subscription && (
+                    <Badge variant="secondary">{u.subscription.planName}</Badge>
+                  )}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {u.email} · 注册于 {formatRelativeTime(u.createdAt)}
+                </p>
+              </div>
+            </button>
+            <div className="flex items-center justify-between gap-3 sm:justify-end">
+              <span className="text-sm tabular-nums">{formatCents(u.balance)}</span>
+              <Button variant="outline" size="sm" onClick={() => openGrant(u)}>
+                <CoinsIcon /> 赠送余额
+              </Button>
+            </div>
           </div>
-          <span className="text-sm tabular-nums">{formatCents(u.balance)}</span>
-          <Button variant="outline" size="sm" onClick={() => openGrant(u)}>
-            <CoinsIcon /> 赠送余额
-          </Button>
-        </div>
-      ))}
-    </Card>
+        ))}
+      </Card>
+    )}
     <Dialog
       open={!!grantTarget}
       onOpenChange={(open) => {
@@ -1193,6 +1271,349 @@ function UsersTab() {
     </Dialog>
     </>
   );
+}
+
+function UserDetailView({
+  userId,
+  currentUserId,
+  onBack,
+  onGrant,
+}: {
+  userId: string;
+  currentUserId?: string;
+  onBack: () => void;
+  onGrant: (user: { id: string; name: string }) => void;
+}) {
+  const queryClient = useQueryClient();
+  const [planId, setPlanId] = React.useState("");
+  const [expiresInDays, setExpiresInDays] = React.useState("30");
+  const [savingSubscription, setSavingSubscription] = React.useState(false);
+  const [deleteOpen, setDeleteOpen] = React.useState(false);
+  const [deleting, setDeleting] = React.useState(false);
+  const { data: detail, isLoading, error } = useQuery({
+    queryKey: ["admin-user", userId],
+    queryFn: () => getDataService().admin.getUserDetail(userId),
+  });
+  const { data: plans = [] } = useQuery({
+    queryKey: ["admin-plans"],
+    queryFn: () => getDataService().admin.listAllPlans(),
+  });
+
+  React.useEffect(() => {
+    if (!detail) return;
+    const subscription = detail.user.subscription;
+    Promise.resolve().then(() => {
+      setPlanId(subscription?.planId ?? "");
+      if (subscription?.expiresAt) {
+        const days = Math.max(
+          1,
+          Math.ceil(
+            (new Date(subscription.expiresAt).getTime() - Date.now()) /
+              86_400_000
+          )
+        );
+        setExpiresInDays(String(days));
+      } else {
+        setExpiresInDays("30");
+      }
+    });
+  }, [detail]);
+
+  const saveSubscription = async () => {
+    const days = Math.round(Number(expiresInDays));
+    if (planId && (!Number.isFinite(days) || days <= 0)) {
+      toast.error("请输入有效的订阅天数");
+      return;
+    }
+    setSavingSubscription(true);
+    try {
+      const updated = await getDataService().admin.updateUserSubscription(userId, {
+        planId: planId || null,
+        expiresInDays: planId ? days : undefined,
+      });
+      queryClient.setQueryData(["admin-user", userId], updated);
+      queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+      queryClient.invalidateQueries({ queryKey: ["current-user"] });
+      toast.success(planId ? "订阅已更新" : "订阅已取消");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "更新失败");
+    } finally {
+      setSavingSubscription(false);
+    }
+  };
+
+  const deleteUser = async () => {
+    if (userId === currentUserId) {
+      toast.error("不能删除当前登录账号");
+      return;
+    }
+    setDeleting(true);
+    try {
+      await getDataService().admin.deleteUser(userId);
+      queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+      queryClient.removeQueries({ queryKey: ["admin-user", userId] });
+      toast.success("用户已删除");
+      onBack();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "删除失败");
+    } finally {
+      setDeleting(false);
+      setDeleteOpen(false);
+    }
+  };
+
+  if (isLoading || !detail) {
+    if (error) {
+      return (
+        <EmptyState
+          icon={<AlertCircleIcon />}
+          title="无法读取用户详情"
+          description={error instanceof Error ? error.message : "请稍后重试。"}
+          action={
+            <Button variant="outline" onClick={onBack}>
+              返回用户列表
+            </Button>
+          }
+        />
+      );
+    }
+    return (
+      <div className="flex min-h-64 items-center justify-center">
+        <Loader2Icon className="size-5 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  const user = detail.user;
+  const isSelf = user.id === currentUserId;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Button variant="outline" size="sm" onClick={onBack}>
+          返回用户列表
+        </Button>
+        <Button variant="outline" size="sm" onClick={() => onGrant(user)}>
+          <CoinsIcon /> 赠送余额
+        </Button>
+      </div>
+
+      <Card className="flex flex-wrap items-center gap-4 p-5">
+        <Avatar name={user.name} src={user.avatarUrl} className="size-14 text-xl" />
+        <div className="min-w-0 flex-1">
+          <p className="flex flex-wrap items-center gap-2 font-medium">
+            {user.name}
+            {user.role === "admin" && <Badge>管理员</Badge>}
+          </p>
+          <p className="truncate text-sm text-muted-foreground">{user.email}</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            注册于 {formatRelativeTime(user.createdAt)}
+          </p>
+        </div>
+        <div className="text-left sm:text-right">
+          <p className="text-xs text-muted-foreground">余额</p>
+          <p className="text-lg font-semibold tabular-nums">
+            {formatCents(user.balance)}
+          </p>
+        </div>
+      </Card>
+
+      <Card className="space-y-4 p-5">
+        <div>
+          <p className="text-sm font-medium">订阅</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {subscriptionSummary(user)}
+          </p>
+        </div>
+        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_140px_auto]">
+          <Select
+            value={planId}
+            onValueChange={setPlanId}
+            options={[
+              { value: "", label: "无订阅" },
+              ...plans.map((plan) => ({
+                value: plan.id,
+                label: `${plan.name} · ${formatQuotaCents(plan.monthlyQuotaCents)}额度`,
+              })),
+            ]}
+          />
+          <Input
+            type="number"
+            min="1"
+            step="1"
+            value={expiresInDays}
+            disabled={!planId}
+            onChange={(event) => setExpiresInDays(event.target.value)}
+            aria-label="订阅有效天数"
+          />
+          <Button
+            type="button"
+            disabled={savingSubscription}
+            onClick={() => void saveSubscription()}
+          >
+            {savingSubscription ? "保存中..." : "保存订阅"}
+          </Button>
+        </div>
+      </Card>
+
+      <Tabs defaultValue="usage">
+        <TabsList className="justify-start">
+          <TabsTrigger value="usage">用量记录</TabsTrigger>
+          <TabsTrigger value="ledger">余额流水</TabsTrigger>
+        </TabsList>
+        <TabsContent value="usage">
+          <UserUsageLog records={detail.usageRecords} />
+        </TabsContent>
+        <TabsContent value="ledger">
+          <UserLedgerLog entries={detail.ledger} />
+        </TabsContent>
+      </Tabs>
+
+      <Card className="space-y-3 border-destructive/30 p-5">
+        <div>
+          <p className="text-sm font-medium text-destructive">危险操作</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            删除用户会同时删除该用户的会话、文件、知识库、余额流水和登录会话。
+          </p>
+        </div>
+        <Button
+          variant="destructive"
+          disabled={isSelf}
+          onClick={() => setDeleteOpen(true)}
+        >
+          <Trash2Icon /> 删除用户
+        </Button>
+        {isSelf && (
+          <p className="text-xs text-muted-foreground">当前登录账号不能在这里删除。</p>
+        )}
+      </Card>
+
+      <ConfirmDialog
+        open={deleteOpen}
+        onOpenChange={(open) => {
+          if (!open && !deleting) setDeleteOpen(false);
+        }}
+        title="删除用户"
+        description={`确定删除用户「${user.name}」？删除后无法撤销。`}
+        confirmLabel="删除"
+        destructive
+        loading={deleting}
+        onConfirm={deleteUser}
+      />
+    </div>
+  );
+}
+
+function UserUsageLog({ records }: { records: UsageRecord[] }) {
+  if (records.length === 0) {
+    return <Card className="p-5 text-sm text-muted-foreground">暂无用量记录</Card>;
+  }
+  return (
+    <Card className="divide-y overflow-hidden">
+      {records.map((record) => (
+        <div
+          key={record.id}
+          className="grid gap-2 px-4 py-3 text-sm md:grid-cols-[1fr_auto_auto]"
+        >
+          <div className="min-w-0">
+            <p className="truncate font-medium">{record.modelName}</p>
+            <p className="text-xs text-muted-foreground">
+              {usageCapabilityLabel(record.capability)} ·{" "}
+              {formatRelativeTime(record.createdAt)}
+            </p>
+          </div>
+          <p className="text-xs text-muted-foreground md:text-right">
+            输入 {formatTokens(record.inputTokens)} · 输出{" "}
+            {formatTokens(record.outputTokens)}
+            {record.imageCount ? ` · 图片 ${record.imageCount}` : ""}
+          </p>
+          <p className="font-medium tabular-nums md:text-right">
+            {formatCents(record.costCents)}
+          </p>
+        </div>
+      ))}
+    </Card>
+  );
+}
+
+function UserLedgerLog({ entries }: { entries: LedgerEntry[] }) {
+  if (entries.length === 0) {
+    return <Card className="p-5 text-sm text-muted-foreground">暂无余额流水</Card>;
+  }
+  return (
+    <Card className="divide-y overflow-hidden">
+      {entries.map((entry) => (
+        <div
+          key={entry.id}
+          className="grid gap-2 px-4 py-3 text-sm md:grid-cols-[1fr_auto_auto]"
+        >
+          <div className="min-w-0">
+            <p className="truncate font-medium">
+              {entry.description || ledgerReasonLabel(entry.reason)}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {ledgerReasonLabel(entry.reason)} · {formatRelativeTime(entry.createdAt)}
+            </p>
+          </div>
+          <p
+            className={cn(
+              "font-medium tabular-nums md:text-right",
+              entry.amountCents >= 0 ? "text-success" : "text-foreground"
+            )}
+          >
+            {formatSignedCents(entry.amountCents)}
+          </p>
+          <p className="text-xs text-muted-foreground md:text-right">
+            余额 {formatCents(entry.balanceAfterCents)}
+          </p>
+        </div>
+      ))}
+    </Card>
+  );
+}
+
+function subscriptionSummary(user: User) {
+  if (!user.subscription) return "当前没有有效订阅";
+  const used = user.subscription.usedQuotaCents;
+  const quota = user.subscription.monthlyQuotaCents;
+  if (isUnlimitedQuota(quota)) {
+    return `${user.subscription.planName} · 无限额度 · 本月已用 ${formatCents(
+      used
+    )} · ${new Date(user.subscription.expiresAt).toLocaleDateString("zh-CN")} 到期`;
+  }
+  return `${user.subscription.planName} · 已用 ${formatCents(used)} / ${formatCents(
+    quota
+  )} · ${new Date(user.subscription.expiresAt).toLocaleDateString("zh-CN")} 到期`;
+}
+
+function usageCapabilityLabel(capability?: string) {
+  const labels: Record<string, string> = {
+    chat: "对话",
+    image: "图像生成",
+    "image-edit": "图像编辑",
+    embedding: "向量化",
+    tts: "语音合成",
+    asr: "语音识别",
+    "vision-helper": "图片理解",
+    "web-search": "联网搜索",
+    "tool-router": "工具路由",
+  };
+  return labels[capability ?? "chat"] ?? capability ?? "用量";
+}
+
+function ledgerReasonLabel(reason: LedgerEntry["reason"]) {
+  const labels: Record<LedgerEntry["reason"], string> = {
+    recharge: "充值",
+    usage: "消费",
+    grant: "赠送",
+    refund: "退款",
+    redeem: "兑换",
+  };
+  return labels[reason];
+}
+
+function formatSignedCents(cents: number) {
+  return `${cents >= 0 ? "+" : "-"}${formatCents(Math.abs(cents))}`;
 }
 
 // ---------- 技能审核 ----------
@@ -1419,9 +1840,22 @@ function SystemSettingsTab() {
   const save = async (
     patch: Parameters<ReturnType<typeof getDataService>["admin"]["saveSettings"]>[0]
   ) => {
-    await getDataService().admin.saveSettings(patch);
-    queryClient.invalidateQueries({ queryKey: ["admin-settings"] });
-    toast.success("设置已保存");
+    const cachePatch = Object.fromEntries(
+      Object.entries(patch).filter(([key]) => key in settings)
+    ) as Partial<AppSettings>;
+    const optimistic = optimisticPatchQuery<AppSettings>(
+      queryClient,
+      ["admin-settings"],
+      cachePatch
+    );
+    try {
+      const saved = await getDataService().admin.saveSettings(patch);
+      optimistic.reconcile(saved);
+      toast.success("设置已保存");
+    } catch (error) {
+      optimistic.rollback();
+      toast.error(error instanceof Error ? error.message : "设置保存失败");
+    }
   };
 
   const visionModels = models.filter((m) => m.capabilities.includes("vision"));
@@ -1523,19 +1957,37 @@ function SystemSettingsTab() {
   const addGlobalMcp = async () => {
     if (mcpSaving) return;
     setMcpSaving(true);
+    const temporary: McpServer = {
+      id: `optimistic-global-mcp-${clientRandomUUID()}`,
+      scope: "global",
+      name: mcpForm.name.trim(),
+      url: mcpForm.url.trim(),
+      transport: mcpForm.transport,
+      enabled: false,
+      defaultEnabled: false,
+      status: "unknown",
+      tools: [],
+      clientMutationState: "pending",
+    };
+    const optimistic = optimisticInsertRecord<McpServer>(
+      queryClient,
+      [["mcp-servers", "global"]],
+      temporary
+    );
+    setMcpDialogOpen(false);
+    setMcpForm({ name: "", url: "", transport: "streamable-http" });
     try {
-      await getDataService().saveMcpServer({
-        ...mcpForm,
-        name: mcpForm.name.trim(),
-        url: mcpForm.url.trim(),
+      const saved = await getDataService().saveMcpServer({
+        name: temporary.name,
+        url: temporary.url,
+        transport: temporary.transport,
         scope: "global",
         enabled: false,
       });
-      invalidateMcp();
-      setMcpDialogOpen(false);
-      setMcpForm({ name: "", url: "", transport: "streamable-http" });
+      optimistic.reconcile(saved);
       toast.success("全局 MCP 服务器已添加，默认停用，请测试后启用");
     } catch (e) {
+      optimistic.rollback();
       toast.error(e instanceof Error ? e.message : "添加失败");
     } finally {
       setMcpSaving(false);
@@ -1557,10 +2009,25 @@ function SystemSettingsTab() {
   };
 
   const toggleGlobalMcp = async (server: McpServer) => {
+    const enabled = !server.enabled;
+    const optimistic = optimisticPatchRecords<McpServer>(
+      queryClient,
+      [["mcp-servers"]],
+      server.id,
+      { enabled }
+    );
     try {
-      await getDataService().saveMcpServer({ ...server, enabled: !server.enabled });
-      invalidateMcp();
+      const saved = await getDataService().saveMcpServer({
+        id: server.id,
+        name: server.name,
+        url: server.url,
+        transport: server.transport,
+        scope: server.scope,
+        enabled,
+      });
+      optimistic.reconcile(saved);
     } catch (e) {
+      optimistic.rollback();
       toast.error(e instanceof Error ? e.message : "保存失败");
     }
   };
@@ -1568,12 +2035,18 @@ function SystemSettingsTab() {
   const deleteGlobalMcp = async () => {
     if (!deleteMcpTarget || deletingMcp) return;
     setDeletingMcp(true);
+    const target = deleteMcpTarget;
+    const optimistic = optimisticRemoveRecord<McpServer>(
+      queryClient,
+      [["mcp-servers"]],
+      target.id
+    );
+    setDeleteMcpTarget(null);
     try {
-      await getDataService().deleteMcpServer(deleteMcpTarget.id);
-      invalidateMcp();
-      setDeleteMcpTarget(null);
+      await getDataService().deleteMcpServer(target.id);
       toast.success("全局 MCP 服务器已删除");
     } catch (e) {
+      optimistic.rollback();
       toast.error(e instanceof Error ? e.message : "删除失败");
     } finally {
       setDeletingMcp(false);

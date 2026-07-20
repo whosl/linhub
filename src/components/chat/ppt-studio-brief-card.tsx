@@ -5,7 +5,10 @@ import { FileTextIcon, Loader2Icon, SparklesIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input, Textarea } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { SkillRunLiveCard } from "./skill-run-card";
+import {
+  SkillRunLiveCard,
+  type SkillRunAttachment,
+} from "./skill-run-card";
 
 const THEMES = [
   ["theme01", "轻拟态 · 产品汇报"],
@@ -43,14 +46,17 @@ export function PptStudioBriefCard({
   runId,
   skillName,
   initialTopic,
+  onOpenAttachment,
 }: {
   runId: string;
   skillName: string;
   initialTopic: string;
+  onOpenAttachment?: (attachment: SkillRunAttachment, runId: string) => void;
 }) {
   const [snapshot, setSnapshot] = React.useState<RunSnapshot | null>(null);
   const [draft, setDraft] = React.useState<BriefDraft>(() => defaultDraft(initialTopic));
   const [submitting, setSubmitting] = React.useState(false);
+  const [cancelling, setCancelling] = React.useState(false);
   const [error, setError] = React.useState("");
 
   React.useEffect(() => {
@@ -76,7 +82,13 @@ export function PptStudioBriefCard({
   }, [runId]);
 
   if (snapshot && snapshot.status !== "waiting_input") {
-    return <SkillRunLiveCard runId={runId} skillName={skillName} />;
+    return (
+      <SkillRunLiveCard
+        runId={runId}
+        skillName={skillName}
+        onOpenAttachment={onOpenAttachment}
+      />
+    );
   }
 
   const update = <Key extends keyof BriefDraft>(key: Key, value: BriefDraft[Key]) => {
@@ -102,6 +114,24 @@ export function PptStudioBriefCard({
       setError(reason instanceof Error ? reason.message : "提交 PPT 需求失败");
     } finally {
       setSubmitting(false);
+    }
+  };
+  const cancel = async () => {
+    setCancelling(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/skill-runs/${encodeURIComponent(runId)}`, {
+        method: "DELETE",
+      });
+      const payload = (await response.json().catch(() => ({}))) as { error?: string };
+      if (!response.ok) throw new Error(payload.error || "取消 PPT 任务失败");
+      setSnapshot((current) =>
+        current ? { ...current, status: "cancelled" } : current
+      );
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "取消 PPT 任务失败");
+    } finally {
+      setCancelling(false);
     }
   };
 
@@ -161,10 +191,21 @@ export function PptStudioBriefCard({
               <Textarea value={draft.additionalInstructions} onChange={(event) => update("additionalInstructions", event.target.value)} placeholder="例如：突出第三季度增长、减少大段文字、结尾给出行动计划" maxLength={1000} />
             </Field>
             {error && <p className="rounded-lg bg-destructive/5 px-3 py-2 text-xs text-destructive">{error}</p>}
-            <Button type="button" className="w-full" onClick={submit} disabled={submitting || !snapshot}>
-              {submitting ? <Loader2Icon className="animate-spin" /> : <SparklesIcon />}
-              {submitting ? "正在提交…" : "提交并开始生成"}
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={cancel}
+                disabled={submitting || cancelling || !snapshot}
+              >
+                {cancelling ? <Loader2Icon className="animate-spin" /> : null}
+                {cancelling ? "正在取消…" : "取消任务"}
+              </Button>
+              <Button type="button" className="flex-1" onClick={submit} disabled={submitting || cancelling || !snapshot}>
+                {submitting ? <Loader2Icon className="animate-spin" /> : <SparklesIcon />}
+                {submitting ? "正在提交…" : "提交并开始生成"}
+              </Button>
+            </div>
           </>
         )}
       </div>
@@ -182,11 +223,30 @@ function defaultDraft(topic: string): BriefDraft {
 
 function draftFromInput(input: Record<string, unknown> | undefined, fallback: BriefDraft): BriefDraft {
   if (!input) return fallback;
+  const theme = THEMES.some(([value]) => value === input.theme)
+    ? (input.theme as BriefDraft["theme"])
+    : fallback.theme;
+  const mediaPreference = ["auto", "image-heavy", "text-first", "no-media"].includes(
+    String(input.mediaPreference)
+  )
+    ? (input.mediaPreference as BriefDraft["mediaPreference"])
+    : fallback.mediaPreference;
   return {
     ...fallback,
     topic: typeof input.topic === "string" ? input.topic : fallback.topic,
     audience: typeof input.audience === "string" ? input.audience : fallback.audience,
-    pageCount: typeof input.pageCount === "number" ? input.pageCount : fallback.pageCount,
+    pageCount:
+      typeof input.pageCount === "number"
+        ? Math.min(30, Math.max(3, input.pageCount))
+        : fallback.pageCount,
+    theme,
+    mediaPreference,
+    language: input.language === "en" || input.language === "zh"
+      ? input.language
+      : fallback.language,
+    outputFormat: input.outputFormat === "html" || input.outputFormat === "pptx"
+      ? input.outputFormat
+      : fallback.outputFormat,
     additionalInstructions: typeof input.additionalInstructions === "string" ? input.additionalInstructions : fallback.additionalInstructions,
   };
 }

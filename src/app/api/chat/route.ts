@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { eq, and, or, isNull, sql, desc } from "drizzle-orm";
+import { eq, and, or, isNull, sql, desc, inArray } from "drizzle-orm";
 import {
   generateText,
   stepCountIs,
@@ -12,6 +12,7 @@ import { db, schema } from "@/lib/server/db";
 import { requireSession } from "@/lib/server/auth";
 import { ensureSeeded } from "@/lib/server/seed";
 import { computeCostCents, resolveModel } from "@/lib/server/llm/registry";
+import { buildBaseSystemPrompt } from "@/lib/server/llm/system-prompt";
 import {
   assertCanSpend,
   getActiveSubscription,
@@ -21,6 +22,7 @@ import {
 import { rateLimit } from "@/lib/server/rate-limit";
 import { toUiArtifact } from "@/app/api/artifacts/util";
 import { resolveImageSource } from "@/lib/server/llm/image-source";
+import { sanitizeAssistantText, sanitizeReasoningText } from "@/lib/chat-text";
 import {
   describeImageFromBuffer,
   prepareVisionImage,
@@ -48,11 +50,21 @@ import {
   persistToolRoutingDecision,
   resolveToolRouting,
 } from "@/lib/server/llm/tool-router";
+import {
+  isContextualCodeFollowUp,
+  isContextualImageFollowUp,
+  isContextualKnowledgeFollowUp,
+  isCodeExecutionDirectedQuery,
+  isImageGenerationDirectedQuery,
+  isKnowledgeDirectedQuery,
+  isProjectMaterialDirectedQuery,
+} from "@/lib/server/llm/tool-intent";
 import type {
   ChatToolToggles,
   ImagePart,
   Message as UiMessage,
   MessagePart,
+  ThinkingEffort,
   RoutingBuiltin,
   SendMessageInput,
   StreamEvent,
@@ -72,22 +84,27 @@ import {
   type ChatSubscriber,
 } from "@/lib/server/chat-task-registry";
 
-export const maxDuration = 300;
+export const maxDuration = 1800;
 
 const uid = () => crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+const MAX_TOOL_STEPS = 200;
 const RESUME_POLL_MS = 750;
 const RESUME_STALE_MS = 120_000;
 const STREAM_HEARTBEAT_MS = 15_000;
+const MEDIA_URL_PATTERN = /^\/api\/media\/([A-Za-z0-9._-]+)$/;
+const CLIENT_ENTITY_ID_PATTERN = /^(?:c|msg)-[a-f0-9]{16}$/;
 
 interface RegenerateInput {
   regenerate: true;
   clientGenerationId?: string;
   conversationId: string;
   assistantMessageId: string;
+  clientAssistantMessageId?: string;
   modelId?: string;
 }
 
 type ChatRequest = SendMessageInput | RegenerateInput;
+type SdkReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
 
 interface PreparedGeneration {
   conversationId: string;
@@ -105,12 +122,55 @@ class ChatBusyError extends Error {
   }
 }
 
+function validatedClientEntityId(
+  value: string | undefined,
+  prefix: "c" | "msg"
+) {
+  if (value == null) return undefined;
+  if (!CLIENT_ENTITY_ID_PATTERN.test(value) || !value.startsWith(`${prefix}-`)) {
+    throw new Error("客户端生成的资源 ID 无效");
+  }
+  return value;
+}
+
 function requestedConversationId(body: ChatRequest) {
   return "regenerate" in body ? body.conversationId : body.conversationId;
 }
 
 function requestedClientGenerationId(body: ChatRequest) {
   return "regenerate" in body ? body.clientGenerationId : body.clientGenerationId;
+}
+
+function canonicalJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entry]) => [key, canonicalJson(entry)])
+    );
+  }
+  return value;
+}
+
+function jsonSemanticallyEqual(left: unknown, right: unknown) {
+  return JSON.stringify(canonicalJson(left)) === JSON.stringify(canonicalJson(right));
+}
+
+function referencedMediaAssetIds(input: SendMessageInput): string[] {
+  const ids = new Set<string>();
+  for (const attachment of input.attachments ?? []) {
+    if (attachment.attachmentId) ids.add(attachment.attachmentId);
+  }
+  for (const image of input.images ?? []) {
+    if (image.mediaAssetId) {
+      ids.add(image.mediaAssetId);
+      continue;
+    }
+    const matched = MEDIA_URL_PATTERN.exec(image.url);
+    if (matched?.[1]) ids.add(matched[1]);
+  }
+  return [...ids];
 }
 
 function pruneStalePendingGenerationKeys() {
@@ -184,6 +244,16 @@ export async function POST(req: NextRequest) {
   const limited = rateLimit(`chat:${userId}`, 20, 60_000);
   if (limited) return limited;
   const body = (await req.json()) as ChatRequest;
+
+  const existingTask = body.clientGenerationId
+    ? chatTasksByClientId.get(clientGenerationKey(userId, body.clientGenerationId))
+    : undefined;
+  if (isLiveTask(existingTask, userId)) {
+    return createTaskStreamResponse(existingTask, req.signal, {
+      replayBufferedEvents: true,
+      syncAssistantSnapshot: true,
+    });
+  }
 
   let prepared: PreparedGeneration;
   let releaseGenerationSlot: (() => void) | undefined;
@@ -1147,59 +1217,76 @@ async function prepareSend(
   // 无论新/旧会话，都校验 style/project/skill 归属，防止 IDOR
   await assertOwnedRefs(userId, input);
   if (!conversationId) {
-    conversationId = `c-${uid()}`;
-    isNew = true;
-    // 技能默认模型：用户未指定模型时，优先使用自定义助手自己的默认模型。
-    if (!effectiveModelId && input.skillId) {
-      effectiveModelId = (await getSkillDefaultModelId(userId, input.skillId)) ?? "";
-    }
-    // 项目级默认模型：用户未指定模型时回退到 project.modelId
-    if (!effectiveModelId && input.projectId) {
-      const [proj] = await db
-        .select({ modelId: schema.projects.modelId })
-        .from(schema.projects)
-        .where(
-          and(
-            eq(schema.projects.id, input.projectId),
-            eq(schema.projects.ownerId, userId)
-          )
-        )
-        .limit(1);
-      if (
-        proj?.modelId &&
-        (await isAccessibleChatModelForUser(userId, proj.modelId))
-      ) {
-        effectiveModelId = proj.modelId;
-      }
-    }
-    if (!effectiveModelId) {
-      effectiveModelId = (await getDefaultModelId(userId)) ?? "";
-    }
-    if (!effectiveModelId) {
-      throw new Error("模型不可用，请在设置中选择一个模型");
-    }
-    await db.insert(schema.conversations).values({
-      id: conversationId,
-      ownerId: userId,
-      modelId: effectiveModelId,
-      projectId: input.projectId,
-      skillId: input.skillId,
-      styleId: input.styleId,
-    });
-    if (input.skillId) {
-      await db
-        .update(schema.skills)
-        .set({ usageCount: sql`${schema.skills.usageCount} + 1` })
-        .where(eq(schema.skills.id, input.skillId));
-    }
-    const [conversation] = await db
+    conversationId =
+      validatedClientEntityId(input.clientConversationId, "c") ?? `c-${uid()}`;
+    const [existingConversation] = await db
       .select()
       .from(schema.conversations)
-      .where(eq(schema.conversations.id, conversationId));
-    emit({
-      type: "conversation-created",
-      conversation: toUiConversation(conversation),
-    });
+      .where(eq(schema.conversations.id, conversationId))
+      .limit(1);
+    if (existingConversation && existingConversation.ownerId !== userId) {
+      throw new Error("客户端生成的会话 ID 已被占用");
+    }
+    if (existingConversation) {
+      effectiveModelId ||= existingConversation.modelId;
+      emit({
+        type: "conversation-created",
+        conversation: toUiConversation(existingConversation),
+      });
+    } else {
+      isNew = true;
+    // 技能默认模型：用户未指定模型时，优先使用自定义助手自己的默认模型。
+      if (!effectiveModelId && input.skillId) {
+        effectiveModelId = (await getSkillDefaultModelId(userId, input.skillId)) ?? "";
+      }
+      // 项目级默认模型：用户未指定模型时回退到 project.modelId
+      if (!effectiveModelId && input.projectId) {
+        const [proj] = await db
+          .select({ modelId: schema.projects.modelId })
+          .from(schema.projects)
+          .where(
+            and(
+              eq(schema.projects.id, input.projectId),
+              eq(schema.projects.ownerId, userId)
+            )
+          )
+          .limit(1);
+        if (
+          proj?.modelId &&
+          (await isAccessibleChatModelForUser(userId, proj.modelId))
+        ) {
+          effectiveModelId = proj.modelId;
+        }
+      }
+      if (!effectiveModelId) {
+        effectiveModelId = (await getDefaultModelId(userId)) ?? "";
+      }
+      if (!effectiveModelId) {
+        throw new Error("模型不可用，请在设置中选择一个模型");
+      }
+      await db.insert(schema.conversations).values({
+        id: conversationId,
+        ownerId: userId,
+        modelId: effectiveModelId,
+        projectId: input.projectId,
+        skillId: input.skillId,
+        styleId: input.styleId,
+      });
+      if (input.skillId) {
+        await db
+          .update(schema.skills)
+          .set({ usageCount: sql`${schema.skills.usageCount} + 1` })
+          .where(eq(schema.skills.id, input.skillId));
+      }
+      const [conversation] = await db
+        .select()
+        .from(schema.conversations)
+        .where(eq(schema.conversations.id, conversationId));
+      emit({
+        type: "conversation-created",
+        conversation: toUiConversation(conversation),
+      });
+    }
   } else {
     const [conversation] = await db
       .select()
@@ -1214,9 +1301,42 @@ async function prepareSend(
     if (!effectiveModelId) effectiveModelId = conversation.modelId;
   }
 
-  // 2. 父消息（分支）
+  const requestedUserMessageId = validatedClientEntityId(
+    input.clientUserMessageId,
+    "msg"
+  );
+  const userMessageId = requestedUserMessageId ?? `msg-${uid()}`;
+  const proposedUserParts: MessagePart[] = [
+    ...(input.images ?? []),
+    ...(input.attachments ?? []),
+    { type: "text", text: input.text },
+    { type: "tool-config", tools: input.tools },
+  ];
+  const [existingUserMessage] = await db
+    .select()
+    .from(schema.messages)
+    .where(eq(schema.messages.id, userMessageId))
+    .limit(1);
+  if (
+    existingUserMessage &&
+    (existingUserMessage.conversationId !== conversationId ||
+      existingUserMessage.role !== "user")
+  ) {
+    throw new Error("客户端生成的消息 ID 已被占用");
+  }
+  if (
+    existingUserMessage &&
+    (!jsonSemanticallyEqual(existingUserMessage.parts, proposedUserParts) ||
+      (existingUserMessage.quotedText ?? undefined) !== input.quotedText)
+  ) {
+    throw new Error("同一发送操作不能更改消息内容");
+  }
+
+  // 2. 父消息（分支）。幂等重试必须沿用第一次落库时的父节点。
   let parentId: string | null;
-  if (input.parentId !== undefined) {
+  if (existingUserMessage) {
+    parentId = existingUserMessage.parentId;
+  } else if (input.parentId !== undefined) {
     parentId = input.parentId;
     if (parentId) {
       const [parentMsg] = await db
@@ -1239,23 +1359,33 @@ async function prepareSend(
     parentId = conversation?.leaf ?? null;
   }
 
-  // 3. 落库用户消息
-  const userParts: MessagePart[] = [
-    ...(input.images ?? []),
-    ...(input.attachments ?? []),
-    { type: "text", text: input.text },
-    { type: "tool-config", tools: input.tools },
-  ];
-  const userMessageId = `msg-${uid()}`;
-  await db.insert(schema.messages).values({
-    id: userMessageId,
-    conversationId,
-    parentId,
-    role: "user",
-    parts: userParts,
-    quotedText: input.quotedText,
-    status: "complete",
-  });
+  // 3. 落库用户消息；相同客户端消息 ID 的重试直接复用已有行。
+  const userParts = existingUserMessage
+    ? (existingUserMessage.parts as MessagePart[])
+    : proposedUserParts;
+  if (!existingUserMessage) {
+    await db.insert(schema.messages).values({
+      id: userMessageId,
+      conversationId,
+      parentId,
+      role: "user",
+      parts: userParts,
+      quotedText: input.quotedText,
+      status: "complete",
+    });
+    const mediaAssetIds = referencedMediaAssetIds(input);
+    if (mediaAssetIds.length > 0) {
+      await db
+        .update(schema.mediaAssets)
+        .set({ conversationId, messageId: userMessageId })
+        .where(
+          and(
+            eq(schema.mediaAssets.ownerId, userId),
+            inArray(schema.mediaAssets.id, mediaAssetIds)
+          )
+        );
+    }
+  }
   emit({
     type: "user-message",
     message: {
@@ -1265,12 +1395,40 @@ async function prepareSend(
       role: "user",
       parts: userParts,
       quotedText: input.quotedText,
-      createdAt: new Date().toISOString(),
+      createdAt: existingUserMessage?.createdAt.toISOString() ?? new Date().toISOString(),
       status: "complete",
     },
   });
 
-  const assistantId = `msg-${uid()}`;
+  const assistantId =
+    validatedClientEntityId(input.clientAssistantMessageId, "msg") ?? `msg-${uid()}`;
+  const [existingAssistant] = await db
+    .select()
+    .from(schema.messages)
+    .where(eq(schema.messages.id, assistantId))
+    .limit(1);
+  if (
+    existingAssistant &&
+    (existingAssistant.conversationId !== conversationId ||
+      existingAssistant.parentId !== userMessageId ||
+      existingAssistant.role !== "assistant")
+  ) {
+    throw new Error("客户端生成的助手消息 ID 已被占用");
+  }
+  const assistantAlreadyFinal =
+    existingAssistant != null && existingAssistant.status !== "streaming";
+  if (assistantAlreadyFinal) {
+    emit({
+      type: "assistant-snapshot",
+      message: toUiMessage(existingAssistant),
+    });
+    emit({
+      type: "done",
+      messageId: assistantId,
+      usage: (existingAssistant.usage as UiMessage["usage"] | null) ?? undefined,
+      status: existingAssistant.status,
+    });
+  }
   return {
     conversationId,
     assistantId,
@@ -1300,6 +1458,7 @@ async function prepareSend(
         }
       : undefined,
     run: async (streamEmit, signal) => {
+      if (assistantAlreadyFinal) return;
       // 4. 流式生成
       await streamAssistant({
         conversationId,
@@ -1308,6 +1467,7 @@ async function prepareSend(
         modelId: effectiveModelId,
         styleId: input.styleId,
         extendedThinking: input.extendedThinking,
+        thinkingEffort: input.thinkingEffort,
         toolToggles: input.tools,
         userId,
         origin,
@@ -1370,7 +1530,23 @@ async function prepareRegenerate(
   if (!conversation) throw new Error("会话不存在");
 
   const parentId = target.parentId;
-  const assistantId = `msg-${uid()}`;
+  const assistantId =
+    validatedClientEntityId(input.clientAssistantMessageId, "msg") ?? `msg-${uid()}`;
+  const [existingAssistant] = await db
+    .select()
+    .from(schema.messages)
+    .where(eq(schema.messages.id, assistantId))
+    .limit(1);
+  if (
+    existingAssistant &&
+    (existingAssistant.conversationId !== input.conversationId ||
+      existingAssistant.parentId !== parentId ||
+      existingAssistant.role !== "assistant")
+  ) {
+    throw new Error("客户端生成的助手消息 ID 已被占用");
+  }
+  const assistantAlreadyFinal =
+    existingAssistant != null && existingAssistant.status !== "streaming";
   const toolToggles =
     (await getMessageToolToggles(parentId, input.conversationId)) ??
     inferRegenerateToolToggles(target.parts as MessagePart[]);
@@ -1378,24 +1554,37 @@ async function prepareRegenerate(
     conversationId: input.conversationId,
     assistantId,
     clientGenerationId: input.clientGenerationId,
-    bootstrapEvents: [],
-    run: (emit, signal) =>
-      streamAssistant({
+    bootstrapEvents: assistantAlreadyFinal
+      ? [
+          { type: "assistant-snapshot", message: toUiMessage(existingAssistant) },
+          {
+            type: "done",
+            messageId: assistantId,
+            usage: (existingAssistant.usage as UiMessage["usage"] | null) ?? undefined,
+            status: existingAssistant.status,
+          },
+        ]
+      : [],
+    run: async (emit, signal) => {
+      if (assistantAlreadyFinal) return;
+      await streamAssistant({
         conversationId: input.conversationId,
         parentId,
         assistantId,
         modelId: input.modelId ?? target.modelId ?? conversation.modelId,
         styleId: conversation.styleId ?? undefined,
         extendedThinking: true,
+        thinkingEffort: "high",
         persistModel: false,
-        // 重试时前端不会提交当前工具开关；优先从原用户消息里恢复，
-        // 兜底才从原回复中实际用过的工具推断，避免默认全开。
+        // 重试时前端不会提交当前工具开关；恢复原始许可后仍由服务端强制关闭智能路由。
+        // 旧消息没有 originalTools 时才复用当时的实际挂载结果。
         toolToggles,
         userId,
         origin,
         emit,
         signal,
-      }),
+      });
+    },
   };
 }
 
@@ -1417,6 +1606,9 @@ async function getMessageToolToggles(
     (p): p is Extract<MessagePart, { type: "tool-config" }> =>
       p.type === "tool-config"
   );
+  const original = normalizeChatToolToggles(part?.originalTools);
+  if (original) return original;
+
   const restored = part?.routing?.finalTools ?? part?.tools;
   const normalized = normalizeChatToolToggles(restored);
   return normalized ? { ...normalized, autoRouting: false } : null;
@@ -1427,7 +1619,8 @@ function normalizeChatToolToggles(
 ): ChatToolToggles | null {
   if (!tools) return null;
   return {
-    autoRouting: tools.autoRouting ?? true,
+    // 默认手动模式；历史消息显式开启时保留当时的路由选择。
+    autoRouting: tools.autoRouting ?? false,
     webSearch: tools.webSearch ?? false,
     imageGeneration: tools.imageGeneration ?? false,
     codeRunner: tools.codeRunner ?? false,
@@ -1498,7 +1691,9 @@ function applySkillBuiltinPlan(
   }
   if (
     skill.id === "skill-pptx-native" ||
-    Array.from(tools).some((tool) => tool.startsWith("pptx_"))
+    Array.from(tools).some(
+      (tool) => tool.startsWith("pptx_") || tool.startsWith("dashi_")
+    )
   ) {
     plan.pptx = true;
     plan.artifacts = true;
@@ -1750,24 +1945,46 @@ function getPlainTextFromParts(parts: MessagePart[]) {
     .join("\n");
 }
 
-const PRIVATE_KNOWLEDGE_QUERY_PATTERN = new RegExp(
-  [
-    "知识库(?:里|中|内|里的|中的|里面|内容|文档|资料|报告)",
-    "(?:用|基于|根据|检索|搜索|查询|查找|查|看看|读取|从|在|我的).{0,20}知识库",
-    "(?:基于|根据).{0,12}知识库.{0,20}(?:文档|文件|报告|资料|材料)?",
-  ].join("|"),
-  "u"
-);
+function buildToolRoutingContext(
+  messages: Array<typeof schema.messages.$inferSelect>
+) {
+  const recent = messages.slice(-6);
+  const recentMessages = recent.flatMap((message) => {
+    if (message.role !== "user" && message.role !== "assistant") return [];
+    const text = getPlainTextFromParts(message.parts as MessagePart[])
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 400);
+    return text ? [{ role: message.role, text }] : [];
+  });
+  const recentParts = recent.flatMap(
+    (message) => (message.parts as MessagePart[] | null | undefined) ?? []
+  );
+  const recentToolNames = Array.from(
+    new Set(
+      recentParts.flatMap((part) =>
+        part.type === "tool-call" && part.toolName ? [part.toolName] : []
+      )
+    )
+  );
+  const recentFileNames = Array.from(
+    new Set(
+      recentParts.flatMap((part) => (part.type === "file" ? [part.name] : []))
+    )
+  );
+  const hasRecentCode =
+    recentToolNames.includes("run_code") ||
+    recentMessages.some((message) =>
+      /```|(?:代码|脚本|程序|JavaScript|TypeScript|Python|SQL)/iu.test(message.text)
+    );
 
-function isKnowledgeDirectedQuery(text: string) {
-  return PRIVATE_KNOWLEDGE_QUERY_PATTERN.test(text);
-}
-
-const PROJECT_MATERIAL_QUERY_PATTERN =
-  /(?:项目资料|项目文件|项目文档|已上传.{0,6}(?:资料|文件|文档|报告)|上传的.{0,6}(?:资料|文件|文档|报告)|这份.{0,8}(?:资料|文件|文档|报告|总结)|这个.{0,8}(?:资料|文件|文档|报告|总结)|(?:基于|根据).{0,12}(?:资料|文件|文档|报告|材料|总结))/u;
-
-function isProjectMaterialDirectedQuery(text: string) {
-  return PROJECT_MATERIAL_QUERY_PATTERN.test(text);
+  return {
+    recentMessages,
+    recentImageCount: recentParts.filter((part) => part.type === "image").length,
+    recentFileNames,
+    recentToolNames,
+    hasRecentCode,
+  };
 }
 
 async function loadProjectKnowledgeBaseIds(projectId: string, userId: string) {
@@ -1785,110 +2002,6 @@ async function loadProjectKnowledgeBaseIds(projectId: string, userId: string) {
       )
     );
   return rows.map((row) => row.id);
-}
-
-const IMAGE_TOOL_QUERY_PATTERN =
-  /(?:调用|使用).{0,12}(?:图像生成工具|图片生成工具|生图工具|图片编辑工具|图像编辑工具|generate_image|edit_image)/iu;
-
-const ARTIFACT_TERM_PATTERN =
-  /(?:SVG|HTML|React|Canvas|Mermaid|代码|组件|网页|页面|网站|应用|小工具|工具|Artifact|矢量图|图标组件|流程图|时序图|架构图|ER图|甘特图|图表|表格)/iu;
-const NEGATED_ARTIFACT_TERM_PATTERN =
-  /(?:不要|别|禁止|不能|不准|不要用|别用|别拿|不要拿).{0,16}(?:SVG|HTML|React|Canvas|Mermaid|代码|组件|网页|页面|Artifact|矢量图|图标组件)/iu;
-const IMAGE_RELATED_ARTIFACT_QUERY_PATTERNS = [
-  new RegExp(
-    "(?:用|使用|写|做|制作|创建|生成|实现).{0,16}(?:SVG|HTML|React|Canvas|Mermaid|代码|组件|网页|页面|网站|应用|小工具|工具|Artifact|矢量图|图标组件|流程图|时序图|架构图|ER图|甘特图|图表|表格)",
-    "iu"
-  ),
-  new RegExp(
-    "(?:图片|图像|照片|头像|海报|相册|照片墙).{0,20}(?:压缩|上传|裁剪|编辑器|生成器|管理|预览|标注|处理).{0,20}(?:工具|页面|应用|组件|网页|网站|系统|demo|Demo)?",
-    "iu"
-  ),
-  new RegExp(
-    "(?:做|制作|创建|写|实现).{0,16}(?:图片|图像|照片|头像|海报|相册|照片墙).{0,20}(?:压缩|上传|裁剪|编辑器|生成器|管理|预览|标注|处理)",
-    "iu"
-  ),
-];
-
-const IMAGE_EDIT_QUERY_PATTERNS = [
-  /(?:P图|修图|改图|编辑图片|编辑图像|编辑这张图|编辑这张图片|编辑这张照片|图片编辑|图像编辑)/iu,
-  /(?:这张图|这张图片|这张照片|图片|图像|照片|头像).{0,20}(?:去背景|换背景|抠图|换成|改成|移除|删除|擦除|编辑|修改|调整|美化)/iu,
-  /(?:去掉|移除|删除|替换|更换).{0,12}(?:背景|水印|文字|人物|物体)/iu,
-];
-
-const IMAGE_GENERATION_QUERY_PATTERNS = [
-  IMAGE_TOOL_QUERY_PATTERN,
-  /(?:生图|出图|文生图|以图生图)/iu,
-  new RegExp(
-    "(?:生成|创作|画|绘制|做|制作).{0,12}(?:一张|一幅|一个|一款|张|幅|个|款)?.{0,28}(?:图片|图像|插画|照片|海报|头像|壁纸|表情包|封面|贴纸|猫图|狗图)",
-    "iu"
-  ),
-  new RegExp(
-    "(?:帮我|给我).{0,8}(?:画|生成|做|制作).{0,36}(?:图片|图像|插画|照片|海报|头像|壁纸|表情包|封面|贴纸|猫|狗|机器人|人物|风景)",
-    "iu"
-  ),
-  /(?:^|[，。！？\s])(?:帮我|给我)?(?:画|绘制)(?!.*(?:流程图|时序图|架构图|ER图|甘特图|图表|函数图|曲线图|表格)).{2,60}/iu,
-  /(?:generate|create|draw|make).{0,24}(?:image|picture|photo|avatar|poster|wallpaper|sticker)/iu,
-];
-
-function isArtifactDirectedImageQuery(text: string) {
-  if (NEGATED_ARTIFACT_TERM_PATTERN.test(text)) return false;
-  return IMAGE_RELATED_ARTIFACT_QUERY_PATTERNS.some((pattern) => pattern.test(text));
-}
-
-function isImageEditDirectedQuery(text: string) {
-  return IMAGE_EDIT_QUERY_PATTERNS.some((pattern) => pattern.test(text));
-}
-
-function isImageGenerationDirectedQuery(text: string) {
-  if (IMAGE_TOOL_QUERY_PATTERN.test(text)) return true;
-  if (isArtifactDirectedImageQuery(text)) return false;
-  if (ARTIFACT_TERM_PATTERN.test(text) && !NEGATED_ARTIFACT_TERM_PATTERN.test(text)) {
-    return false;
-  }
-  return (
-    isImageEditDirectedQuery(text) ||
-    IMAGE_GENERATION_QUERY_PATTERNS.some((pattern) => pattern.test(text))
-  );
-}
-
-const CODE_EXECUTION_QUERY_PATTERNS = [
-  new RegExp("(?:调用|使用).{0,12}(?:代码运行工具|run_code)", "iu"),
-  new RegExp(
-    "(?:运行|执行|跑|验证).{0,16}(?:这段|下面|上述|以下|上面|这个|这些|给定|我发的).{0,16}(?:代码|脚本|程序|JavaScript|JS|TypeScript|TS|Python|SQL)",
-    "iu"
-  ),
-  new RegExp(
-    "(?:运行|执行|跑|验证).{0,16}(?:代码块|代码片段|脚本|程序)",
-    "iu"
-  ),
-  new RegExp(
-    "(?:这段|下面|上述|以下|上面|这个|这些|给定|我发的).{0,16}(?:代码|脚本|程序|JavaScript|JS|TypeScript|TS|Python|SQL).{0,16}(?:运行|执行|跑|输出|打印)",
-    "iu"
-  ),
-  /运行得到的输出|运行结果|执行结果/iu,
-];
-
-const CODE_CONCEPT_QUERY_PATTERN = new RegExp(
-  [
-    "执行计划",
-    "运行时",
-    "输出格式",
-    "时间复杂度",
-    "空间复杂度",
-    "结果(?:怎么|如何|为什么|原因|分析)",
-    "(?:是什么|有哪些|区别|原理|概念)",
-  ].join("|"),
-  "iu"
-);
-
-function isCodeExecutionDirectedQuery(text: string) {
-  const explicitlyRequestsRunner = /(?:代码运行工具|run_code|运行得到的输出|运行结果|执行结果)/iu.test(
-    text
-  );
-  if (!explicitlyRequestsRunner && CODE_CONCEPT_QUERY_PATTERN.test(text)) {
-    return false;
-  }
-  return CODE_EXECUTION_QUERY_PATTERNS.some((pattern) => pattern.test(text));
 }
 
 async function resolveChatModel(
@@ -1925,6 +2038,7 @@ async function streamAssistant(opts: {
   modelId: string;
   styleId?: string;
   extendedThinking: boolean;
+  thinkingEffort?: ThinkingEffort;
   toolToggles?: ChatToolToggles;
   /** 重新生成时选择模型只是本次重试，不覆盖会话后续默认模型。 */
   persistModel?: boolean;
@@ -1955,15 +2069,39 @@ async function streamAssistant(opts: {
   if (signal.aborted) return;
 
   const assistantStartedAt = new Date();
-  await db.insert(schema.messages).values({
-    id: assistantId,
-    conversationId,
-    parentId,
-    role: "assistant",
-    modelId: effectiveModelId,
-    parts: [],
-    status: "streaming",
-  });
+  const [existingAssistant] = await db
+    .select({
+      conversationId: schema.messages.conversationId,
+      parentId: schema.messages.parentId,
+      role: schema.messages.role,
+    })
+    .from(schema.messages)
+    .where(eq(schema.messages.id, assistantId))
+    .limit(1);
+  if (
+    existingAssistant &&
+    (existingAssistant.conversationId !== conversationId ||
+      existingAssistant.parentId !== parentId ||
+      existingAssistant.role !== "assistant")
+  ) {
+    throw new Error("助手消息 ID 冲突");
+  }
+  if (existingAssistant) {
+    await db
+      .update(schema.messages)
+      .set({ modelId: effectiveModelId, parts: [], status: "streaming", usage: null })
+      .where(eq(schema.messages.id, assistantId));
+  } else {
+    await db.insert(schema.messages).values({
+      id: assistantId,
+      conversationId,
+      parentId,
+      role: "assistant",
+      modelId: effectiveModelId,
+      parts: [],
+      status: "streaming",
+    });
+  }
   const startConversationPatch: Partial<typeof schema.conversations.$inferInsert> = {
     currentLeafId: assistantId,
     updatedAt: new Date(),
@@ -2038,10 +2176,18 @@ async function streamAssistant(opts: {
     currentUserMessage?.role === "user"
       ? getPlainTextFromParts(currentUserMessage.parts as MessagePart[])
       : "";
-  let shouldPrioritizeKnowledgeTool = isKnowledgeDirectedQuery(currentUserText);
-  const shouldPrioritizeCodeRunner = isCodeExecutionDirectedQuery(currentUserText);
-  const shouldPrioritizeImageGeneration =
-    isImageGenerationDirectedQuery(currentUserText);
+  const toolRoutingContext = buildToolRoutingContext(chain.slice(0, -1));
+  let shouldPrioritizeKnowledgeTool =
+    isKnowledgeDirectedQuery(currentUserText) ||
+    (toolRoutingContext.recentToolNames.includes("search_knowledge") &&
+      isContextualKnowledgeFollowUp(currentUserText));
+  let shouldPrioritizeCodeRunner =
+    isCodeExecutionDirectedQuery(currentUserText) ||
+    (toolRoutingContext.hasRecentCode && isContextualCodeFollowUp(currentUserText));
+  let shouldPrioritizeImageGeneration =
+    isImageGenerationDirectedQuery(currentUserText) ||
+    (toolRoutingContext.recentImageCount > 0 &&
+      isContextualImageFollowUp(currentUserText));
 
   let history: ModelMessage[] = [];
   const assistantImageContextIds = new Set(
@@ -2225,8 +2371,8 @@ async function streamAssistant(opts: {
     }
   }
 
-  // 系统提示词：站点身份 + 风格 + Skill + 项目指令 + 记忆
-  let system = "你是 LinHub，一个乐于助人的中文 AI 助手。使用 Markdown 格式回答。";
+  // 系统提示词：小林基础行为 + 风格 + Skill + 项目指令 + 记忆 + 工具规则
+  let system = buildBaseSystemPrompt();
   if (opts.styleId) {
     const [style] = await db
       .select()
@@ -2254,7 +2400,7 @@ async function streamAssistant(opts: {
   }
 
   let activeSkill: typeof schema.skills.$inferSelect | undefined;
-  // Skill：旧提示词技能保持覆盖；Skill Pack 叠加运行时说明和能力清单
+  // Skill：旧提示词技能覆盖任务角色但保留平台基础规则；Skill Pack 叠加运行时说明和能力清单
   if (conv?.skillId) {
     const [skill] = await db
       .select()
@@ -2265,7 +2411,7 @@ async function streamAssistant(opts: {
       if (skill.kind === "pack") {
         system += `\n\n${composeSkillPackPrompt(skill)}`;
       } else {
-        system = `${skill.systemPrompt}\n\n（你运行在 LinHub 平台上，使用 Markdown 格式回答。）`;
+        system += `\n\n<active_skill>\n以下指令定义当前会话的任务角色和专业行为：\n${skill.systemPrompt}\n</active_skill>`;
       }
     }
   }
@@ -2280,8 +2426,17 @@ async function streamAssistant(opts: {
     projectKnowledgeBaseIds,
     isProjectConversation: !!conv?.projectId,
     activeSkillId: activeSkill?.id,
+    context: toolRoutingContext,
     signal,
   });
+  if (routing.decision.enabled) {
+    shouldPrioritizeCodeRunner ||=
+      routing.decision.selectedBuiltins.includes("codeRunner");
+    shouldPrioritizeImageGeneration ||=
+      routing.decision.selectedBuiltins.includes("imageGeneration");
+    shouldPrioritizeKnowledgeTool ||=
+      routing.decision.selectedBuiltins.includes("knowledgeSearch");
+  }
   if (signal.aborted) return;
 
   let routedSkill: typeof schema.skills.$inferSelect | undefined;
@@ -2373,20 +2528,29 @@ async function streamAssistant(opts: {
     // Artifact 列表读取失败不阻塞聊天
   }
 
-  // 工具集：智能路由先收敛实际能力；手动模式保持旧行为。
+  // 工具集：智能路由默认关闭；关闭时由具体工具开关直接决定是否挂载。
+  let allowedToggles = mergeSkillToggles(opts.toolToggles, activeSkill);
   let toggles = mergeSkillToggles(routing.finalTools, activeSkill);
   const enabledBuiltins = { ...routing.enabledBuiltins };
   applySkillBuiltinPlan(enabledBuiltins, activeSkill, toggles);
   if (routedSkill) {
-    toggles = {
-      ...toggles,
-      knowledgeBaseIds: Array.from(
-        new Set([
-          ...(toggles.knowledgeBaseIds ?? []),
-          ...((routedSkill.knowledgeBaseIds ?? []) as string[]),
-        ])
-      ),
-    };
+    allowedToggles = mergeSkillToggles(allowedToggles, routedSkill);
+    toggles = mergeSkillToggles(toggles, routedSkill);
+    applySkillBuiltinPlan(enabledBuiltins, routedSkill, toggles);
+  }
+  // 保留意图兜底逻辑，便于未来重新启用智能路由时复用；当前手动模式下
+  // enabledBuiltins 已经由具体工具开关直接开启。
+  if (allowedToggles.codeRunner && shouldPrioritizeCodeRunner) {
+    enabledBuiltins.codeRunner = true;
+    toggles.codeRunner = true;
+  }
+  if (allowedToggles.imageGeneration && shouldPrioritizeImageGeneration) {
+    enabledBuiltins.imageGeneration = true;
+    toggles.imageGeneration = true;
+  }
+  if (allowedToggles.knowledgeSearch && shouldPrioritizeKnowledgeTool) {
+    enabledBuiltins.knowledgeSearch = true;
+    toggles.knowledgeSearch = true;
   }
   const effectiveRoutingDecision = {
     ...routing.decision,
@@ -2403,19 +2567,20 @@ async function streamAssistant(opts: {
       opts.toolToggles,
       effectiveRoutingDecision
     );
-    if (effectiveRoutingDecision.labels.length > 0) {
-      emit({
-        type: "routing-decision",
-        messageId: parentId,
-        decision: effectiveRoutingDecision,
-      });
-    }
+    emit({
+      type: "routing-decision",
+      messageId: parentId,
+      decision: effectiveRoutingDecision,
+    });
   } catch {
     // 路由展示信息落库失败不阻塞主对话。
   }
 
-  const knowledgeSearchEnabled = toggles?.knowledgeSearch ?? true;
-  const imageGenerationEnabled = enabledBuiltins.imageGeneration;
+  const codeRunnerEnabled = enabledBuiltins.codeRunner && toggles.codeRunner;
+  const knowledgeSearchEnabled =
+    enabledBuiltins.knowledgeSearch && toggles.knowledgeSearch;
+  const imageGenerationEnabled =
+    enabledBuiltins.imageGeneration && toggles.imageGeneration;
   const selectedKnowledgeBaseIds = toggles?.knowledgeBaseIds ?? [];
   const effectiveKnowledgeBaseIds = Array.from(
     new Set([...(projectKnowledgeBaseIds ?? []), ...selectedKnowledgeBaseIds])
@@ -2423,10 +2588,22 @@ async function streamAssistant(opts: {
   const isProjectConversation = !!conv?.projectId;
   const hasKnowledgeSearchScope =
     !isProjectConversation || effectiveKnowledgeBaseIds.length > 0;
-  if (toggles?.codeRunner) {
+  const knowledgeSearchMounted =
+    knowledgeSearchEnabled && hasKnowledgeSearchScope;
+  const describeToolState = (allowed: boolean, mounted: boolean) =>
+    !allowed ? "关闭" : mounted ? "开启，已挂载" : "允许，但当前未挂载";
+  system += `
+
+LinHub 工具状态（回答工具能力或开关问题时必须以此为准）：
+- 联网搜索：${describeToolState(allowedToggles.webSearch, enabledBuiltins.webSearch)}
+- 图像生成：${describeToolState(allowedToggles.imageGeneration, imageGenerationEnabled)}
+- 代码运行：${describeToolState(allowedToggles.codeRunner, codeRunnerEnabled)}
+- 资料检索：${describeToolState(allowedToggles.knowledgeSearch, knowledgeSearchMounted)}
+“允许，但当前未挂载”表示缺少当前会话所需的范围或依赖，不等于用户关闭。只有状态为“关闭”时，才能说用户关闭了对应能力。`;
+  if (codeRunnerEnabled) {
     system +=
       "\n\n工具选择规则：当用户要求运行、执行、验证代码，或明确要求调用代码运行工具时，必须先调用 run_code，等待工具结果后再给结论；不要在工具返回前猜测、手算、复述旧结果或用 web_search 代替本地代码运行。run_code 在无网络的 gVisor 沙盒中支持 Python、Node.js 和 Bash；输入附件位于 /workspace/input，需交付的文件写入 /workspace/output。对 Excel/CSV 等表格先用 analyze_spreadsheet 获取结构，再用 run_code 完成复杂分析。";
-  } else if (shouldPrioritizeCodeRunner) {
+  } else if (!allowedToggles.codeRunner && shouldPrioritizeCodeRunner) {
     system +=
       "\n\n代码运行规则：本轮用户要求运行、执行、验证代码，或明确要求调用代码运行工具，但用户已关闭代码运行。不要用 web_search、知识库或手算结果冒充运行结果；请说明当前无法调用代码运行工具，并提示用户开启代码运行后重试。可以给出代码片段供用户自行运行，但必须明确它尚未在 LinHub 中执行。";
   }
@@ -2441,16 +2618,20 @@ async function streamAssistant(opts: {
       system +=
         "\n\n知识库检索规则：本轮用户在询问知识库、已上传文档、报告、资料或附件。必须先调用 search_knowledge 检索用户私有知识库；不要用 web_search 或 search_memory 替代。若检索无结果，再如实说明没有在知识库中找到；只有用户同时明确要求查公开网页时，才在知识库检索之后补充联网搜索。";
     }
-  } else if (!knowledgeSearchEnabled && shouldPrioritizeKnowledgeTool) {
+  } else if (!allowedToggles.knowledgeSearch && shouldPrioritizeKnowledgeTool) {
     system +=
       "\n\n知识库检索规则：本轮用户在询问知识库、项目资料、已上传文档、报告、资料或附件，但用户已关闭知识库检索。不要用 web_search 或 search_memory 替代私有知识库；请说明当前无法读取知识库，并提示用户开启知识库检索后重试。";
   }
   if (imageGenerationEnabled && shouldPrioritizeImageGeneration) {
     system +=
       "\n\n图像生成规则：本轮用户要求生成或编辑图片。必须调用 generate_image 或 edit_image；不要用 create_artifact、update_artifact、SVG、HTML、Markdown、代码或文字描述冒充图片结果。只有用户明确要求 SVG/HTML/React/Canvas/代码作品/矢量图时，才改用 Artifact。";
-  } else if (!imageGenerationEnabled && shouldPrioritizeImageGeneration) {
+  } else if (!allowedToggles.imageGeneration && shouldPrioritizeImageGeneration) {
     system +=
       "\n\n图像生成规则：本轮用户要求生成或编辑图片，但用户已关闭图像生成。不要调用 create_artifact、update_artifact，也不要用 SVG、HTML、Markdown、代码、ASCII 图、prompt 或文字描述冒充图片结果；请说明当前无法调用图像生成工具，并提示用户开启图像生成后重试。";
+  }
+  if (enabledBuiltins.artifacts) {
+    system +=
+      "\n\nArtifact 规则：当用户要求生成或更新 SVG、Logo、品牌标识、矢量图、HTML、React、Canvas、Mermaid、完整页面、组件或代码作品时，必须调用 create_artifact 或 update_artifact。SVG/Logo/品牌标识优先使用 kind=\"svg\"，content 必须是完整 <svg>...</svg>。不要在聊天正文输出完整 SVG/HTML/React 源码；最终回复只需简短说明已创建或已更新，并引导用户在右侧 Artifact 面板查看。";
   }
   const pendingImages: string[] = [];
   let tools: ToolSet = {};
@@ -2460,7 +2641,7 @@ async function streamAssistant(opts: {
     system +=
       "\n\n联网搜索规则：优先用少量高质量来源完成核查；一旦已有足够证据，必须停止继续调用搜索/读取工具并直接给出最终回答。";
   }
-  if (enabledBuiltins.codeRunner) Object.assign(tools, buildCodeTools(userId));
+  if (codeRunnerEnabled) Object.assign(tools, buildCodeTools(userId));
   if (enabledBuiltins.spreadsheet) Object.assign(tools, buildSpreadsheetTools(userId));
   if (imageGenerationEnabled)
     Object.assign(
@@ -2480,10 +2661,11 @@ async function streamAssistant(opts: {
   if (enabledBuiltins.memory) {
     Object.assign(tools, buildMemoryTools(userId, conversationId, conv?.projectId));
   }
-  if (enabledBuiltins.knowledgeSearch && knowledgeSearchEnabled && hasKnowledgeSearchScope) {
+  if (knowledgeSearchMounted) {
     Object.assign(tools, buildKnowledgeTool(userId, effectiveKnowledgeBaseIds));
   }
   const toolSkill = activeSkill?.kind === "pack" ? activeSkill : routedSkill;
+  let mountPptxTools = enabledBuiltins.pptx;
   if (toolSkill?.kind === "pack") {
     Object.assign(
       tools,
@@ -2497,21 +2679,44 @@ async function streamAssistant(opts: {
       ...((toolSkill.enabledTools ?? []) as string[]),
       ...((toolSkill.requiredTools ?? []) as string[]),
     ]);
-    if (
-      enabledBuiltins.pptx ||
+    mountPptxTools =
+      mountPptxTools ||
       toolSkill.id === "skill-pptx-native" ||
       skillTools.has("pptx_extract_text") ||
-      skillTools.has("pptx_create_deck")
-    ) {
-      Object.assign(tools, buildPptxTools(userId));
-      system +=
-        "\n\nPPTX 工具规则：当用户上传或引用 .pptx 附件时，可从消息中的 attachmentId 调用 pptx_extract_text 或 pptx_analyze_template；生成新演示文稿时调用 pptx_create_deck，并在最终回答里给出下载说明。";
-    }
+      skillTools.has("pptx_create_deck") ||
+      skillTools.has("dashi_render_deck");
+  }
+  // PPTX 也可由附件/文本意图直接启用；不能要求当前会话必须先进入 Pack Skill，
+  // 否则关闭智能路由时虽已选中 pptx builtin，却只会挂载通用表格工具。
+  if (mountPptxTools) {
+    Object.assign(tools, buildPptxTools(userId));
+    system +=
+      "\n\nPPTX 工具规则：当用户上传或引用 .pptx 附件时，必须优先调用 pptx_extract_text 或 pptx_analyze_template；不要用 analyze_spreadsheet 处理 PPTX。生成新演示文稿时调用 pptx_create_deck，并在最终回答里给出下载说明。";
   }
   try {
     const mcp = await buildMcpTools(userId, toggles?.mcpServerIds ?? []);
     Object.assign(tools, mcp.tools);
     closeMcp = mcp.close;
+    if (mcp.mountedServers.length > 0) {
+      const mcpSummary = mcp.mountedServers
+        .map(
+          (server) =>
+            `- ${server.name}：已挂载（${server.toolNames.join("、") || "未发现工具"}）`
+        )
+        .join("\n");
+      const hasMcpWebTool = mcp.mountedServers.some((server) =>
+        server.toolNames.some((name) => /(?:search|reader|web_read|zread)/iu.test(name))
+      );
+      system += `
+
+MCP 工具状态（这些是当前模型可直接调用的真实工具）：
+${mcpSummary}
+回答“有哪些工具”“能否联网/读取网页”等能力问题时，必须把上述 MCP 计入，不得只枚举 LinHub 内置工具。`;
+      if (hasMcpWebTool) {
+        system +=
+          "\n已挂载的 MCP 中包含联网搜索或网页读取工具；即使内置联网搜索开关关闭，也不能声称当前无法联网。用户要求搜索或读取网页时，应调用合适的 MCP 工具。";
+      }
+    }
   } catch {
     // MCP 初始化失败不阻塞聊天
   }
@@ -2549,12 +2754,26 @@ async function streamAssistant(opts: {
       })
     );
     if (!modelSupportsTools) tools = {};
+    const providerOptions: Record<string, JSONObject> = {};
     const openaiProviderOptions: JSONObject = {};
+    const anthropicProviderOptions: JSONObject = {};
+    const thinkingEffort = normalizeThinkingEffort(opts.thinkingEffort);
+    const sdkReasoningEffort = toSdkReasoningEffort(thinkingEffort);
+    const providerReasoningEffort =
+      provider.kind === "openai"
+        ? toOpenAIReasoningEffort(thinkingEffort)
+        : sdkReasoningEffort;
+    const modelSupportsReasoning = (record.capabilities as string[]).includes("reasoning");
+    const reasoning = modelSupportsReasoning
+      ? opts.extendedThinking
+        ? providerReasoningEffort
+        : "none"
+      : undefined;
     if (provider.kind === "openai") {
-      if ((record.capabilities as string[]).includes("reasoning")) {
+      if (modelSupportsReasoning) {
         openaiProviderOptions.reasoningEffort = opts.extendedThinking
-          ? "high"
-          : "medium";
+          ? toOpenAIReasoningEffort(thinkingEffort)
+          : "minimal";
         if (!provider.baseUrl && storeEnabled) {
           openaiProviderOptions.reasoningSummary = opts.extendedThinking
             ? "detailed"
@@ -2565,6 +2784,16 @@ async function streamAssistant(opts: {
       // 关闭 store 后多步工具循环不会再以 item_reference 引用上一轮的 rs_xxx
       if (!storeEnabled) openaiProviderOptions.store = false;
     }
+    if (Object.keys(openaiProviderOptions).length > 0) {
+      providerOptions.openai = openaiProviderOptions;
+    }
+    if (provider.kind === "anthropic" && modelSupportsReasoning && opts.extendedThinking) {
+      anthropicProviderOptions.effort = toAnthropicReasoningEffort(thinkingEffort);
+    }
+    if (Object.keys(anthropicProviderOptions).length > 0) {
+      providerOptions.anthropic = anthropicProviderOptions;
+    }
+
     let activeHistory = history;
     let visionFallbackAttempted = false;
     let followupInputTokens = 0;
@@ -2581,10 +2810,11 @@ async function streamAssistant(opts: {
           abortSignal: signal,
           ...(record.maxOutputTokens ? { maxOutputTokens: record.maxOutputTokens } : {}),
           ...(hasTools && modelSupportsTools
-            ? { tools, stopWhen: stepCountIs(12) }
+            ? { tools, stopWhen: stepCountIs(MAX_TOOL_STEPS) }
             : {}),
-          ...(Object.keys(openaiProviderOptions).length > 0
-            ? { providerOptions: { openai: openaiProviderOptions } }
+          ...(reasoning ? { reasoning } : {}),
+          ...(Object.keys(providerOptions).length > 0
+            ? { providerOptions }
             : {}),
         });
         streamResult = result;
@@ -2609,6 +2839,9 @@ async function streamAssistant(opts: {
           } else if (chunk.type === "reasoning-end") {
             const duration = Date.now() - reasoningStart;
             const last = parts[parts.length - 1];
+            if (last?.type === "reasoning") {
+              last.text = sanitizeReasoningText(last.text);
+            }
             if (last?.type === "reasoning" && last.text.trim().length > 0) {
               last.durationMs = Math.max(0, duration);
               emit({
@@ -2616,6 +2849,9 @@ async function streamAssistant(opts: {
                 messageId: assistantId,
                 durationMs: last.durationMs,
               });
+              await persistPartial(true);
+            } else if (last?.type === "reasoning") {
+              parts.pop();
               await persistPartial(true);
             }
           } else if (chunk.type === "text-delta") {
@@ -2896,6 +3132,24 @@ async function streamAssistant(opts: {
       }
     }
 
+    const sanitizedFinalOutput = sanitizeAssistantOutputParts(parts);
+    if (sanitizedFinalOutput) {
+      emit({
+        type: "assistant-snapshot",
+        message: {
+          id: assistantId,
+          conversationId,
+          parentId,
+          role: "assistant",
+          modelId: effectiveModelId,
+          parts: cloneMessageParts(parts),
+          createdAt: assistantStartedAt.toISOString(),
+          status,
+        },
+      });
+      await persistPartial(true);
+    }
+
     const hasAnyVisibleOutput = parts.some(
       (part) =>
         (part.type === "text" && part.text.trim().length > 0) ||
@@ -3051,6 +3305,35 @@ async function streamAssistant(opts: {
   });
 }
 
+function normalizeThinkingEffort(effort?: ThinkingEffort): ThinkingEffort {
+  if (
+    effort === "minimal" ||
+    effort === "low" ||
+    effort === "medium" ||
+    effort === "high" ||
+    effort === "xhigh" ||
+    effort === "max"
+  ) {
+    return effort;
+  }
+  return "high";
+}
+
+function toSdkReasoningEffort(effort: ThinkingEffort): SdkReasoningEffort {
+  return effort === "max" ? "xhigh" : effort;
+}
+
+function toOpenAIReasoningEffort(effort: ThinkingEffort): SdkReasoningEffort {
+  return effort === "max" || effort === "xhigh" ? "high" : effort;
+}
+
+function toAnthropicReasoningEffort(
+  effort: ThinkingEffort
+): "low" | "medium" | "high" | "xhigh" | "max" {
+  if (effort === "minimal") return "low";
+  return effort;
+}
+
 function summarizeToolResult(output: unknown): ToolResultSummary {
   if (output && typeof output === "object") {
     const o = output as Record<string, unknown>;
@@ -3060,10 +3343,59 @@ function summarizeToolResult(output: unknown): ToolResultSummary {
     if (Array.isArray(o.attachments)) {
       summary.attachments = o.attachments as ToolResultSummary["attachments"];
     }
+    if (typeof o.name === "string") summary.name = o.name;
+    if (Array.isArray(o.sheets)) {
+      summary.sheets = o.sheets.slice(0, 12) as ToolResultSummary["sheets"];
+    }
+    if (typeof o.slideCount === "number" && Number.isFinite(o.slideCount)) {
+      summary.slideCount = o.slideCount;
+    }
+    if (Array.isArray(o.slides)) {
+      summary.slides = o.slides.slice(0, 60) as ToolResultSummary["slides"];
+    }
+    if (Array.isArray(o.layouts)) {
+      summary.layouts = o.layouts.slice(0, 60) as ToolResultSummary["layouts"];
+    }
     if (typeof o.artifactId === "string") summary.artifactId = o.artifactId;
     if (typeof o.artifactTitle === "string") summary.artifactTitle = o.artifactTitle;
+    if (typeof o.skillRunId === "string") summary.skillRunId = o.skillRunId;
+    if (typeof o.skillName === "string") summary.skillName = o.skillName;
+    if (typeof o.timedOut === "boolean") summary.timedOut = o.timedOut;
+    if (typeof o.stdoutStderrLimitExceeded === "boolean") {
+      summary.stdoutStderrLimitExceeded = o.stdoutStderrLimitExceeded;
+    }
+    if (typeof o.outputLimitExceeded === "boolean") {
+      summary.outputLimitExceeded = o.outputLimitExceeded;
+    }
+    if (typeof o.consolePreviewTruncated === "boolean") {
+      summary.consolePreviewTruncated = o.consolePreviewTruncated;
+    }
+    if (typeof o.exitCode === "number" || o.exitCode === null) {
+      summary.exitCode = o.exitCode;
+    }
+    if (typeof o.durationMs === "number" && Number.isFinite(o.durationMs)) {
+      summary.durationMs = o.durationMs;
+    }
     if (typeof o.answer === "string") summary.text = o.answer;
-    else if (typeof o.text === "string") summary.text = o.text.slice(0, 500);
+    else if (typeof o.text === "string") {
+      const sandboxWasLimited =
+        o.timedOut === true ||
+        o.stdoutStderrLimitExceeded === true ||
+        o.outputLimitExceeded === true ||
+        o.consolePreviewTruncated === true;
+      if (sandboxWasLimited) {
+        const statusLines: string[] = [];
+        for (const line of o.text.split("\n")) {
+          if (/^(?:stdout|stderr):/u.test(line)) break;
+          statusLines.push(line);
+        }
+        summary.text =
+          statusLines.join("\n").slice(0, 500) ||
+          "代码沙盒执行完成，控制台预览已省略";
+      } else {
+        summary.text = o.text.slice(0, 500);
+      }
+    }
     if (Object.keys(summary).length > 0) return summary;
     return { text: JSON.stringify(output).slice(0, 500) };
   }
@@ -3256,6 +3588,35 @@ function appendDelta(
   } else {
     parts.push({ type, text: delta } as MessagePart);
   }
+}
+
+function sanitizeAssistantOutputParts(parts: MessagePart[]) {
+  let changed = false;
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const part = parts[i];
+    if (part.type === "text") {
+      const cleaned = sanitizeAssistantText(part.text);
+      if (cleaned !== part.text) {
+        changed = true;
+        if (cleaned) {
+          part.text = cleaned;
+        } else {
+          parts.splice(i, 1);
+        }
+      }
+    } else if (part.type === "reasoning") {
+      const cleaned = sanitizeReasoningText(part.text);
+      if (cleaned !== part.text) {
+        changed = true;
+        if (cleaned) {
+          part.text = cleaned;
+        } else {
+          parts.splice(i, 1);
+        }
+      }
+    }
+  }
+  return changed;
 }
 
 function cloneMessageParts(parts: MessagePart[]): MessagePart[] {

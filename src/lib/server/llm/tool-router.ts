@@ -8,6 +8,16 @@ import {
   recordUsage,
 } from "@/lib/server/billing";
 import { computeCostCents, resolveModel } from "@/lib/server/llm/registry";
+import {
+  isContextualCodeFollowUp,
+  isContextualImageFollowUp,
+  isContextualKnowledgeFollowUp,
+  isContextualWebFollowUp,
+  isCodeExecutionDirectedQuery,
+  isImageGenerationDirectedQuery,
+  isKnowledgeDirectedQuery,
+  isProjectMaterialDirectedQuery,
+} from "@/lib/server/llm/tool-intent";
 import type {
   ChatToolToggles,
   MessagePart,
@@ -35,7 +45,16 @@ interface ToolRoutingInput {
   projectKnowledgeBaseIds: string[];
   isProjectConversation: boolean;
   activeSkillId?: string;
+  context?: ToolRoutingContext;
   signal?: AbortSignal;
+}
+
+interface ToolRoutingContext {
+  recentMessages: Array<{ role: "user" | "assistant"; text: string }>;
+  recentImageCount: number;
+  recentFileNames: string[];
+  recentToolNames: string[];
+  hasRecentCode: boolean;
 }
 
 const BUILTIN_LABELS: Record<RoutingBuiltin, string> = {
@@ -77,7 +96,7 @@ export async function resolveToolRouting(
         selectedMcpServerIds: requested.mcpServerIds,
         selectedSkillIds: [],
         labels: [],
-        reasons: ["已关闭智能选择，按手动工具开关执行。"],
+        reasons: ["智能路由未开启，按手动工具开关执行。"],
       },
     };
   }
@@ -91,7 +110,7 @@ export async function resolveToolRouting(
   const merged = mergeSelections(rule, model, requested, mcpCandidates, skillCandidates);
   const finalTools: ChatToolToggles = {
     ...requested,
-    autoRouting: true,
+    autoRouting: requested.autoRouting,
     webSearch: merged.enabledBuiltins.webSearch,
     imageGeneration: merged.enabledBuiltins.imageGeneration,
     codeRunner: merged.enabledBuiltins.codeRunner,
@@ -158,7 +177,8 @@ export async function persistToolRoutingDecision(
 
 function normalizeChatToolToggles(tools?: ChatToolToggles): ChatToolToggles {
   return {
-    autoRouting: tools?.autoRouting ?? true,
+    // 默认手动模式；用户显式开启时才运行智能路由。
+    autoRouting: tools?.autoRouting ?? false,
     webSearch: tools?.webSearch ?? false,
     imageGeneration: tools?.imageGeneration ?? false,
     codeRunner: tools?.codeRunner ?? false,
@@ -200,6 +220,23 @@ function builtinsFromPlan(plan: Record<RoutingBuiltin, boolean>) {
   return BUILTINS.filter((name) => plan[name]);
 }
 
+function hasRecentWebTool(toolNames: Set<string>) {
+  const builtins = [
+    "web_search",
+    "web_read",
+    "web_crawl",
+    "tavily_extract",
+    "tavily_crawl",
+    "tavily_research",
+  ];
+  return (
+    builtins.some((name) => toolNames.has(name)) ||
+    Array.from(toolNames).some((name) =>
+      /(?:web_search|webreader|web_reader|search_prime|zread)/iu.test(name)
+    )
+  );
+}
+
 function applyRuleRouting(
   input: ToolRoutingInput,
   requested: ChatToolToggles,
@@ -213,6 +250,7 @@ function applyRuleRouting(
   const text = input.userText;
   const attachments = input.messageParts.filter((part) => part.type === "file");
   const images = input.messageParts.filter((part) => part.type === "image");
+  const recentToolNames = new Set(input.context?.recentToolNames ?? []);
   const hasPptx = attachments.some((part) => /\.pptx$/iu.test(part.name));
   const hasSheet = attachments.some((part) =>
     /\.(csv|tsv|xlsx|xls)$/iu.test(part.name)
@@ -226,7 +264,7 @@ function applyRuleRouting(
     enabledBuiltins.codeRunner = true;
     reasons.push("用户请求需要运行或验证代码。");
   }
-  if (requested.imageGeneration && isImageDirectedQuery(text)) {
+  if (requested.imageGeneration && isImageGenerationDirectedQuery(text)) {
     enabledBuiltins.imageGeneration = true;
     reasons.push("用户请求生成或编辑图片。");
   }
@@ -237,6 +275,42 @@ function applyRuleRouting(
   ) {
     enabledBuiltins.knowledgeSearch = true;
     reasons.push("用户请求基于知识库、项目资料或已上传文档回答。");
+  }
+  if (
+    requested.imageGeneration &&
+    !enabledBuiltins.imageGeneration &&
+    (input.context?.recentImageCount ?? 0) > 0 &&
+    isContextualImageFollowUp(text)
+  ) {
+    enabledBuiltins.imageGeneration = true;
+    reasons.push("用户正在修改或延续最近一轮图片结果。");
+  }
+  if (
+    requested.codeRunner &&
+    !enabledBuiltins.codeRunner &&
+    input.context?.hasRecentCode &&
+    isContextualCodeFollowUp(text)
+  ) {
+    enabledBuiltins.codeRunner = true;
+    reasons.push("用户正在运行或验证最近一轮代码。");
+  }
+  if (
+    requested.webSearch &&
+    !enabledBuiltins.webSearch &&
+    hasRecentWebTool(recentToolNames) &&
+    isContextualWebFollowUp(text)
+  ) {
+    enabledBuiltins.webSearch = true;
+    reasons.push("用户正在延续最近一轮联网搜索或网页读取。");
+  }
+  if (
+    requested.knowledgeSearch &&
+    !enabledBuiltins.knowledgeSearch &&
+    recentToolNames.has("search_knowledge") &&
+    isContextualKnowledgeFollowUp(text)
+  ) {
+    enabledBuiltins.knowledgeSearch = true;
+    reasons.push("用户正在延续最近一轮资料检索。");
   }
   if (hasSheet || isSpreadsheetDirectedQuery(text)) {
     enabledBuiltins.spreadsheet = true;
@@ -311,7 +385,7 @@ async function tryModelRouting(
   skillCandidates: SkillRow[],
   rule: ReturnType<typeof applyRuleRouting>
 ): Promise<{ builtins: RoutingBuiltin[]; mcpServerIds: string[]; skillIds: string[]; reasons: string[] } | null> {
-  if (!shouldAskRouterModel(input.userText, mcpCandidates, skillCandidates, rule)) {
+  if (!shouldAskRouterModel(input, mcpCandidates, skillCandidates, rule)) {
     return null;
   }
 
@@ -364,15 +438,27 @@ async function tryModelRouting(
 }
 
 function shouldAskRouterModel(
-  text: string,
+  input: ToolRoutingInput,
   mcpCandidates: McpRow[],
   skillCandidates: SkillRow[],
   rule: ReturnType<typeof applyRuleRouting>
 ) {
-  if (text.trim().length < 8) return false;
-  if (isLikelyPlainChat(text)) return false;
   if (rule.reasons.length > 0) return false;
-  return mcpCandidates.length > 0 || skillCandidates.length > 0;
+  const text = input.userText.trim();
+  if (isLikelyPlainChat(text)) return false;
+  const context = input.context;
+  const hasUsefulContext =
+    (context?.recentImageCount ?? 0) > 0 ||
+    (context?.recentFileNames.length ?? 0) > 0 ||
+    (context?.recentToolNames.length ?? 0) > 0 ||
+    context?.hasRecentCode === true;
+  if (text.length < 8 && !hasUsefulContext) return false;
+  return (
+    hasUsefulContext ||
+    text.length >= 8 ||
+    mcpCandidates.length > 0 ||
+    skillCandidates.length > 0
+  );
 }
 
 function mergeSelections(
@@ -428,7 +514,11 @@ function mergeSelections(
     if (requested.knowledgeSearch && skillTools.has("search_knowledge")) {
       enabledBuiltins.knowledgeSearch = true;
     }
-    if (Array.from(skillTools).some((tool) => tool.startsWith("pptx_"))) {
+    if (
+      Array.from(skillTools).some(
+        (tool) => tool.startsWith("pptx_") || tool.startsWith("dashi_")
+      )
+    ) {
       enabledBuiltins.pptx = true;
       enabledBuiltins.artifacts = true;
     }
@@ -520,11 +610,27 @@ function buildRouterPrompt(
         ].join(", ")}`
     )
     .join("\n");
+  const recentContextSummary = input.context
+    ? [
+        `recentImageCount: ${input.context.recentImageCount}`,
+        `recentFileNames: ${input.context.recentFileNames.join(", ") || "无"}`,
+        `recentToolNames: ${input.context.recentToolNames.join(", ") || "无"}`,
+        `hasRecentCode: ${input.context.hasRecentCode ? "是" : "否"}`,
+        "recentMessages:",
+        ...(input.context.recentMessages.length > 0
+          ? input.context.recentMessages.map(
+              (message) =>
+                `- ${message.role === "user" ? "用户" : "助手"}: ${message.text}`
+            )
+          : ["- 无"]),
+      ].join("\n")
+    : "无";
 
   return [
     "你是 LinHub 的工具路由器，只输出结构化 JSON。",
     "目标：判断本轮用户请求真正需要哪些工具、MCP 服务器或已审核 Skill Pack。",
     "不要为了普通聊天、写作、解释概念而选择工具。",
+    "短指令可能引用 recentContext；只有上下文确实支持时，才把省略指令路由到对应工具。",
     "只能从 allowedBuiltins、MCP candidates、Skill candidates 里选择；用户已关闭的能力不能选择。",
     "",
     `allowedBuiltins: ${allowedBuiltins.join(", ") || "无"}`,
@@ -532,6 +638,8 @@ function buildRouterPrompt(
     `projectKnowledgeBaseIds: ${input.projectKnowledgeBaseIds.join(", ") || "无"}`,
     `imageCount: ${imageCount}`,
     `files:\n${fileSummary || "无"}`,
+    "",
+    `recentContext:\n${recentContextSummary}`,
     "",
     `userMessage:\n${input.userText.slice(0, 4000)}`,
     "",
@@ -553,29 +661,13 @@ function matchesCandidateText(text: string, haystack: string) {
 }
 
 function isLikelyPlainChat(text: string) {
-  return /^(你好|您好|谢谢|多谢|早上好|晚上好|讲个笑话|随便聊聊|你是谁)[。！？!,.，\s]*$/iu.test(
+  return /^(你好|您好|谢谢|多谢|好的?|可以|行|明白了|收到|不错|很好|早上好|晚上好|讲个笑话|随便聊聊|你是谁)[。！？!,.，\s]*$/iu.test(
     text.trim()
   );
 }
 
 function isWebDirectedQuery(text: string) {
   return /(?:联网|搜索|查一下|查找|网页|网址|链接|http|https|今天|昨日|昨天|本周|最近|最新|新闻|价格|汇率|天气|日程|赛程|当前|现在|实时|资料来源|引用来源)/iu.test(
-    text
-  );
-}
-
-function isKnowledgeDirectedQuery(text: string) {
-  return /(?:知识库|资料库|已上传|上传的|附件|文档|报告|私有资料|我的资料|检索资料|基于资料|根据资料)/iu.test(
-    text
-  );
-}
-
-function isProjectMaterialDirectedQuery(text: string) {
-  return /(?:项目资料|项目文件|项目文档|本项目|这个项目|项目里的|项目中的)/iu.test(text);
-}
-
-function isCodeExecutionDirectedQuery(text: string) {
-  return /(?:运行|执行|跑一下|验证).{0,24}(?:代码|脚本|程序|SQL|JavaScript|TypeScript|Python|JS|TS)|(?:run_code|运行结果|执行结果|输出结果)/iu.test(
     text
   );
 }
@@ -592,17 +684,8 @@ export function isVisionDirectedQuery(text: string) {
   );
 }
 
-function isImageDirectedQuery(text: string) {
-  if (/(?:SVG|HTML|React|Canvas|Mermaid|流程图|时序图|架构图|ER图|甘特图|图表|表格)/iu.test(text)) {
-    return false;
-  }
-  return /(?:生图|出图|文生图|以图生图|生成图片|生成图像|画一张|绘制图片|做一张|编辑图片|修图|改图|去背景|换背景|抠图)/iu.test(
-    text
-  );
-}
-
 function isArtifactDirectedQuery(text: string) {
-  return /(?:创建|生成|实现|写|做|制作|更新).{0,24}(?:Artifact|页面|网页|网站|应用|小工具|组件|HTML|React|Canvas|SVG|Mermaid|流程图|时序图|架构图|ER图|甘特图|图表|代码作品)/iu.test(
+  return /(?:创建|生成|实现|写|做|制作|设计|更新).{0,32}(?:Artifact|页面|网页|网站|应用|小工具|组件|HTML|React|Canvas|SVG|Mermaid|Logo|logo|LOGO|品牌标识|品牌标志|矢量|矢量图|图标|流程图|时序图|架构图|ER图|甘特图|图表|代码作品)|(?:Logo|logo|LOGO|品牌标识|品牌标志|矢量|矢量图).{0,32}(?:创建|生成|实现|写|做|制作|设计|更新|草案|方案)/iu.test(
     text
   );
 }

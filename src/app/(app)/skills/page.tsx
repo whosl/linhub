@@ -4,9 +4,22 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "motion/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { PlusIcon, SparklesIcon, Trash2Icon, PencilIcon, MessageSquareIcon } from "lucide-react";
+import {
+  InfoIcon,
+  MessageSquareIcon,
+  PencilIcon,
+  PlusIcon,
+  SparklesIcon,
+  Trash2Icon,
+} from "lucide-react";
 import { getDataService } from "@/lib/data";
+import { clientRandomUUID } from "@/lib/client-id";
 import type { Skill } from "@/lib/types";
+import {
+  optimisticInsertRecord,
+  optimisticPatchRecords,
+  optimisticRemoveRecord,
+} from "@/lib/optimistic-query";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input, Textarea } from "@/components/ui/input";
@@ -29,6 +42,7 @@ export default function SkillsPage() {
   const [editorOpen, setEditorOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<Skill | null>(null);
   const [deleteTarget, setDeleteTarget] = React.useState<Skill | null>(null);
+  const [detailTarget, setDetailTarget] = React.useState<Skill | null>(null);
   const [deleting, setDeleting] = React.useState(false);
 
   const { data: mySkills = [] } = useQuery({
@@ -56,11 +70,19 @@ export default function SkillsPage() {
   const confirmRemove = async () => {
     if (!deleteTarget) return;
     setDeleting(true);
+    const target = deleteTarget;
+    const optimistic = optimisticRemoveRecord<Skill>(
+      queryClient,
+      [["skills"]],
+      target.id
+    );
+    setDeleteTarget(null);
     try {
-      await getDataService().deleteSkill(deleteTarget.id);
-      queryClient.invalidateQueries({ queryKey: ["skills"] });
+      await getDataService().deleteSkill(target.id);
       toast.success("已删除");
-      setDeleteTarget(null);
+    } catch (error) {
+      optimistic.rollback();
+      toast.error(error instanceof Error ? error.message : "技能删除失败");
     } finally {
       setDeleting(false);
     }
@@ -101,6 +123,7 @@ export default function SkillsPage() {
             <SkillGrid
               skills={mySkills}
               onChat={startChat}
+              onDetails={setDetailTarget}
               onEdit={openEditor}
               onDelete={remove}
             />
@@ -108,7 +131,11 @@ export default function SkillsPage() {
         </TabsContent>
 
         <TabsContent value="market">
-          <SkillGrid skills={marketSkills} onChat={startChat} />
+          <SkillGrid
+            skills={marketSkills}
+            onChat={startChat}
+            onDetails={setDetailTarget}
+          />
         </TabsContent>
       </Tabs>
 
@@ -138,6 +165,13 @@ export default function SkillsPage() {
         loading={deleting}
         onConfirm={confirmRemove}
       />
+      <SkillDetailsDialog
+        skill={detailTarget}
+        open={!!detailTarget}
+        onOpenChange={(open) => {
+          if (!open) setDetailTarget(null);
+        }}
+      />
     </PageContainer>
   );
 }
@@ -145,11 +179,13 @@ export default function SkillsPage() {
 function SkillGrid({
   skills,
   onChat,
+  onDetails,
   onEdit,
   onDelete,
 }: {
   skills: Skill[];
   onChat: (s: Skill) => void;
+  onDetails: (s: Skill) => void;
   onEdit?: (s: Skill) => void;
   onDelete?: (s: Skill) => void;
 }) {
@@ -167,6 +203,10 @@ function SkillGrid({
               <span className="text-3xl">{s.emoji}</span>
               <div className="flex flex-wrap justify-end gap-1">
                 {s.kind === "pack" && <Badge variant="default">技能包</Badge>}
+                {isInternalRuntime(s) && <Badge variant="secondary">内部运行时</Badge>}
+                {s.clientMutationState === "pending" && (
+                  <Badge variant="outline">保存中…</Badge>
+                )}
                 {s.visibility === "public" && <Badge variant="success">已公开</Badge>}
                 {s.visibility === "pending" && <Badge variant="warning">审核中</Badge>}
               </div>
@@ -191,7 +231,7 @@ function SkillGrid({
             )}
             <div className="mt-3 flex items-center justify-between text-xs text-muted-foreground">
               <span>{s.usageCount} 次使用</span>
-              <div className="flex gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+              <div className="flex gap-1 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100">
                 {onEdit && s.kind !== "pack" && (
                   <button
                     type="button"
@@ -212,19 +252,200 @@ function SkillGrid({
                     <Trash2Icon className="size-3.5" />
                   </button>
                 )}
-                <button
-                  type="button"
-                  onClick={() => onChat(s)}
-                  className="flex items-center gap-1 rounded-md bg-primary/10 px-2 py-1.5 font-medium text-primary hover:bg-primary/20"
-                >
-                  <MessageSquareIcon className="size-3.5" /> 对话
-                </button>
+                {s.kind === "pack" && (
+                  <button
+                    type="button"
+                    onClick={() => onDetails(s)}
+                    className="flex items-center gap-1 rounded-md px-2 py-1.5 font-medium hover:bg-accent hover:text-foreground"
+                  >
+                    <InfoIcon className="size-3.5" /> 详情
+                  </button>
+                )}
+                {!isInternalRuntime(s) && (
+                  <button
+                    type="button"
+                    onClick={() => onChat(s)}
+                    className="flex items-center gap-1 rounded-md bg-primary/10 px-2 py-1.5 font-medium text-primary hover:bg-primary/20"
+                  >
+                    <MessageSquareIcon className="size-3.5" /> 对话
+                  </button>
+                )}
               </div>
             </div>
           </Card>
         </motion.div>
       ))}
     </div>
+  );
+}
+
+function isInternalRuntime(skill: Skill) {
+  return skill.manifest?.internal === true || skill.id === "skill-dashi-ppt";
+}
+
+function manifestString(skill: Skill, key: string) {
+  const value = skill.manifest?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function formatResourceSize(size?: number) {
+  if (size === undefined) return undefined;
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function SkillDetailsDialog({
+  skill,
+  open,
+  onOpenChange,
+}: {
+  skill: Skill | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  if (!skill) return null;
+
+  const tools = Array.from(
+    new Set([
+      ...(skill.allowedTools ?? []),
+      ...skill.requiredTools,
+      ...skill.enabledTools,
+    ])
+  );
+  const license = skill.license ?? manifestString(skill, "license") ?? "未声明";
+  const sourceUrl = manifestString(skill, "sourceUrl");
+  const reviewLabels: Record<Skill["reviewStatus"], string> = {
+    draft: "草稿",
+    pending: "待审核",
+    approved: "已审核",
+    rejected: "已拒绝",
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader>
+          <div className="flex items-center gap-3 pr-8">
+            <span className="text-3xl" aria-hidden>{skill.emoji}</span>
+            <div className="min-w-0">
+              <DialogTitle className="truncate">{skill.name}</DialogTitle>
+              <p className="mt-1 text-sm text-muted-foreground">{skill.description}</p>
+            </div>
+          </div>
+        </DialogHeader>
+
+        <div className="grid gap-3 rounded-xl border bg-muted/20 p-4 text-sm sm:grid-cols-2">
+          <DetailRow label="版本" value={`v${skill.version}`} />
+          <DetailRow label="审核状态" value={reviewLabels[skill.reviewStatus]} />
+          <DetailRow label="来源" value={skill.source ?? "未声明"} href={sourceUrl} />
+          <DetailRow label="许可证" value={license} />
+          <DetailRow
+            label="兼容性"
+            value={skill.compatibility ?? "LinHub Skill Pack"}
+            wide
+          />
+        </div>
+
+        <DetailSection title="启用工具" empty="该技能未声明工具">
+          {tools.map((tool) => (
+            <Badge key={tool} variant="outline">{tool}</Badge>
+          ))}
+        </DetailSection>
+
+        <DetailSection title={`资源清单（${skill.resourceRefs.length}）`} empty="该技能不含资源">
+          {skill.resourceRefs.map((resource) => (
+            <div key={resource.id} className="w-full rounded-lg border bg-card p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-medium">{resource.name}</span>
+                <span className="text-xs text-muted-foreground">
+                  {[resource.kind, resource.mimeType, formatResourceSize(resource.size)]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </span>
+              </div>
+              {resource.description && (
+                <p className="mt-1 text-xs text-muted-foreground">{resource.description}</p>
+              )}
+            </div>
+          ))}
+        </DetailSection>
+
+        <DetailSection title="脚本权限">
+          <div className="w-full space-y-1 rounded-lg border bg-card p-3 text-sm">
+            <p>{skill.scriptPolicy.enabled ? "允许执行审核脚本" : "不允许执行脚本"}</p>
+            {skill.scriptPolicy.enabled && (
+              <>
+                <p className="text-xs text-muted-foreground">
+                  网络：{skill.scriptPolicy.network ? "允许" : "禁止"}
+                  {skill.scriptPolicy.timeoutMs
+                    ? ` · 超时：${skill.scriptPolicy.timeoutMs} ms`
+                    : ""}
+                </p>
+                <div className="flex flex-wrap gap-1 pt-1">
+                  {(skill.scriptPolicy.allowedScripts ?? []).map((script) => (
+                    <Badge key={script} variant="outline">{script}</Badge>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        </DetailSection>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function DetailRow({
+  label,
+  value,
+  href,
+  wide,
+}: {
+  label: string;
+  value: string;
+  href?: string;
+  wide?: boolean;
+}) {
+  const safeHref = href?.startsWith("https://") ? href : undefined;
+  return (
+    <div className={wide ? "sm:col-span-2" : undefined}>
+      <p className="text-xs text-muted-foreground">{label}</p>
+      {safeHref ? (
+        <a
+          href={safeHref}
+          target="_blank"
+          rel="noreferrer"
+          className="mt-0.5 inline-block break-all font-medium text-primary hover:underline"
+        >
+          {value}
+        </a>
+      ) : (
+        <p className="mt-0.5 break-words font-medium">{value}</p>
+      )}
+    </div>
+  );
+}
+
+function DetailSection({
+  title,
+  empty,
+  children,
+}: {
+  title: string;
+  empty?: string;
+  children: React.ReactNode;
+}) {
+  const hasChildren = React.Children.count(children) > 0;
+  return (
+    <section>
+      <h3 className="mb-2 text-sm font-medium">{title}</h3>
+      <div className="flex flex-wrap gap-2">
+        {hasChildren ? children : (
+          <p className="text-sm text-muted-foreground">{empty}</p>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -241,6 +462,7 @@ function SkillEditor({
   models: { id: string; displayName: string }[];
   onSaved: () => void;
 }) {
+  const queryClient = useQueryClient();
   const [form, setForm] = React.useState({
     name: "",
     emoji: "🤖",
@@ -269,7 +491,7 @@ function SkillEditor({
 
   const save = async () => {
     if (!form.name.trim() || !form.systemPrompt.trim()) return;
-    await getDataService().saveSkill({
+    const input = {
       id: skill?.id,
       name: form.name.trim(),
       emoji: form.emoji,
@@ -278,9 +500,62 @@ function SkillEditor({
       greeting: form.greeting || undefined,
       defaultModelId: form.defaultModelId || undefined,
       shareToMarket: form.shareToMarket,
-    });
-    toast.success(skill ? "技能已更新" : "技能已创建");
-    onSaved();
+    };
+    const now = new Date().toISOString();
+    const transaction = skill
+      ? optimisticPatchRecords<Skill>(
+          queryClient,
+          [["skills"]],
+          skill.id,
+          {
+            name: input.name,
+            emoji: input.emoji,
+            description: input.description,
+            systemPrompt: input.systemPrompt,
+            greeting: input.greeting,
+            defaultModelId: input.defaultModelId,
+            visibility: input.shareToMarket ? "pending" : "private",
+            updatedAt: now,
+            clientMutationState: "pending",
+          }
+        )
+      : optimisticInsertRecord<Skill>(
+          queryClient,
+          [["skills", "mine"]],
+          {
+            id: `optimistic-skill-${clientRandomUUID()}`,
+            ownerId: "optimistic",
+            name: input.name,
+            emoji: input.emoji,
+            description: input.description,
+            systemPrompt: input.systemPrompt,
+            kind: "prompt",
+            version: "1.0.0",
+            requiredTools: [],
+            resourceRefs: [],
+            scriptPolicy: { enabled: false },
+            reviewStatus: input.shareToMarket ? "pending" : "draft",
+            greeting: input.greeting,
+            defaultModelId: input.defaultModelId,
+            enabledTools: [],
+            knowledgeBaseIds: [],
+            visibility: input.shareToMarket ? "pending" : "private",
+            usageCount: 0,
+            createdAt: now,
+            updatedAt: now,
+            clientMutationState: "pending",
+          }
+        );
+    onOpenChange(false);
+    try {
+      const saved = await getDataService().saveSkill(input);
+      transaction.reconcile(saved);
+      toast.success(skill ? "技能已更新" : "技能已创建");
+      onSaved();
+    } catch (error) {
+      transaction.rollback();
+      toast.error(error instanceof Error ? error.message : "技能保存失败");
+    }
   };
 
   return (

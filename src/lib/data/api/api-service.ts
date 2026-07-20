@@ -1,6 +1,8 @@
 import type { AdminService, DataService, ProjectPatch } from "@/lib/data/service";
+import { clientRandomUUID } from "@/lib/client-id";
 import type {
   AppSettings,
+  AdminUserDetail,
   Artifact,
   ChatStyle,
   Conversation,
@@ -219,11 +221,10 @@ export class ApiDataService implements DataService {
     id: string,
     patch: Parameters<DataService["updateConversation"]>[1]
   ) {
-    await fetchJson(`/api/conversations/${id}`, {
+    return fetchJson<Conversation>(`/api/conversations/${id}`, {
       method: "PATCH",
       body: JSON.stringify(patch),
     });
-    return (await this.getConversation(id))!;
   }
   async deleteConversation(id: string) {
     void this.stopGeneration(id).catch(() => null);
@@ -247,7 +248,7 @@ export class ApiDataService implements DataService {
     const sentinel = "__new_conversation__";
     const clientGenerationId =
       input.clientGenerationId ??
-      `cg-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+      `cg-${clientRandomUUID().replace(/-/g, "").slice(0, 16)}`;
     const payload = { ...input, clientGenerationId };
     let activeKey = input.conversationId ?? sentinel;
     if (input.conversationId) {
@@ -345,10 +346,16 @@ export class ApiDataService implements DataService {
   async *regenerate(
     conversationId: string,
     assistantMessageId: string,
-    modelId?: string
+    modelId?: string,
+    optimisticIds?: {
+      clientGenerationId: string;
+      clientAssistantMessageId: string;
+    }
   ): AsyncIterable<StreamEvent> {
     const controller = new AbortController();
-    const clientGenerationId = `cg-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+    const clientGenerationId =
+      optimisticIds?.clientGenerationId ??
+      `cg-${clientRandomUUID().replace(/-/g, "").slice(0, 16)}`;
     this.addAbortController(conversationId, controller);
     try {
       const res = await fetch("/api/chat", {
@@ -357,6 +364,7 @@ export class ApiDataService implements DataService {
         body: JSON.stringify({
           regenerate: true,
           clientGenerationId,
+          clientAssistantMessageId: optimisticIds?.clientAssistantMessageId,
           conversationId,
           assistantMessageId,
           modelId,
@@ -393,12 +401,19 @@ export class ApiDataService implements DataService {
       body: JSON.stringify({ oldUrl, newUrl, editPrompt }),
     });
   }
-  async editImage(input: { image: string; mask?: string | null; prompt: string }) {
+  async editImage(input: {
+    image: string;
+    mask?: string | null;
+    prompt: string;
+    operationKey?: string;
+  }) {
+    const { operationKey = `web-${clientRandomUUID()}`, ...body } = input;
     return fetchJson<{ url: string }>(
       "/api/edit-image",
       {
         method: "POST",
-        body: JSON.stringify(input),
+        headers: { "Idempotency-Key": operationKey },
+        body: JSON.stringify(body),
       },
       190_000
     );
@@ -638,6 +653,7 @@ export class ApiDataService implements DataService {
   createOrder(input: { kind: Order["kind"]; amountCents?: number; planId?: string }) {
     return fetchJson<Order>("/api/orders", {
       method: "POST",
+      headers: { "Idempotency-Key": `web-${clientRandomUUID()}` },
       body: JSON.stringify(input),
     });
   }
@@ -718,10 +734,32 @@ class ApiAdminService implements AdminService {
   listUsers() {
     return fetchJson<User[]>("/api/admin/users");
   }
+  getUserDetail(userId: string) {
+    return fetchJson<AdminUserDetail>(
+      `/api/admin/users/${encodeURIComponent(userId)}`
+    );
+  }
   async grantBalance(userId: string, amountCents: number, note?: string) {
     await fetchJson("/api/admin/users", {
       method: "POST",
       body: JSON.stringify({ userId, amountCents, note }),
+    });
+  }
+  updateUserSubscription(
+    userId: string,
+    input: Parameters<AdminService["updateUserSubscription"]>[1]
+  ) {
+    return fetchJson<AdminUserDetail>(
+      `/api/admin/users/${encodeURIComponent(userId)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(input),
+      }
+    );
+  }
+  async deleteUser(userId: string) {
+    await fetchJson(`/api/admin/users/${encodeURIComponent(userId)}`, {
+      method: "DELETE",
     });
   }
   listAllUsage() {

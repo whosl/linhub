@@ -12,6 +12,7 @@ import {
   PencilIcon,
   QuoteIcon,
   RefreshCwIcon,
+  SparklesIcon,
   ThumbsDownIcon,
   ThumbsUpIcon,
   Volume2Icon,
@@ -20,14 +21,17 @@ import {
 import { cn, formatBytes } from "@/lib/utils";
 import type { Message, Model } from "@/lib/types";
 import { MarkdownRenderer } from "./markdown/markdown-renderer";
-import { ReasoningBlock } from "./reasoning-block";
-import { ToolCallCard } from "./tool-call-card";
-import { ToolCallsSummary, isWebTool } from "./tool-calls-summary";
-import { SkillRunLiveCard } from "./skill-run-card";
+import { ToolResultDeliverables } from "./tool-call-card";
+import { WorkProcessSummary } from "./work-process-summary";
+import {
+  SkillRunLiveCard,
+  type SkillRunAttachment,
+} from "./skill-run-card";
 import { ImageLightbox } from "./image-lightbox";
 import { Tooltip } from "@/components/ui/tooltip";
 import { CopyFallbackDialog } from "@/components/ui/copy-fallback-dialog";
 import { copyTextToClipboard } from "@/lib/clipboard";
+import { sanitizeAssistantText } from "@/lib/chat-text";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -51,9 +55,11 @@ export function MessageItem({
   branch,
   onRegenerate,
   onEditResend,
+  onRetrySend,
   onFeedback,
   onQuote,
   onOpenArtifact,
+  onOpenAttachment,
   onImageEdited,
 }: {
   message: Message;
@@ -62,9 +68,11 @@ export function MessageItem({
   branch?: BranchInfo;
   onRegenerate?: (modelId?: string) => void;
   onEditResend?: (newText: string) => void;
+  onRetrySend?: () => void;
   onFeedback?: (fb: "up" | "down" | null) => void;
   onQuote?: (text: string) => void;
   onOpenArtifact?: (artifactId: string) => void;
+  onOpenAttachment?: (attachment: SkillRunAttachment, runId: string) => void;
   /** lightbox 编辑图片后，替换消息里的旧图（乐观更新） */
   onImageEdited?: (
     oldUrl: string,
@@ -82,8 +90,13 @@ export function MessageItem({
 
   const textContent = message.parts
     .filter((p): p is { type: "text"; text: string } => p.type === "text")
-    .map((p) => p.text)
+    .map((p) => (message.role === "assistant" ? sanitizeAssistantText(p.text) : p.text))
     .join("\n");
+  const routingConfig = message.parts.find(
+    (p): p is Extract<Message["parts"][number], { type: "tool-config" }> =>
+      p.type === "tool-config" && (p.routing?.labels.length ?? 0) > 0
+  );
+  const routingDecision = routingConfig?.routing;
 
   const copy = async () => {
     try {
@@ -221,7 +234,7 @@ export function MessageItem({
             ) : (
               <div
                 key={i}
-                className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-bubble-user px-4 py-2.5 text-[15px] leading-relaxed text-bubble-user-foreground"
+                className="min-w-0 max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-bubble-user px-4 py-2.5 text-[15px] leading-relaxed text-bubble-user-foreground [overflow-wrap:anywhere]"
               >
                 {part.text}
               </div>
@@ -230,9 +243,41 @@ export function MessageItem({
           return null;
         })}
 
+        {message.deliveryState === "sending" && (
+          <div className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
+            <Loader2Icon className="size-3 animate-spin" />
+            正在发送…
+          </div>
+        )}
+        {message.deliveryState === "failed" && (
+          <div className="flex max-w-[85%] items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-2.5 py-1.5 text-xs text-destructive">
+            <span className="min-w-0 flex-1 truncate">
+              {message.deliveryError || "发送失败"}
+            </span>
+            {onRetrySend && (
+              <button
+                type="button"
+                onClick={onRetrySend}
+                className="shrink-0 rounded-md px-2 py-1 font-medium hover:bg-destructive/10"
+              >
+                重试
+              </button>
+            )}
+          </div>
+        )}
+
+        {routingDecision && (
+          <div className="flex max-w-[85%] items-center gap-1.5 rounded-lg border bg-muted/50 px-2.5 py-1.5 text-xs text-muted-foreground">
+            <SparklesIcon className="size-3.5 shrink-0 text-primary" />
+            <span className="min-w-0 truncate">
+              已自动选择：{routingDecision.labels.join("、")}
+            </span>
+          </div>
+        )}
+
         {/* 用户消息操作 */}
         {!editing && (
-          <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+          <div className="flex items-center gap-0.5 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
             {branch && branch.total > 1 && <BranchSwitcher branch={branch} />}
             {onEditResend && (
               <Tooltip label="编辑并重发">
@@ -272,6 +317,14 @@ export function MessageItem({
   const hasCopyableText = textContent.trim().length > 0;
   const showActionBar =
     !isStreaming && (!isEmpty || message.status === "stopped");
+  const workParts = message.parts.filter(
+    (part): part is Extract<Message["parts"][number], { type: "reasoning" | "tool-call" }> =>
+      part.type === "reasoning" || part.type === "tool-call"
+  );
+  const toolParts = workParts.filter(
+    (part): part is Extract<Message["parts"][number], { type: "tool-call" }> =>
+      part.type === "tool-call"
+  );
 
   return (
     <motion.div
@@ -290,14 +343,16 @@ export function MessageItem({
           </div>
         )}
 
-        {/* web 类工具调用收拢为折叠行组（替代原来堆叠的大卡片） */}
-        {(() => {
-          const webParts = message.parts.filter(
-            (p): p is Extract<(typeof message.parts)[number], { type: "tool-call" }> =>
-              p.type === "tool-call" && isWebTool(p.toolName)
-          );
-          return webParts.length > 0 ? <ToolCallsSummary parts={webParts} /> : null;
-        })()}
+        <WorkProcessSummary parts={workParts} isStreaming={isStreaming} />
+
+        {toolParts.map((part) => (
+          <ToolResultDeliverables
+            key={`deliverable-${part.toolCallId}`}
+            part={part}
+            onOpenArtifact={onOpenArtifact}
+            onOpenAttachment={onOpenAttachment}
+          />
+        ))}
 
         {message.parts.map((part, i) => {
           const isLast = i === message.parts.length - 1;
@@ -308,30 +363,19 @@ export function MessageItem({
                   key={part.runId}
                   runId={part.runId}
                   skillName={part.skillName}
+                  onOpenAttachment={onOpenAttachment}
                 />
               );
-            case "reasoning": {
-              const hasReasoningText = part.text.trim().length > 0;
-              if (!hasReasoningText && !isStreaming) return null;
-              return (
-                <ReasoningBlock
-                  key={i}
-                  part={part}
-                  isStreaming={isStreaming && isLast}
-                  keepOpen={isStreaming}
-                />
-              );
-            }
+            case "reasoning":
+              return null;
             case "tool-call":
-              // web 类已由上方 ToolCallsSummary 统一渲染，这里跳过
-              if (isWebTool(part.toolName)) return null;
-              return (
-                <ToolCallCard key={i} part={part} onOpenArtifact={onOpenArtifact} />
-              );
+              return null;
             case "text":
+              const displayText = sanitizeAssistantText(part.text);
+              if (!displayText && !isStreaming) return null;
               return (
                 <div key={i} className={cn(isStreaming && isLast && "streaming-cursor")}>
-                  <MarkdownRenderer content={part.text} isStreaming={isStreaming && isLast} />
+                  <MarkdownRenderer content={displayText} isStreaming={isStreaming && isLast} />
                 </div>
               );
             case "image": {
@@ -381,7 +425,7 @@ export function MessageItem({
 
       {/* 助手消息操作栏 */}
       {showActionBar && (
-        <div className="mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+        <div className="mt-1 flex items-center gap-0.5 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
           {branch && branch.total > 1 && <BranchSwitcher branch={branch} />}
           {hasCopyableText && (
             <Tooltip label={copied ? "已复制" : "复制"}>

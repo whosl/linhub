@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { desc, eq } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 import { requireSession } from "@/lib/server/auth";
+import { ensureSeeded } from "@/lib/server/seed";
 import { resolveSkillVisibility } from "@/lib/server/skills/publish-policy";
 import { skillToUi } from "./util";
 import type { Skill } from "@/lib/types";
@@ -9,6 +10,7 @@ import type { Skill } from "@/lib/types";
 const uid = () => crypto.randomUUID().replace(/-/g, "").slice(0, 12);
 
 export async function GET(req: NextRequest) {
+  await ensureSeeded();
   let session;
   try {
     session = await requireSession();
@@ -34,6 +36,7 @@ export async function GET(req: NextRequest) {
 
 /** 创建/更新 Skill；shareToMarket 控制是否提交广场（非管理员忽略客户端 visibility） */
 export async function POST(req: NextRequest) {
+  await ensureSeeded();
   let session;
   try {
     session = await requireSession();
@@ -57,6 +60,8 @@ export async function POST(req: NextRequest) {
     isAdmin && body.visibility && typeof body.shareToMarket !== "boolean"
       ? body.visibility
       : await resolveSkillVisibility({ shareToMarket, isAdmin });
+  const reviewStatus: "pending" | "approved" =
+    visibility === "pending" ? "pending" : "approved";
 
   const values = {
     name: body.name,
@@ -68,6 +73,8 @@ export async function POST(req: NextRequest) {
     enabledTools: (body.enabledTools ?? []) as string[],
     knowledgeBaseIds: body.knowledgeBaseIds ?? [],
     visibility,
+    reviewStatus,
+    publishedAt: visibility === "public" ? new Date() : null,
   };
 
   if (body.id) {

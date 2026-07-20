@@ -1,5 +1,6 @@
 import { and, desc, eq, gt, gte, sql } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
+import { isUnlimitedQuota } from "@/lib/billing-plan";
 
 const uid = () => crypto.randomUUID().replace(/-/g, "").slice(0, 16);
 
@@ -65,6 +66,9 @@ export async function assertModelAccess(
 /** 当前可用于消费的额度（订阅剩余额度 + 余额）。 */
 export async function getAvailableSpendCents(userId: string) {
   const sub = await getActiveSubscription(userId);
+  if (sub && isUnlimitedQuota(sub.plan.monthlyQuotaCents)) {
+    return Number.MAX_SAFE_INTEGER;
+  }
   const quotaLeft = sub
     ? Math.max(0, sub.plan.monthlyQuotaCents - sub.subscription.usedQuotaCents)
     : 0;
@@ -144,6 +148,15 @@ export async function recordUsage(
         .orderBy(desc(schema.subscriptions.expiresAt))
         .limit(1);
       if (sub) {
+        if (isUnlimitedQuota(sub.quota)) {
+          await tx
+            .update(schema.subscriptions)
+            .set({
+              usedQuotaCents: sql`${schema.subscriptions.usedQuotaCents} + ${remaining}`,
+            })
+            .where(eq(schema.subscriptions.id, sub.id));
+          return;
+        }
         const [updated] = await tx
           .update(schema.subscriptions)
           .set({
@@ -225,6 +238,20 @@ export async function reserveSpend(
         .limit(1);
 
       if (sub) {
+        if (isUnlimitedQuota(sub.quota)) {
+          await tx
+            .update(schema.subscriptions)
+            .set({
+              usedQuotaCents: sql`${schema.subscriptions.usedQuotaCents} + ${remaining}`,
+            })
+            .where(eq(schema.subscriptions.id, sub.id));
+          return {
+            amountCents,
+            quotaCents: remaining,
+            balanceCents: 0,
+            subscriptionId: sub.id,
+          };
+        }
         const [updated] = await tx
           .update(schema.subscriptions)
           .set({

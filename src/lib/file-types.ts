@@ -35,6 +35,8 @@ export const CODE_EXTS = [
   ".tsx",
   ".py",
   ".java",
+  ".kt",
+  ".kts",
   ".go",
   ".rs",
   ".c",

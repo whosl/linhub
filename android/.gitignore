@@ -1,0 +1,17 @@
+.gradle/
+.gradle-user-home/
+.sdk/
+.idea/
+build/
+*/build/
+local.properties
+captures/
+dist/
+*.iml
+*.jks
+*.keystore
+*.p12
+keystore.properties
+
+# 原始性能 trace 仅作本机诊断；提交汇总 JSON、截图与审计结论，避免 Git 永久膨胀。
+design-qa/**/*.perfetto-trace

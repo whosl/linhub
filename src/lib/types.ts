@@ -7,6 +7,12 @@
 
 export type UserRole = "admin" | "user";
 
+export interface ClientMutationMetadata {
+  /** 仅客户端使用；标记尚未被服务端确认或已失败的实体。 */
+  clientMutationState?: "pending" | "failed";
+  clientMutationError?: string;
+}
+
 export interface User {
   id: string;
   email: string;
@@ -18,6 +24,12 @@ export interface User {
   /** 用户个人默认对话模型（覆盖全局默认） */
   defaultModelId?: string;
   subscription?: Subscription;
+}
+
+export interface AdminUserDetail {
+  user: User;
+  usageRecords: UsageRecord[];
+  ledger: LedgerEntry[];
 }
 
 // ---------- 模型与供应商 ----------
@@ -155,6 +167,43 @@ export interface ToolResultSummary {
   /** 持久 Skill Run 结果卡。 */
   skillRunId?: string;
   skillName?: string;
+  /** 代码沙盒执行状态。 */
+  timedOut?: boolean;
+  stdoutStderrLimitExceeded?: boolean;
+  outputLimitExceeded?: boolean;
+  consolePreviewTruncated?: boolean;
+  exitCode?: number | null;
+  durationMs?: number;
+  /** 表格文件名 */
+  name?: string;
+  /** 表格分析的结构化工作表摘要 */
+  sheets?: {
+    name: string;
+    headers: string[];
+    rowCount: number;
+    sampleRows: string[][];
+    stats: Record<
+      string,
+      { min?: number; max?: number; mean?: number; numericCount: number }
+    >;
+  }[];
+  /** PPT 提取或模板分析的总页数 */
+  slideCount?: number;
+  /** PPT 文本提取结果 */
+  slides?: {
+    index: number;
+    title?: string;
+    texts: string[];
+    notes: string[];
+  }[];
+  /** PPT 模板结构分析结果 */
+  layouts?: {
+    index: number;
+    title: string;
+    textBlockCount: number;
+    hasNotes: boolean;
+    sampleText?: string;
+  }[];
   /** 关联 artifact */
   artifactId?: string;
   /** Artifact 展示标题 */
@@ -189,6 +238,8 @@ export interface MediaAsset {
   messageId?: string;
   projectId?: string;
   sourceTool?: string;
+  /** 列表保持轻量；为 true 时可从媒体元数据接口按需读取提取文本。 */
+  extractedTextAvailable?: boolean;
   /** 解析/识图后的文本预览（文档、表格、PPT、代码等上传文件可用） */
   extractedText?: string;
   createdAt: string;
@@ -244,6 +295,12 @@ export interface Message {
   /** 引用的文本片段（引用回复） */
   quotedText?: string;
   status: "complete" | "streaming" | "stopped" | "error";
+  /** 仅客户端使用的投递状态；服务端确认后变为 accepted。 */
+  deliveryState?: "sending" | "accepted" | "failed";
+  /** 失败消息保留在信息流中时展示的可重试错误。 */
+  deliveryError?: string;
+  /** 对应本次发送的稳定操作键，用于重试与服务端事件对账。 */
+  clientOperationId?: string;
 }
 
 export interface Conversation {
@@ -265,7 +322,7 @@ export interface Conversation {
 
 // ---------- 回复风格 ----------
 
-export interface ChatStyle {
+export interface ChatStyle extends ClientMutationMetadata {
   id: string;
   name: string;
   description: string;
@@ -276,7 +333,7 @@ export interface ChatStyle {
 
 // ---------- Projects ----------
 
-export interface Project {
+export interface Project extends ClientMutationMetadata {
   id: string;
   name: string;
   description?: string;
@@ -299,7 +356,7 @@ export interface ProjectKnowledgeBase {
   totalChunks: number;
 }
 
-export interface ProjectFile {
+export interface ProjectFile extends ClientMutationMetadata {
   id: string;
   name: string;
   mimeType: string;
@@ -339,7 +396,7 @@ export interface Artifact {
 
 // ---------- 记忆 ----------
 
-export interface MemoryEntry {
+export interface MemoryEntry extends ClientMutationMetadata {
   id: string;
   content: string;
   /** 来源会话 */
@@ -350,7 +407,7 @@ export interface MemoryEntry {
 
 // ---------- 知识库 ----------
 
-export interface KnowledgeBase {
+export interface KnowledgeBase extends ClientMutationMetadata {
   id: string;
   name: string;
   description?: string;
@@ -362,7 +419,7 @@ export interface KnowledgeBase {
 
 export type DocumentStatus = "processing" | "ready" | "error";
 
-export interface KnowledgeDocument {
+export interface KnowledgeDocument extends ClientMutationMetadata {
   id: string;
   knowledgeBaseId: string;
   name: string;
@@ -406,7 +463,7 @@ export interface SkillScriptPolicy {
   network?: boolean;
 }
 
-export interface Skill {
+export interface Skill extends ClientMutationMetadata {
   id: string;
   ownerId: string;
   name: string;
@@ -512,7 +569,7 @@ export interface SkillRunEvent {
 
 export type McpTransport = "sse" | "streamable-http";
 
-export interface McpServer {
+export interface McpServer extends ClientMutationMetadata {
   id: string;
   scope: "global" | "user";
   ownerId?: string;
@@ -533,6 +590,7 @@ export interface McpServer {
 export interface UsageRecord {
   id: string;
   userId: string;
+  capability?: string;
   modelId: string;
   modelName: string;
   conversationId?: string;
@@ -559,7 +617,7 @@ export interface Plan {
   name: string;
   description: string;
   priceCentsPerMonth: number;
-  /** 每月额度（分） */
+  /** 每月额度（分），-1 表示无限额度 */
   monthlyQuotaCents: number;
   /** 可用模型分级 */
   modelTier: "free" | "pro";
@@ -574,6 +632,7 @@ export interface Subscription {
   startedAt: string;
   expiresAt: string;
   usedQuotaCents: number;
+  /** 每月额度（分），-1 表示无限额度 */
   monthlyQuotaCents: number;
 }
 
@@ -640,7 +699,7 @@ export type EngineTestResult =
 // ---------- 聊天发送与流式事件 ----------
 
 export interface ChatToolToggles {
-  /** 开启后由服务端按本轮请求自动挑选实际挂载的工具/MCP/Skill。 */
+  /** 默认关闭；用户显式开启时才运行智能路由。 */
   autoRouting?: boolean;
   webSearch: boolean;
   imageGeneration: boolean;
@@ -650,7 +709,7 @@ export interface ChatToolToggles {
    * 普通聊天中空 knowledgeBaseIds 表示全部知识库；项目聊天默认只使用项目文件和项目关联知识库。
    */
   knowledgeSearch: boolean;
-  /** 启用的 MCP server id */
+  /** 本轮限定的个人 MCP server id；空数组表示默认挂载全部个人 MCP，全局 MCP 始终自动挂载。 */
   mcpServerIds: string[];
   /** 本轮额外限定/加入的知识库范围 */
   knowledgeBaseIds: string[];
@@ -678,9 +737,23 @@ export interface ToolRoutingDecision {
   reasons: string[];
 }
 
+export type ThinkingEffort =
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
+
 export interface SendMessageInput {
   /** 客户端生成的本次请求 id；用于新会话拿到 conversationId 前停止后端生成。 */
   clientGenerationId?: string;
+  /** 新会话由客户端预生成，服务端校验后直接采用。 */
+  clientConversationId?: string;
+  /** 客户端预生成的用户消息 ID，用于乐观消息与幂等落库。 */
+  clientUserMessageId?: string;
+  /** 客户端预生成的助手消息 ID，用于立即显示生成占位。 */
+  clientAssistantMessageId?: string;
   conversationId?: string;
   /** 编辑重发/分支时指定父消息 */
   parentId?: string | null;
@@ -691,6 +764,7 @@ export interface SendMessageInput {
   modelId?: string;
   styleId?: string;
   extendedThinking: boolean;
+  thinkingEffort?: ThinkingEffort;
   tools: ChatToolToggles;
   projectId?: string;
   skillId?: string;

@@ -1,7 +1,12 @@
 import "server-only";
 
+import { createMCPClient } from "@ai-sdk/mcp";
 import type { ToolSet } from "ai";
-import { buildMcpTools, buildWebTools } from "@/lib/server/llm/tools";
+import { and, eq, inArray } from "drizzle-orm";
+import { decryptSecret } from "@/lib/server/crypto";
+import { db, schema } from "@/lib/server/db";
+import { buildWebTools } from "@/lib/server/llm/tools";
+import { assertSafeUrl } from "@/lib/server/net-guard";
 
 export const ZHIPU_RESEARCH_SERVERS = {
   search: "mcp-zhipu-web-search",
@@ -27,15 +32,57 @@ export function researchProviderInstructions(locale: ResearchLocale) {
 }
 
 export async function buildResearchToolBundle(userId: string) {
-  const mcp = await buildMcpTools(userId, [], {
-    globalServerIds: Object.values(ZHIPU_RESEARCH_SERVERS),
-  });
+  const servers = await db
+    .select()
+    .from(schema.mcpServers)
+    .where(
+      and(
+        eq(schema.mcpServers.enabled, true),
+        eq(schema.mcpServers.scope, "global"),
+        inArray(schema.mcpServers.id, Object.values(ZHIPU_RESEARCH_SERVERS))
+      )
+    );
+  const clients: Awaited<ReturnType<typeof createMCPClient>>[] = [];
+  const mcpTools: ToolSet = {};
+  const mountedServers: Array<{ id: string; name: string; toolNames: string[] }> = [];
+  await Promise.all(
+    servers.map(async (server) => {
+      let client: Awaited<ReturnType<typeof createMCPClient>> | null = null;
+      try {
+        await assertSafeUrl(server.url);
+        const headers = server.headersEncrypted
+          ? (JSON.parse(decryptSecret(server.headersEncrypted)) as Record<string, string>)
+          : undefined;
+        client = await createMCPClient({
+          transport: {
+            type: server.transport === "streamable-http" ? "http" : "sse",
+            url: server.url,
+            headers,
+          },
+        });
+        const serverTools = (await client.tools()) as ToolSet;
+        const prefix = server.name.replace(/\W+/gu, "_").replace(/^_+|_+$/gu, "");
+        const toolNames: string[] = [];
+        for (const [name, definition] of Object.entries(serverTools)) {
+          const exposedName = `${prefix}_${name}`;
+          mcpTools[exposedName] = definition;
+          toolNames.push(exposedName);
+        }
+        clients.push(client);
+        mountedServers.push({ id: server.id, name: server.name, toolNames });
+      } catch {
+        await client?.close().catch(() => undefined);
+      }
+    })
+  );
   return {
     tools: {
       ...buildWebTools(userId),
-      ...mcp.tools,
+      ...mcpTools,
     } satisfies ToolSet,
-    mountedServers: mcp.mountedServers,
-    close: mcp.close,
+    mountedServers,
+    close: async () => {
+      await Promise.allSettled(clients.map((client) => client.close()));
+    },
   };
 }

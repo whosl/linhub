@@ -187,6 +187,20 @@ export async function assertCodeSandboxAvailable(): Promise<void> {
 export async function runCodeSandbox(
   options: RunCodeSandboxOptions
 ): Promise<CodeSandboxResult> {
+  try {
+    return await runCodeSandboxAttempt(options);
+  } catch (error) {
+    if (!isRetryableSandboxInfrastructureError(error)) throw error;
+    // gVisor/Docker 偶尔会在用户进程刚写完退出码时提前结束容器，导致输出
+    // 采集遇到 "container is not running"。沙盒无网络、输入只读且输出目录
+    // 每次新建，因此仅对这种基础设施竞态透明重跑一次是安全且可重复的。
+    return runCodeSandboxAttempt(options);
+  }
+}
+
+async function runCodeSandboxAttempt(
+  options: RunCodeSandboxOptions
+): Promise<CodeSandboxResult> {
   validateOptions(options);
   const limits = normalizeLimits(options.limits);
   const startedAt = Date.now();
@@ -292,6 +306,14 @@ export async function runCodeSandbox(
     }
     await rm(workspace.root, { recursive: true, force: true }).catch(() => undefined);
   }
+}
+
+function isRetryableSandboxInfrastructureError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return (
+    /container [a-f0-9]+ is not running/iu.test(error.message) ||
+    error.message.includes("runsc 容器在返回执行状态前退出")
+  );
 }
 
 function dockerCreateArgs(

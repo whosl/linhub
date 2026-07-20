@@ -60,6 +60,7 @@ export async function POST(req: NextRequest) {
 
   if (body.id) {
     const patch: Partial<typeof schema.providers.$inferInsert> = {
+      kind: body.kind,
       name: body.name,
       baseUrl: body.baseUrl ?? null,
     };
@@ -74,6 +75,7 @@ export async function POST(req: NextRequest) {
       .select()
       .from(schema.providers)
       .where(eq(schema.providers.id, body.id));
+    if (!row) return Response.json({ error: "供应商不存在" }, { status: 404 });
     return Response.json(toUi(row));
   }
 

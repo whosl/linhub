@@ -6,7 +6,6 @@ import {
   CheckIcon,
   ChevronDownIcon,
   CodeIcon,
-  CopyIcon,
   DownloadIcon,
   EyeIcon,
   Link2Icon,
@@ -103,6 +102,24 @@ function safeFileExtension(raw: string | null | undefined, fallback = "txt") {
   return cleaned.slice(0, 16) || fallback;
 }
 
+function useDesktopArtifactLayout() {
+  const [isDesktop, setIsDesktop] = React.useState(() =>
+    typeof window === "undefined"
+      ? true
+      : window.matchMedia("(min-width: 1024px)").matches
+  );
+
+  React.useEffect(() => {
+    const media = window.matchMedia("(min-width: 1024px)");
+    const update = () => setIsDesktop(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
+  return isDesktop;
+}
+
 export function ArtifactPanel({
   artifact,
   onClose,
@@ -112,8 +129,8 @@ export function ArtifactPanel({
 }) {
   const [tab, setTab] = React.useState<"preview" | "code">("preview");
   const [version, setVersion] = React.useState(artifact.currentVersion);
-  const [copied, setCopied] = React.useState(false);
   const [manualCopyText, setManualCopyText] = React.useState<string | null>(null);
+  const isDesktop = useDesktopArtifactLayout();
 
   React.useEffect(() => {
     Promise.resolve().then(() => setVersion(artifact.currentVersion));
@@ -127,16 +144,6 @@ export function ArtifactPanel({
     artifact.kind
   );
   const codeLanguage = getArtifactCodeLanguage(artifact);
-
-  const copy = async () => {
-    try {
-      await copyTextToClipboard(current.content);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      setManualCopyText(current.content);
-    }
-  };
 
   const download = () => {
     const ext =
@@ -185,98 +192,90 @@ export function ArtifactPanel({
 
   return (
     <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
+      initial={isDesktop ? { opacity: 0, x: 48 } : { opacity: 0, y: 56 }}
+      animate={{ opacity: 1, x: 0, y: 0 }}
+      exit={isDesktop ? { opacity: 0, x: 48 } : { opacity: 0, y: 56 }}
       transition={{ type: "spring", stiffness: 320, damping: 34 }}
-      className="flex h-full min-w-0 max-w-full flex-1 flex-col overflow-hidden border-l bg-card"
+      className="fixed inset-x-0 bottom-0 top-20 z-30 flex min-w-0 flex-col overflow-hidden rounded-t-2xl border-t bg-card shadow-2xl lg:relative lg:inset-auto lg:z-auto lg:h-full lg:w-[54%] lg:flex-none lg:rounded-none lg:border-l lg:border-t-0 lg:shadow-none"
     >
-      {/* 头部 */}
-      <div className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-b px-3 py-2 sm:h-12 sm:flex-nowrap sm:py-0">
-        <span className="min-w-0 basis-full truncate text-sm font-medium sm:basis-auto sm:flex-1">
+      <div className="flex h-14 shrink-0 items-center gap-2 border-b px-3 sm:h-12">
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">
           {artifact.title}
         </span>
 
-        {/* 版本切换 */}
-        {artifact.versions.length > 1 && (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent">
-                v{version}
-                <ChevronDownIcon className="size-3" />
+        <div className="flex shrink-0 items-center gap-1">
+          {artifact.versions.length > 1 && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button className="flex h-8 w-12 shrink-0 items-center justify-center gap-1 rounded-lg text-xs text-muted-foreground transition-colors hover:bg-accent">
+                  v{version}
+                  <ChevronDownIcon className="size-3" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                {[...artifact.versions].reverse().map((v) => (
+                  <DropdownMenuItem key={v.version} onClick={() => setVersion(v.version)}>
+                    版本 {v.version}
+                    {v.version === version && <CheckIcon className="ml-auto" />}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+
+          {previewable && (
+            <div className="flex h-8 shrink-0 items-center rounded-lg bg-muted p-0.5">
+              <button
+                onClick={() => setTab("preview")}
+                className={cn(
+                  "flex h-7 items-center gap-1 rounded-md px-2 text-xs transition-colors",
+                  tab === "preview" ? "bg-card shadow-sm" : "text-muted-foreground"
+                )}
+              >
+                <EyeIcon className="size-3" />
+                <span className="max-[420px]:hidden">预览</span>
               </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              {[...artifact.versions].reverse().map((v) => (
-                <DropdownMenuItem key={v.version} onClick={() => setVersion(v.version)}>
-                  版本 {v.version}
-                  {v.version === version && <CheckIcon className="ml-auto" />}
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
+              <button
+                onClick={() => setTab("code")}
+                className={cn(
+                  "flex h-7 items-center gap-1 rounded-md px-2 text-xs transition-colors",
+                  tab === "code" ? "bg-card shadow-sm" : "text-muted-foreground"
+                )}
+              >
+                <CodeIcon className="size-3" />
+                <span className="max-[420px]:hidden">代码</span>
+              </button>
+            </div>
+          )}
 
-        {/* 预览/代码切换 */}
-        {previewable && (
-          <div className="flex items-center rounded-lg bg-muted p-0.5">
+          <Tooltip label="下载">
             <button
-              onClick={() => setTab("preview")}
-              className={cn(
-                "flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors",
-                tab === "preview" ? "bg-card shadow-sm" : "text-muted-foreground"
-              )}
+              onClick={download}
+              aria-label="下载"
+              className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
             >
-              <EyeIcon className="size-3" /> 预览
+              <DownloadIcon className="size-4" />
             </button>
+          </Tooltip>
+          <Tooltip label="分享链接">
             <button
-              onClick={() => setTab("code")}
-              className={cn(
-                "flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors",
-                tab === "code" ? "bg-card shadow-sm" : "text-muted-foreground"
-              )}
+              onClick={share}
+              aria-label="分享链接"
+              className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
             >
-              <CodeIcon className="size-3" /> 代码
+              <Link2Icon className="size-4" />
             </button>
-          </div>
-        )}
-
-        <Tooltip label="复制代码">
-          <button
-            onClick={copy}
-            aria-label="复制代码"
-            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-          >
-            {copied ? <CheckIcon className="size-4 text-success" /> : <CopyIcon className="size-4" />}
-          </button>
-        </Tooltip>
-        <Tooltip label="下载">
-          <button
-            onClick={download}
-            aria-label="下载"
-            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-          >
-            <DownloadIcon className="size-4" />
-          </button>
-        </Tooltip>
-        <Tooltip label="分享链接">
-          <button
-            onClick={share}
-            aria-label="分享链接"
-            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-          >
-            <Link2Icon className="size-4" />
-          </button>
-        </Tooltip>
-        <Tooltip label="关闭">
-          <button
-            onClick={onClose}
-            aria-label="关闭"
-            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-          >
-            <XIcon className="size-4" />
-          </button>
-        </Tooltip>
+          </Tooltip>
+          <Tooltip label="关闭">
+            <button
+              onClick={onClose}
+              aria-label="关闭"
+              className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            >
+              <XIcon className="size-4" />
+            </button>
+          </Tooltip>
+        </div>
       </div>
 
       {/* 内容 */}

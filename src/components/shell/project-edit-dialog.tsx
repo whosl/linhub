@@ -10,6 +10,12 @@ import {
   UploadIcon,
 } from "lucide-react";
 import { getDataService } from "@/lib/data";
+import { clientRandomUUID } from "@/lib/client-id";
+import type { Project, ProjectFile } from "@/lib/types";
+import {
+  optimisticPatchRecords,
+  optimisticRemoveRecord,
+} from "@/lib/optimistic-query";
 import { formatBytes } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input, Textarea } from "@/components/ui/input";
@@ -87,23 +93,51 @@ export function ProjectEditDialog() {
 
   const save = async () => {
     if (!project || !name.trim()) return;
-    const saved = await getDataService().updateProject(project.id, {
+    const patch = {
       name: name.trim(),
       description: description.trim() || null,
       color,
       instructions,
-    });
-    queryClient.setQueryData(["project", project.id], saved);
-    queryClient.invalidateQueries({ queryKey: ["projects"] });
-    toast.success("项目已保存");
+    };
+    const optimistic = optimisticPatchRecords<Project>(
+      queryClient,
+      [["project", project.id], ["projects"]],
+      project.id,
+      {
+        name: patch.name,
+        description: patch.description ?? undefined,
+        color,
+        instructions,
+      }
+    );
+    try {
+      const saved = await getDataService().updateProject(project.id, patch);
+      optimistic.reconcile(saved);
+      toast.success("项目已保存");
+    } catch (error) {
+      optimistic.rollback();
+      toast.error(error instanceof Error ? error.message : "项目保存失败");
+    }
   };
 
   const saveModel = async (modelId: string) => {
     if (!project) return;
-    const saved = await getDataService().updateProject(project.id, { modelId: modelId || null });
-    queryClient.setQueryData(["project", project.id], saved);
-    queryClient.invalidateQueries({ queryKey: ["projects"] });
-    toast.success("默认模型已更新");
+    const optimistic = optimisticPatchRecords<Project>(
+      queryClient,
+      [["project", project.id], ["projects"]],
+      project.id,
+      { modelId: modelId || undefined }
+    );
+    try {
+      const saved = await getDataService().updateProject(project.id, {
+        modelId: modelId || null,
+      });
+      optimistic.reconcile(saved);
+      toast.success("默认模型已更新");
+    } catch (error) {
+      optimistic.rollback();
+      toast.error(error instanceof Error ? error.message : "默认模型更新失败");
+    }
   };
 
   const toggleKnowledgeBase = async (knowledgeBaseId: string, checked: boolean) => {
@@ -113,14 +147,20 @@ export function ProjectEditDialog() {
       ? Array.from(new Set([...currentIds, knowledgeBaseId]))
       : currentIds.filter((id) => id !== knowledgeBaseId);
     setSavingKnowledgeBaseId(knowledgeBaseId);
+    const optimistic = optimisticPatchRecords<Project>(
+      queryClient,
+      [["project", project.id], ["projects"]],
+      project.id,
+      { knowledgeBaseIds: nextIds }
+    );
     try {
       const saved = await getDataService().updateProject(project.id, {
         knowledgeBaseIds: nextIds,
       });
-      queryClient.setQueryData(["project", project.id], saved);
-      queryClient.invalidateQueries({ queryKey: ["projects"] });
+      optimistic.reconcile(saved);
       toast.success(checked ? "已关联知识库" : "已取消关联");
     } catch (e) {
+      optimistic.rollback();
       toast.error(e instanceof Error ? e.message : "更新失败");
     } finally {
       setSavingKnowledgeBaseId(null);
@@ -142,10 +182,32 @@ export function ProjectEditDialog() {
     let knowledgeSuccessCount = 0;
     const failures: string[] = [];
     const targetKnowledgeBaseId = mirrorKnowledgeBaseId;
+    const temporaryFiles: ProjectFile[] = list.map((file) => ({
+      id: `optimistic-project-file-${clientRandomUUID()}`,
+      name: file.name,
+      mimeType: file.type || "application/octet-stream",
+      size: file.size,
+      createdAt: new Date().toISOString(),
+      clientMutationState: "pending",
+    }));
+    queryClient.setQueryData<Project | null>(["project", projectId], (current) =>
+      current ? { ...current, files: [...current.files, ...temporaryFiles] } : current
+    );
     try {
-      for (const file of list) {
+      for (const [index, file] of list.entries()) {
+        const temporary = temporaryFiles[index];
         try {
-          await getDataService().uploadProjectFile(projectId, file);
+          const savedFile = await getDataService().uploadProjectFile(projectId, file);
+          queryClient.setQueryData<Project | null>(["project", projectId], (current) =>
+            current
+              ? {
+                  ...current,
+                  files: current.files.map((item) =>
+                    item.id === temporary.id ? savedFile : item
+                  ),
+                }
+              : current
+          );
           successCount += 1;
           if (targetKnowledgeBaseId) {
             try {
@@ -159,6 +221,22 @@ export function ProjectEditDialog() {
         } catch (e) {
           const message = e instanceof Error ? e.message : "上传失败";
           failures.push(`${file.name}：${message}`);
+          queryClient.setQueryData<Project | null>(["project", projectId], (current) =>
+            current
+              ? {
+                  ...current,
+                  files: current.files.map((item) =>
+                    item.id === temporary.id
+                      ? {
+                          ...item,
+                          clientMutationState: "failed",
+                          clientMutationError: message,
+                        }
+                      : item
+                  ),
+                }
+              : current
+          );
         }
       }
       if (
@@ -220,21 +298,58 @@ export function ProjectEditDialog() {
   const confirmDelete = async () => {
     if (!deleteTarget) return;
     setDeleting(true);
-    try {
-      if (deleteTarget.type === "file") {
+    if (deleteTarget.type === "file") {
+      const target = project?.files.find((file) => file.id === deleteTarget.id);
+      const index = project?.files.findIndex((file) => file.id === deleteTarget.id) ?? -1;
+      const optimistic = project
+        ? optimisticPatchRecords<Project>(
+            queryClient,
+            [["project", project.id], ["projects"]],
+            project.id,
+            { files: project.files.filter((file) => file.id !== deleteTarget.id) }
+          )
+        : null;
+      setDeleteTarget(null);
+      try {
         await getDataService().deleteProjectFile(deleteTarget.id);
-        queryClient.invalidateQueries({ queryKey: ["project", editingProjectId] });
         toast.success("文件已删除");
-      } else {
+      } catch (error) {
+        optimistic?.rollback();
+        if (target && editingProjectId) {
+          queryClient.setQueryData<Project | null>(
+            ["project", editingProjectId],
+            (current) => {
+              if (!current || current.files.some((file) => file.id === target.id)) return current;
+              const files = [...current.files];
+              files.splice(Math.max(index, 0), 0, target);
+              return { ...current, files };
+            }
+          );
+        }
+        toast.error(error instanceof Error ? error.message : "文件删除失败");
+      } finally {
+        setDeleting(false);
+      }
+      return;
+    }
+
+    const optimistic = optimisticRemoveRecord<Project>(
+      queryClient,
+      [["projects"]],
+      deleteTarget.id
+    );
+    setEditingProjectId(null);
+    setDeleteTarget(null);
+    try {
         await getDataService().deleteProject(deleteTarget.id);
-        queryClient.invalidateQueries({ queryKey: ["projects"] });
         queryClient.invalidateQueries({ queryKey: ["conversations"] });
         queryClient.removeQueries({ queryKey: ["project", deleteTarget.id] });
         queryClient.removeQueries({ queryKey: ["project-conversations", deleteTarget.id] });
-        setEditingProjectId(null);
         toast.success("项目已删除");
-      }
-      setDeleteTarget(null);
+    } catch (error) {
+      optimistic.rollback();
+      setEditingProjectId(deleteTarget.id);
+      toast.error(error instanceof Error ? error.message : "项目删除失败");
     } finally {
       setDeleting(false);
     }
@@ -361,11 +476,28 @@ export function ProjectEditDialog() {
                       <span className="min-w-0 flex-1 truncate text-xs">{f.name}</span>
                       <span className="shrink-0 text-[10px] text-muted-foreground">
                         {formatBytes(f.size)}
+                        {f.clientMutationState === "pending" && " · 上传中…"}
+                        {f.clientMutationState === "failed" && " · 上传失败"}
                       </span>
                       <button
                         type="button"
                         aria-label={`删除文件「${f.name}」`}
-                        onClick={() => requestDeleteFile(f)}
+                        onClick={() =>
+                          f.clientMutationState
+                            ? queryClient.setQueryData<Project | null>(
+                                ["project", project.id],
+                                (current) =>
+                                  current
+                                    ? {
+                                        ...current,
+                                        files: current.files.filter(
+                                          (item) => item.id !== f.id
+                                        ),
+                                      }
+                                    : current
+                              )
+                            : requestDeleteFile(f)
+                        }
                         className="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus:opacity-100 group-hover/file:opacity-100"
                       >
                         <Trash2Icon className="size-3" />

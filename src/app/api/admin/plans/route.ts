@@ -14,7 +14,11 @@ const PlanUpsertSchema = z.object({
   name: z.string().min(1, "名称不能为空"),
   description: z.string().default(""),
   priceCentsPerMonth: z.number().int().nonnegative().default(0),
-  monthlyQuotaCents: z.number().int().nonnegative().default(0),
+  monthlyQuotaCents: z
+    .number()
+    .int()
+    .refine((value) => value === -1 || value >= 0, "月额度必须为 -1 或非负整数")
+    .default(0),
   modelTier: z.enum(["free", "pro"]).default("free"),
   features: z.array(z.string()).default([]),
   enabled: z.boolean().default(true),

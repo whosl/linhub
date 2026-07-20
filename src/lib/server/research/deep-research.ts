@@ -19,13 +19,13 @@ import {
 } from "@/lib/server/research/provider-policy";
 
 const ResearchPlanSchema = z.object({
-  locale: z.enum(["zh", "foreign", "mixed"]).default("mixed"),
+  locale: z.enum(["zh", "foreign", "mixed"]),
   tasks: z
     .array(
       z.object({
         title: z.string().min(2).max(80),
         instruction: z.string().min(10).max(800),
-        locale: z.enum(["zh", "foreign", "mixed"]).default("mixed"),
+        locale: z.enum(["zh", "foreign", "mixed"]),
       })
     )
     .min(2)

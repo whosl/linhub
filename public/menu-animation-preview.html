@@ -1,0 +1,1078 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>二级菜单动画预览</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f6f3ef;
+        --panel: #fffdfb;
+        --panel-strong: #ffffff;
+        --ink: #231f1b;
+        --muted: #756d66;
+        --soft: #eee8e1;
+        --line: #ded6ce;
+        --accent: #b85f3f;
+        --accent-ink: #8b3c26;
+        --teal: #2f7d73;
+        --blue: #405f93;
+        --shadow: 0 18px 50px rgb(58 39 27 / 14%);
+        --phone-shadow: 0 28px 80px rgb(45 36 30 / 18%);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        min-height: 100%;
+      }
+
+      body {
+        margin: 0;
+        background:
+          radial-gradient(circle at 12% 10%, rgb(184 95 63 / 12%), transparent 28rem),
+          radial-gradient(circle at 86% 12%, rgb(47 125 115 / 12%), transparent 26rem),
+          var(--bg);
+        color: var(--ink);
+        font-family:
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+        letter-spacing: 0;
+      }
+
+      button {
+        font: inherit;
+      }
+
+      .page {
+        width: min(1180px, 100%);
+        margin: 0 auto;
+        padding: 28px 24px 34px;
+      }
+
+      .topbar {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 18px;
+        margin-bottom: 20px;
+      }
+
+      .eyebrow {
+        margin: 0 0 6px;
+        color: var(--accent-ink);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(24px, 3vw, 38px);
+        line-height: 1.08;
+        letter-spacing: 0;
+      }
+
+      .subhead {
+        max-width: 520px;
+        margin: 8px 0 0;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.6;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+
+      .plain-button {
+        display: inline-flex;
+        min-height: 36px;
+        align-items: center;
+        gap: 8px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: rgb(255 255 255 / 70%);
+        color: var(--ink);
+        padding: 8px 11px;
+        cursor: pointer;
+        box-shadow: 0 8px 24px rgb(37 28 24 / 6%);
+        transition:
+          transform 120ms ease,
+          border-color 120ms ease,
+          background 120ms ease;
+      }
+
+      .plain-button:hover {
+        transform: translateY(-1px);
+        border-color: rgb(184 95 63 / 38%);
+        background: white;
+      }
+
+      .workspace {
+        display: grid;
+        grid-template-columns: minmax(240px, 300px) minmax(320px, 1fr) minmax(220px, 280px);
+        gap: 18px;
+        align-items: stretch;
+      }
+
+      .panel {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: rgb(255 253 251 / 78%);
+        box-shadow: 0 14px 38px rgb(58 39 27 / 8%);
+        backdrop-filter: blur(14px);
+      }
+
+      .controls,
+      .notes {
+        padding: 14px;
+      }
+
+      .panel-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+
+      .panel-title h2 {
+        margin: 0;
+        font-size: 14px;
+      }
+
+      .count {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 3px 8px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .preset-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .preset {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel-strong);
+        padding: 11px;
+        text-align: left;
+        cursor: pointer;
+        transition:
+          transform 120ms ease,
+          border-color 120ms ease,
+          box-shadow 120ms ease,
+          background 120ms ease;
+      }
+
+      .preset:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 10px 24px rgb(58 39 27 / 9%);
+      }
+
+      .preset.active {
+        border-color: rgb(184 95 63 / 62%);
+        background: #fff8f4;
+        box-shadow: 0 12px 28px rgb(184 95 63 / 13%);
+      }
+
+      .preset-name {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .preset-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+        margin-top: 8px;
+      }
+
+      .tag {
+        border: 1px solid rgb(117 109 102 / 20%);
+        border-radius: 999px;
+        padding: 2px 7px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .recommended {
+        border-color: rgb(47 125 115 / 32%);
+        color: var(--teal);
+      }
+
+      .phone-wrap {
+        display: grid;
+        place-items: center;
+        min-height: 720px;
+        padding: 18px;
+      }
+
+      .phone {
+        position: relative;
+        width: min(393px, 100%);
+        min-height: 660px;
+        overflow: hidden;
+        border: 1px solid #27211c;
+        border-radius: 34px;
+        background: #fbfaf8;
+        box-shadow: var(--phone-shadow);
+      }
+
+      .phone::before {
+        content: "";
+        position: absolute;
+        top: 10px;
+        left: 50%;
+        z-index: 5;
+        width: 86px;
+        height: 21px;
+        border-radius: 999px;
+        background: #171310;
+        transform: translateX(-50%);
+      }
+
+      .chat-screen {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        padding: 54px 14px 14px;
+      }
+
+      .chat-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .menu-lines,
+      .chevron {
+        position: relative;
+        display: inline-block;
+        width: 18px;
+        height: 18px;
+        flex: none;
+      }
+
+      .menu-lines::before,
+      .menu-lines::after,
+      .menu-lines span {
+        content: "";
+        position: absolute;
+        left: 2px;
+        width: 14px;
+        height: 1.5px;
+        border-radius: 999px;
+        background: currentColor;
+      }
+
+      .menu-lines::before {
+        top: 4px;
+      }
+
+      .menu-lines span {
+        top: 8.5px;
+      }
+
+      .menu-lines::after {
+        top: 13px;
+      }
+
+      .chevron::before {
+        content: "";
+        position: absolute;
+        top: 4px;
+        left: 5px;
+        width: 8px;
+        height: 8px;
+        border-top: 1.7px solid currentColor;
+        border-right: 1.7px solid currentColor;
+        transform: rotate(45deg);
+      }
+
+      .chevron.left::before {
+        left: 6px;
+        transform: rotate(225deg);
+      }
+
+      .message-flow {
+        display: grid;
+        gap: 10px;
+        margin-top: 26px;
+      }
+
+      .bubble {
+        width: fit-content;
+        max-width: 86%;
+        border-radius: 18px;
+        padding: 11px 13px;
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .bubble.user {
+        justify-self: end;
+        border-bottom-right-radius: 6px;
+        background: #efe7dd;
+      }
+
+      .bubble.assistant {
+        border-bottom-left-radius: 6px;
+        background: #ffffff;
+        box-shadow: 0 10px 30px rgb(58 39 27 / 8%);
+      }
+
+      .composer-zone {
+        position: absolute;
+        right: 14px;
+        bottom: 14px;
+        left: 14px;
+      }
+
+      .menu-popover {
+        position: relative;
+        width: min(352px, 100%);
+        margin: 0 auto 8px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: rgb(255 255 255 / 96%);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(18px);
+      }
+
+      .menu-viewport {
+        position: relative;
+        overflow: hidden;
+        transition: height 130ms cubic-bezier(0.2, 0.8, 0.2, 1);
+      }
+
+      .menu-pane {
+        width: 100%;
+        padding: 5px;
+        transform-origin: 50% 60%;
+        will-change: transform, opacity, filter;
+      }
+
+      .menu-pane.is-animating {
+        position: absolute;
+        inset: 0 auto auto 0;
+      }
+
+      .menu-label {
+        padding: 8px 10px 6px;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .menu-button,
+      .model-row,
+      .thinking-row {
+        display: flex;
+        width: 100%;
+        align-items: center;
+        gap: 10px;
+        border: 0;
+        border-radius: 10px;
+        background: transparent;
+        color: var(--ink);
+        padding: 10px;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .menu-button:hover,
+      .model-row:hover,
+      .thinking-row:hover {
+        background: #f3eee9;
+      }
+
+      .menu-copy {
+        min-width: 0;
+        flex: 1;
+      }
+
+      .primary {
+        display: block;
+        overflow: hidden;
+        color: var(--ink);
+        font-size: 13px;
+        font-weight: 650;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .secondary {
+        display: block;
+        overflow: hidden;
+        margin-top: 2px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.35;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .separator {
+        height: 1px;
+        margin: 5px -5px;
+        background: var(--line);
+      }
+
+      .subscroll {
+        max-height: 438px;
+        overflow-y: auto;
+        padding-right: 2px;
+      }
+
+      .subscroll::-webkit-scrollbar {
+        width: 5px;
+      }
+
+      .subscroll::-webkit-scrollbar-thumb {
+        border-radius: 999px;
+        background: #d3c8bd;
+      }
+
+      .check {
+        position: relative;
+        width: 18px;
+        height: 18px;
+        flex: none;
+        border-radius: 999px;
+        background: rgb(184 95 63 / 12%);
+      }
+
+      .check::before {
+        content: "";
+        position: absolute;
+        top: 4px;
+        left: 6px;
+        width: 5px;
+        height: 9px;
+        border-right: 2px solid var(--accent);
+        border-bottom: 2px solid var(--accent);
+        transform: rotate(42deg);
+      }
+
+      .icon-dot {
+        width: 8px;
+        height: 8px;
+        flex: none;
+        border-radius: 999px;
+        background: var(--blue);
+      }
+
+      .icon-dot.teal {
+        background: var(--teal);
+      }
+
+      .composer {
+        border: 1px solid var(--line);
+        border-radius: 22px;
+        background: var(--panel-strong);
+        box-shadow: 0 10px 30px rgb(58 39 27 / 8%);
+      }
+
+      .textarea {
+        min-height: 58px;
+        padding: 15px 16px 6px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 0 8px 8px;
+      }
+
+      .tool {
+        display: inline-flex;
+        height: 32px;
+        min-width: 32px;
+        align-items: center;
+        justify-content: center;
+        border: 0;
+        border-radius: 9px;
+        background: transparent;
+        color: var(--muted);
+      }
+
+      .model-trigger {
+        margin-left: auto;
+        border: 0;
+        border-radius: 9px;
+        background: #f5f0eb;
+        color: var(--ink);
+        padding: 8px 9px;
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      .send {
+        border-radius: 999px;
+        background: var(--accent);
+        color: white;
+      }
+
+      .notes {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+
+      .metric-grid {
+        display: grid;
+        gap: 8px;
+      }
+
+      .metric {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: white;
+        padding: 11px;
+      }
+
+      .metric-label {
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .metric-value {
+        margin-top: 4px;
+        font-size: 18px;
+        font-weight: 750;
+      }
+
+      .code-box {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #1f1b18;
+        color: #f6eee7;
+        padding: 12px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 11px;
+        line-height: 1.55;
+        white-space: pre-wrap;
+      }
+
+      .hint {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      @media (max-width: 920px) {
+        .workspace {
+          grid-template-columns: 1fr;
+        }
+
+        .phone-wrap {
+          min-height: auto;
+        }
+
+        .topbar {
+          align-items: start;
+          flex-direction: column;
+        }
+
+        .actions {
+          justify-content: flex-start;
+        }
+      }
+
+      @media (max-width: 520px) {
+        .page {
+          padding: 18px 12px 24px;
+        }
+
+        .phone-wrap {
+          padding: 8px 0;
+        }
+
+        .phone {
+          width: min(393px, calc(100vw - 24px));
+          min-height: 650px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">LinHub mobile menu motion lab</p>
+          <h1>二级菜单动画预览</h1>
+          <p class="subhead">
+            这里模拟聊天输入框里的“模型与思考”二级菜单。点左侧方案会自动播放一次，手机模型里也可以点“选择模型”“选择思考强度”和返回。
+          </p>
+        </div>
+        <div class="actions">
+          <button class="plain-button" id="replayModels" type="button">播放选择模型</button>
+          <button class="plain-button" id="replayThinking" type="button">播放思考强度</button>
+          <button class="plain-button" id="resetMenu" type="button">回到一级菜单</button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="panel controls">
+          <div class="panel-title">
+            <h2>动画方案</h2>
+            <span class="count">6 个</span>
+          </div>
+          <div class="preset-list" id="presetList"></div>
+        </aside>
+
+        <section class="panel phone-wrap" aria-label="手机菜单预览">
+          <div class="phone">
+            <div class="chat-screen">
+              <div class="chat-header">
+                <span class="menu-lines"><span></span></span>
+                <strong>年度数字化项目 / 年度数字化项目汇报</strong>
+              </div>
+              <div class="message-flow">
+                <div class="bubble user">给我讲讲我报送的年度数字化项目</div>
+                <div class="bubble assistant">可以，我会先检索项目文件，然后按“背景、进展、风险、下一步”整理。</div>
+              </div>
+              <div class="composer-zone">
+                <div class="menu-popover" aria-live="polite">
+                  <div class="menu-viewport" id="menuViewport"></div>
+                </div>
+                <div class="composer">
+                  <div class="textarea">继续追问项目细节...</div>
+                  <div class="toolbar">
+                    <button class="tool" type="button" aria-label="上传文件">+</button>
+                    <button class="tool" type="button" aria-label="工具">≡</button>
+                    <button class="model-trigger" id="triggerModels" type="button">
+                      GPT-5.5
+                    </button>
+                    <button class="tool" type="button" aria-label="语音">M</button>
+                    <button class="tool send" type="button" aria-label="发送">↑</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <aside class="panel notes">
+          <div>
+            <div class="panel-title">
+              <h2 id="activeName">A 轻快推进</h2>
+              <span class="count" id="activeDuration">145ms</span>
+            </div>
+            <p class="hint" id="activeDesc"></p>
+          </div>
+          <div class="metric-grid">
+            <div class="metric">
+              <div class="metric-label">适合感觉</div>
+              <div class="metric-value" id="activeMood">轻快</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">建议</div>
+              <div class="metric-value" id="activeAdvice">推荐先试</div>
+            </div>
+          </div>
+          <div class="code-box" id="activeCode"></div>
+          <p class="hint">选定后我会把对应的 duration、easing、位移和缩放参数迁回 React 组件。</p>
+        </aside>
+      </main>
+    </div>
+
+    <script>
+      const presets = [
+        {
+          id: "quick-push",
+          name: "A 轻快推进",
+          duration: 145,
+          easing: "cubic-bezier(.2,.82,.18,1)",
+          mood: "轻快",
+          advice: "推荐先试",
+          desc: "更像原生移动端页面推进，位移短、收得快，不拖泥带水。",
+          tags: ["短位移", "快", "清爽"],
+          recommended: true,
+          frames(direction) {
+            return {
+              enter: [
+                { opacity: 0, transform: `translateX(${direction * 20}px) scale(.992)`, filter: "blur(2px)" },
+                { opacity: 1, transform: "translateX(0) scale(1)", filter: "blur(0)" },
+              ],
+              exit: [
+                { opacity: 1, transform: "translateX(0) scale(1)", filter: "blur(0)" },
+                { opacity: 0, transform: `translateX(${direction * -14}px) scale(.992)`, filter: "blur(1px)" },
+              ],
+            };
+          },
+        },
+        {
+          id: "snap-spring",
+          name: "B 弹性轻推",
+          duration: 180,
+          easing: "cubic-bezier(.18,1.28,.32,1)",
+          mood: "灵动",
+          advice: "有手感",
+          desc: "有一点点回弹，但幅度很克制，适合想要更有生命力的菜单。",
+          tags: ["微弹", "顺滑", "活一点"],
+          recommended: true,
+          frames(direction) {
+            return {
+              enter: [
+                { opacity: 0, transform: `translateX(${direction * 24}px) scale(.985)` },
+                { opacity: 1, transform: `translateX(${direction * -2}px) scale(1.004)`, offset: 0.74 },
+                { opacity: 1, transform: "translateX(0) scale(1)" },
+              ],
+              exit: [
+                { opacity: 1, transform: "translateX(0) scale(1)" },
+                { opacity: 0, transform: `translateX(${direction * -16}px) scale(.988)` },
+              ],
+            };
+          },
+        },
+        {
+          id: "lift-swap",
+          name: "C 浮起换层",
+          duration: 155,
+          easing: "cubic-bezier(.22,.74,.26,1)",
+          mood: "柔和",
+          advice: "很稳",
+          desc: "不是横向推屏，而是轻微上浮和缩放，菜单像在同一层里换内容。",
+          tags: ["上浮", "层级", "稳"],
+          recommended: false,
+          frames(direction) {
+            return {
+              enter: [
+                { opacity: 0, transform: "translateY(8px) scale(.972)", filter: "blur(2px)" },
+                { opacity: 1, transform: "translateY(0) scale(1)", filter: "blur(0)" },
+              ],
+              exit: [
+                { opacity: 1, transform: "translateY(0) scale(1)", filter: "blur(0)" },
+                { opacity: 0, transform: "translateY(-6px) scale(.986)", filter: "blur(1px)" },
+              ],
+            };
+          },
+        },
+        {
+          id: "material-slide",
+          name: "D 磁吸滑入",
+          duration: 125,
+          easing: "cubic-bezier(.16,.78,.28,1)",
+          mood: "利落",
+          advice: "最快",
+          desc: "速度最快，几乎没有装饰动作，只保留一点透明度和横向位移。",
+          tags: ["最快", "干净", "低存在感"],
+          recommended: true,
+          frames(direction) {
+            return {
+              enter: [
+                { opacity: 0, transform: `translateX(${direction * 14}px)` },
+                { opacity: 1, transform: "translateX(0)" },
+              ],
+              exit: [
+                { opacity: 1, transform: "translateX(0)" },
+                { opacity: 0, transform: `translateX(${direction * -10}px)` },
+              ],
+            };
+          },
+        },
+        {
+          id: "fade-drift",
+          name: "E 淡入漂移",
+          duration: 165,
+          easing: "cubic-bezier(.25,.72,.22,1)",
+          mood: "轻柔",
+          advice: "不抢戏",
+          desc: "淡入为主，位移很小，适合不想让菜单动得太明显的版本。",
+          tags: ["淡", "轻", "安静"],
+          recommended: false,
+          frames(direction) {
+            return {
+              enter: [
+                { opacity: 0, transform: `translate(${direction * 8}px, 4px) scale(.992)` },
+                { opacity: 1, transform: "translate(0, 0) scale(1)" },
+              ],
+              exit: [
+                { opacity: 1, transform: "translate(0, 0) scale(1)" },
+                { opacity: 0, transform: `translate(${direction * -6}px, -3px) scale(.996)` },
+              ],
+            };
+          },
+        },
+        {
+          id: "depth-pop",
+          name: "F 近远切换",
+          duration: 175,
+          easing: "cubic-bezier(.2,.9,.2,1)",
+          mood: "有层次",
+          advice: "偏精致",
+          desc: "通过缩放制造前后层级，横向位移很少，视觉更像弹层内部切换。",
+          tags: ["缩放", "层次", "精致"],
+          recommended: false,
+          frames(direction) {
+            return {
+              enter: [
+                { opacity: 0, transform: "translateY(2px) scale(.94)", filter: "blur(3px)" },
+                { opacity: 1, transform: "translateY(0) scale(1)", filter: "blur(0)" },
+              ],
+              exit: [
+                { opacity: 1, transform: "translateY(0) scale(1)", filter: "blur(0)" },
+                { opacity: 0, transform: "translateY(-2px) scale(1.018)", filter: "blur(1px)" },
+              ],
+            };
+          },
+        },
+      ];
+
+      const models = [
+        ["Anthropic", "Claude Sonnet 5", "速度与智能的最佳平衡，写作与编码出色"],
+        ["Anthropic", "Claude Opus 4.8", "复杂智能体编码与企业级工作的主力旗舰"],
+        ["OpenAI", "GPT-5.5", "当前模型，通用对话、工具调用和复杂推理"],
+        ["OpenAI", "GPT-5.1 Thinking", "深度推理任务优先"],
+        ["Google", "Gemini 3 Pro", "长上下文、多模态和知识任务"],
+        ["DeepSeek", "DeepSeek Reasoner", "高性价比推理模型"],
+      ];
+
+      const thinking = [
+        ["短", "更快响应，尽量少想"],
+        ["中", "轻量推理，适合日常对话"],
+        ["长", "平衡质量、速度和成本"],
+        ["最长", "复杂任务优先质量"],
+      ];
+
+      const state = {
+        activePreset: presets[0],
+        view: "root",
+        animating: false,
+      };
+
+      const presetList = document.querySelector("#presetList");
+      const viewport = document.querySelector("#menuViewport");
+      const activeName = document.querySelector("#activeName");
+      const activeDuration = document.querySelector("#activeDuration");
+      const activeDesc = document.querySelector("#activeDesc");
+      const activeMood = document.querySelector("#activeMood");
+      const activeAdvice = document.querySelector("#activeAdvice");
+      const activeCode = document.querySelector("#activeCode");
+
+      function renderPresets() {
+        presetList.innerHTML = presets
+          .map(
+            (preset) => `
+              <button class="preset ${preset.id === state.activePreset.id ? "active" : ""}" type="button" data-preset="${preset.id}">
+                <span class="preset-name">
+                  <span>${preset.name}</span>
+                  <span>${preset.duration}ms</span>
+                </span>
+                <span class="preset-meta">
+                  ${preset.tags.map((tag) => `<span class="tag ${preset.recommended ? "recommended" : ""}">${tag}</span>`).join("")}
+                </span>
+              </button>
+            `
+          )
+          .join("");
+      }
+
+      function renderDetails() {
+        const preset = state.activePreset;
+        activeName.textContent = preset.name;
+        activeDuration.textContent = `${preset.duration}ms`;
+        activeDesc.textContent = preset.desc;
+        activeMood.textContent = preset.mood;
+        activeAdvice.textContent = preset.advice;
+        activeCode.textContent = `duration: ${preset.duration}ms
+easing: ${preset.easing}
+enter: ${preset.frames(1).enter[0].transform}
+exit: ${preset.frames(1).exit.at(-1).transform}`;
+      }
+
+      function paneHTML(view) {
+        if (view === "models") {
+          return `
+            <div class="subscroll">
+              <button class="menu-button" type="button" data-back>
+                <span class="chevron left"></span>
+                <span class="menu-copy"><span class="primary">选择模型</span></span>
+              </button>
+              <div class="separator"></div>
+              ${models
+                .map((model, index, all) => {
+                  const providerLabel =
+                    index === 0 || model[0] !== all[index - 1][0]
+                      ? `<div class="menu-label">${model[0]}</div>`
+                      : "";
+                  return `${providerLabel}
+                    <button class="model-row" type="button">
+                      <span class="icon-dot ${index % 2 ? "teal" : ""}"></span>
+                      <span class="menu-copy">
+                        <span class="primary">${model[1]}</span>
+                        <span class="secondary">${model[2]}</span>
+                      </span>
+                      ${model[1] === "GPT-5.5" ? '<span class="check"></span>' : ""}
+                    </button>`;
+                })
+                .join("")}
+            </div>
+          `;
+        }
+
+        if (view === "thinking") {
+          return `
+            <button class="menu-button" type="button" data-back>
+              <span class="chevron left"></span>
+              <span class="menu-copy"><span class="primary">选择思考强度</span></span>
+            </button>
+            <div class="separator"></div>
+            <div class="menu-label">当前模型：GPT-5.5</div>
+            ${thinking
+              .map(
+                (item) => `
+                  <button class="thinking-row" type="button">
+                    <span class="menu-copy">
+                      <span class="primary">${item[0]}</span>
+                      <span class="secondary">${item[1]}</span>
+                    </span>
+                    ${item[0] === "最长" ? '<span class="check"></span>' : ""}
+                  </button>
+                `
+              )
+              .join("")}
+            <div class="separator"></div>
+            <button class="menu-button" type="button">
+              <span class="menu-copy"><span class="primary">恢复模型默认（最长）</span></span>
+            </button>
+          `;
+        }
+
+        return `
+          <div class="menu-label">模型与思考</div>
+          <button class="menu-button" type="button" data-target="models">
+            <span class="menu-copy">
+              <span class="primary">选择模型</span>
+              <span class="secondary">GPT-5.5</span>
+            </span>
+            <span class="chevron"></span>
+          </button>
+          <button class="menu-button" type="button" data-target="thinking">
+            <span class="menu-copy">
+              <span class="primary">选择思考强度</span>
+              <span class="secondary">最长 · 模型默认</span>
+            </span>
+            <span class="chevron"></span>
+          </button>
+        `;
+      }
+
+      function makePane(view) {
+        const pane = document.createElement("div");
+        pane.className = "menu-pane";
+        pane.dataset.view = view;
+        pane.innerHTML = paneHTML(view);
+        return pane;
+      }
+
+      function renderStatic(view) {
+        state.view = view;
+        viewport.innerHTML = "";
+        viewport.appendChild(makePane(view));
+        viewport.style.height = "";
+      }
+
+      function transitionTo(nextView, direction) {
+        if (state.animating || state.view === nextView) return;
+
+        const preset = state.activePreset;
+        const previous = viewport.querySelector(".menu-pane");
+        const next = makePane(nextView);
+        const previousHeight = previous.offsetHeight;
+
+        next.style.visibility = "hidden";
+        viewport.appendChild(next);
+        const nextHeight = next.offsetHeight;
+        next.style.visibility = "";
+        next.classList.add("is-animating");
+        previous.classList.add("is-animating");
+        viewport.style.height = `${previousHeight}px`;
+
+        state.animating = true;
+        requestAnimationFrame(() => {
+          viewport.style.height = `${nextHeight}px`;
+          const frames = preset.frames(direction);
+          const timing = {
+            duration: preset.duration,
+            easing: preset.easing,
+            fill: "forwards",
+          };
+
+          const incoming = next.animate(frames.enter, timing);
+          const outgoing = previous.animate(frames.exit, timing);
+
+          Promise.all([incoming.finished, outgoing.finished]).then(() => {
+            previous.remove();
+            next.classList.remove("is-animating");
+            next.getAnimations().forEach((animation) => animation.cancel());
+            viewport.style.height = "";
+            state.view = nextView;
+            state.animating = false;
+          });
+        });
+      }
+
+      function replay(target) {
+        if (state.animating) return;
+        renderStatic("root");
+        window.setTimeout(() => transitionTo(target, 1), 80);
+      }
+
+      presetList.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-preset]");
+        if (!button) return;
+        state.activePreset = presets.find((preset) => preset.id === button.dataset.preset) || presets[0];
+        renderPresets();
+        renderDetails();
+        replay("models");
+      });
+
+      viewport.addEventListener("click", (event) => {
+        const targetButton = event.target.closest("[data-target]");
+        const backButton = event.target.closest("[data-back]");
+        if (targetButton) transitionTo(targetButton.dataset.target, 1);
+        if (backButton) transitionTo("root", -1);
+      });
+
+      document.querySelector("#triggerModels").addEventListener("click", () => replay("models"));
+      document.querySelector("#replayModels").addEventListener("click", () => replay("models"));
+      document.querySelector("#replayThinking").addEventListener("click", () => replay("thinking"));
+      document.querySelector("#resetMenu").addEventListener("click", () => renderStatic("root"));
+
+      renderPresets();
+      renderDetails();
+      renderStatic("root");
+      window.setTimeout(() => replay("models"), 300);
+    </script>
+  </body>
+</html>
