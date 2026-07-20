@@ -169,15 +169,18 @@ export async function executePptStudioRun(run: typeof schema.skillRuns.$inferSel
           slides: z
             .array(
               z.object({
-                layout: z.string(),
-                props: z.record(z.string(), z.unknown()),
+                propsJson: z
+                  .string()
+                  .min(2)
+                  .max(50_000)
+                  .describe("当前页面 props 的严格 JSON 对象字符串"),
               })
             )
             .length(chunkOutline.length),
         }),
         prompt: [
-          "根据页面大纲和 Dashi 字段契约填写每页 props。",
-          "layout 必须逐项使用给定 layout；只写 fillPlan/propShapes 允许的文案、数组和公开 count 字段，不写样式字段。",
+          "根据页面大纲和 Dashi 字段契约填写每页 propsJson。每个 propsJson 必须是可被 JSON.parse 解析的对象字符串，并与指定 layouts 按下标一一对应。",
+          "只写 fillPlan/propShapes 允许的文案、数组和公开 count 字段，不写样式字段。",
           "严格遵守 maxChars，所有可见示例文案都要替换。数字和事实只能来自用户主题与补充要求，不得编造来源。",
           `语言：${brief.language}。`,
           `页面大纲：${JSON.stringify(chunkOutline)}`,
@@ -190,7 +193,10 @@ export async function executePptStudioRun(run: typeof schema.skillRuns.$inferSel
       usage.inputTokens += filled.usage.inputTokens ?? 0;
       usage.outputTokens += filled.usage.outputTokens ?? 0;
       filled.object.slides.forEach((slide, index) => {
-        slides.push({ layout: chunkLayouts[index], props: slide.props });
+        slides.push({
+          layout: chunkLayouts[index],
+          props: parsePropsJson(slide.propsJson),
+        });
       });
       await updateSkillRun(run.id, {
         stage: `填写页面内容（${Math.min(start + 5, outline.length)}/${outline.length}）`,
@@ -269,7 +275,7 @@ async function chooseLayouts(
   imageHeavy: boolean
 ) {
   const roles = Array.from(new Set(outline.map((slide) => slide.role)));
-  const candidates = new Map<string, string[]>();
+  const candidates = new Map<string, DashiLayoutCandidate[]>();
   await Promise.all(
     roles.map(async (role) => {
       const result = await queryDashiLayouts(skill, {
@@ -278,28 +284,90 @@ async function chooseLayouts(
         limit: 12,
         needsMedia: imageHeavy && (role === "image" || role === "case" || role === "ambient"),
       });
-      candidates.set(role, layoutIds(result));
+      candidates.set(role, layoutCandidates(result));
     })
   );
-  const used = new Set<string>();
-  return outline.map((slide) => {
-    const selected = (candidates.get(slide.role) ?? []).find((layout) => !used.has(layout));
-    if (!selected) throw new Error(`Dashi 主题 ${theme} 没有足够的「${slide.role}」唯一版式`);
-    used.add(selected);
-    return selected;
-  });
+  const options = outline.map((slide) =>
+    (candidates.get(slide.role) ?? [])
+      .filter((candidate) =>
+        slide.role === "cover"
+          ? candidate.roles.includes("cover") || candidate.slot.startsWith("cover")
+          : !candidate.roles.includes("cover") && !candidate.slot.startsWith("cover")
+      )
+      .map((candidate) => candidate.layout)
+  );
+  const assignment = matchUniqueLayouts(options);
+  const missingIndex = assignment.findIndex((layout) => !layout);
+  if (missingIndex >= 0) {
+    throw new Error(
+      `Dashi 主题 ${theme} 没有足够的「${outline[missingIndex].role}」唯一版式`
+    );
+  }
+  return assignment as string[];
 }
 
-function layoutIds(value: unknown): string[] {
+/**
+ * Dashi 版式可声明多个角色。简单按页贪心会先占用后续页面唯一可用的版式，
+ * 因此用稳定的二分匹配寻找「页面 -> 唯一版式」组合。
+ */
+function matchUniqueLayouts(options: string[][]) {
+  const slideByLayout = new Map<string, number>();
+  const slideOrder = options
+    .map((layouts, index) => ({ index, count: layouts.length }))
+    .sort((left, right) => left.count - right.count || left.index - right.index);
+
+  const assign = (slideIndex: number, seen: Set<string>): boolean => {
+    for (const layout of options[slideIndex]) {
+      if (seen.has(layout)) continue;
+      seen.add(layout);
+      const previousSlide = slideByLayout.get(layout);
+      if (previousSlide !== undefined && !assign(previousSlide, seen)) continue;
+      slideByLayout.set(layout, slideIndex);
+      return true;
+    }
+    return false;
+  };
+
+  for (const slide of slideOrder) assign(slide.index, new Set());
+  const assignedBySlide: Array<string | undefined> = Array(options.length);
+  for (const [layout, slideIndex] of slideByLayout) {
+    assignedBySlide[slideIndex] = layout;
+  }
+  return assignedBySlide;
+}
+
+type DashiLayoutCandidate = {
+  layout: string;
+  roles: string[];
+  slot: string;
+};
+
+function layoutCandidates(value: unknown): DashiLayoutCandidate[] {
   if (!value || typeof value !== "object") return [];
   const layouts = (value as { layouts?: unknown }).layouts;
   if (!Array.isArray(layouts)) return [];
   return layouts.flatMap((item) => {
     if (!item || typeof item !== "object") return [];
-    const layout = (item as { layout?: unknown }).layout;
-    return typeof layout === "string" && /^theme\d{2}_page\d{3}$/u.test(layout)
-      ? [layout]
-      : [];
+    const candidate = item as {
+      layout?: unknown;
+      roles?: unknown;
+      slot?: unknown;
+    };
+    if (
+      typeof candidate.layout !== "string" ||
+      !/^theme\d{2}_page\d{3}$/u.test(candidate.layout)
+    ) {
+      return [];
+    }
+    return [
+      {
+        layout: candidate.layout,
+        roles: Array.isArray(candidate.roles)
+          ? candidate.roles.filter((role): role is string => typeof role === "string")
+          : [],
+        slot: typeof candidate.slot === "string" ? candidate.slot.toLowerCase() : "",
+      },
+    ];
   });
 }
 
@@ -347,6 +415,19 @@ function parseBrief(input: Record<string, unknown>) {
   const parsed = schema.safeParse(input);
   if (!parsed.success) throw new Error("PPT 工作室需求信息不完整，请重新填写");
   return parsed.data;
+}
+
+function parsePropsJson(value: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("模型返回的 Dashi 页面字段不是有效 JSON，请重试");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("模型返回的 Dashi 页面字段必须是 JSON 对象，请重试");
+  }
+  return parsed as Record<string, unknown>;
 }
 
 async function markCancelled(runId: string) {

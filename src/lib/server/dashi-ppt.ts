@@ -34,7 +34,11 @@ export interface DashiGoalSpec {
 const DATA_SKILLS_ROOT = path.resolve(process.cwd(), "data", "skills");
 const DATA_JOBS_ROOT = path.resolve(process.cwd(), "data", "dashi-jobs");
 const DATA_UPLOADS_ROOT = path.resolve(process.cwd(), "data", "uploads");
-const COMMAND_OUTPUT_LIMIT = 48_000;
+// inspect-layout 的紧凑 JSON 仍可能达到每页约 6–10 KiB。PPT 工作室一次
+// 最多检查 12 个版式，48 KiB 会把合法的结构化 stdout 当成日志风暴终止。
+// stdout 与 stderr 分开限额：前者容纳受信任脚本的 JSON，后者继续保持较低上限。
+const COMMAND_STDOUT_LIMIT = 512 * 1024;
+const COMMAND_STDERR_LIMIT = 128 * 1024;
 const QUERY_TIMEOUT_MS = 30_000;
 const RENDER_TIMEOUT_MS = 300_000;
 const DASHI_THEMES = new Set(Array.from({ length: 12 }, (_, i) => `theme${String(i + 1).padStart(2, "0")}`));
@@ -258,12 +262,19 @@ function runCommand(
 
     const collect = (chunk: Buffer, target: "stdout" | "stderr") => {
       const next = (target === "stdout" ? stdout : stderr) + chunk.toString("utf-8");
-      if (next.length > COMMAND_OUTPUT_LIMIT) {
+      const limit = target === "stdout" ? COMMAND_STDOUT_LIMIT : COMMAND_STDERR_LIMIT;
+      if (next.length > limit) {
         child.kill("SIGKILL");
         if (!settled) {
           settled = true;
           finish();
-          reject(new Error("Dashi PPT 运行日志过大，任务已终止"));
+          reject(
+            new Error(
+              target === "stdout"
+                ? "Dashi PPT 返回数据过大，任务已终止"
+                : "Dashi PPT 运行日志过大，任务已终止"
+            )
+          );
         }
         return;
       }
