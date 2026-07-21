@@ -1,7 +1,9 @@
 import crypto from "node:crypto";
+import { after } from "next/server";
 import { assertCanSpend, recordUsage } from "@/lib/server/billing";
 import { schema } from "@/lib/server/db";
 import { computeCostCents, resolveModel } from "@/lib/server/llm/registry";
+import { ensureSkillRunCompletionReceipt } from "@/lib/server/skill-run-completion-receipt";
 import {
   getSkillRunRecord,
   isSkillRunCancellationRequested,
@@ -25,6 +27,7 @@ export async function POST(
   if (!run) return Response.json({ error: "任务不存在" }, { status: 404 });
   if (run.cancelRequested) {
     await updateSkillRun(id, { status: "cancelled", stage: "已停止", progress: 100 });
+    scheduleCompletionReceipt(id);
     return Response.json({ ok: true, status: "cancelled" });
   }
   try {
@@ -33,26 +36,22 @@ export async function POST(
         "@/lib/server/research/deep-research"
       );
       await executeDeepResearchRun(run);
-      return Response.json({ ok: true });
-    }
-    if (run.kind === "data-analysis") {
+    } else if (run.kind === "data-analysis") {
       const { executeDataAnalysisRun } = await import(
         "@/lib/server/data-analysis/data-analysis"
       );
       await executeDataAnalysisRun(run);
-      return Response.json({ ok: true });
-    }
-    if (run.kind === "ppt-studio") {
+    } else if (run.kind === "ppt-studio") {
       const { executePptStudioRun } = await import(
         "@/lib/server/ppt-studio/ppt-studio"
       );
       await executePptStudioRun(run);
-      return Response.json({ ok: true });
-    }
-    if (run.kind !== "subagent-batch") {
+    } else if (run.kind === "subagent-batch") {
+      await executeSubagentBatch(run);
+    } else {
       throw new Error(`尚未注册 Skill 执行器：${run.kind}`);
     }
-    await executeSubagentBatch(run);
+    scheduleCompletionReceipt(id);
     return Response.json({ ok: true });
   } catch (error) {
     const message = error instanceof Error ? error.message.slice(0, 2_000) : "Skill 执行失败";
@@ -67,10 +66,12 @@ export async function POST(
         progress: 100,
         error: null,
       });
+      scheduleCompletionReceipt(id);
       return Response.json({ ok: true, status: "cancelled" });
     }
     await settleRunningSkillRunSteps(id, "failed", message);
     await updateSkillRun(id, { status: "failed", stage: "执行失败", error: message });
+    scheduleCompletionReceipt(id);
     return Response.json({ error: message }, { status: 500 });
   }
 }
@@ -171,4 +172,8 @@ function validWorkerSecret(authorization: string | null) {
   const left = Buffer.from(expected);
   const right = Buffer.from(provided);
   return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
+function scheduleCompletionReceipt(runId: string) {
+  after(() => ensureSkillRunCompletionReceipt(runId));
 }

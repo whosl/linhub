@@ -19,7 +19,9 @@ import {
   XCircleIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import type { Message } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { useChatStore } from "@/stores/chat-store";
 
 export type SkillRunStatus =
   | "pending"
@@ -58,6 +60,7 @@ export interface SkillRunAttachment {
 
 export interface SkillRun {
   id: string;
+  conversationId?: string;
   skillName: string;
   status: SkillRunStatus;
   stageLabel?: string;
@@ -68,6 +71,8 @@ export interface SkillRun {
   error?: string;
   sourceCount?: number;
   durationMs?: number;
+  completionReceiptStatus?: "pending" | "generating" | "completed" | "failed";
+  completionMessage?: Message;
 }
 
 export interface SkillRunCardProps {
@@ -124,13 +129,25 @@ export function SkillRunLiveCard({
     (revision: number) => revision + 1,
     0
   );
+  const upsertBackgroundMessage = useChatStore(
+    (state) => state.upsertBackgroundMessage
+  );
+  const applySnapshot = React.useCallback(
+    (nextRun: SkillRun) => {
+      setRun(nextRun);
+      if (nextRun.conversationId && nextRun.completionMessage) {
+        upsertBackgroundMessage(nextRun.conversationId, nextRun.completionMessage);
+      }
+    },
+    [upsertBackgroundMessage]
+  );
   const refresh = React.useCallback(async () => {
     const response = await fetch(`/api/skill-runs/${encodeURIComponent(runId)}`, {
       cache: "no-store",
     });
     if (!response.ok) throw new Error("无法读取 Skill 任务");
-    setRun((await response.json()) as SkillRun);
-  }, [runId]);
+    applySnapshot((await response.json()) as SkillRun);
+  }, [applySnapshot, runId]);
 
   React.useEffect(() => {
     let disposed = false;
@@ -143,10 +160,14 @@ export function SkillRunLiveCard({
         const nextRun = JSON.parse(
           (event as MessageEvent<string>).data
         ) as SkillRun;
-        setRun(nextRun);
+        applySnapshot(nextRun);
         // EventSource 会在服务端正常关闭后自动重连。终态任务无需继续订阅，
         // 否则每张历史任务卡都会永久产生 SSE + 快照请求。
-        if (isTerminalSkillRunStatus(nextRun.status)) {
+        if (
+          isTerminalSkillRunStatus(nextRun.status) &&
+          (nextRun.completionReceiptStatus === "completed" ||
+            nextRun.completionReceiptStatus === "failed")
+        ) {
           disposed = true;
           source.close();
         }
@@ -162,7 +183,7 @@ export function SkillRunLiveCard({
       disposed = true;
       source.close();
     };
-  }, [refresh, runId, streamRevision]);
+  }, [applySnapshot, refresh, runId, streamRevision]);
 
   return (
     <SkillRunCard

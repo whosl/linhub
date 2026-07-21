@@ -295,6 +295,18 @@ export const skillRuns = pgTable(
     input: jsonb("input").$type<Record<string, unknown>>().notNull().default({}),
     result: jsonb("result").$type<Record<string, unknown>>(),
     error: text("error"),
+    /** 同一 Skill Run 每次重试都会递增，用于生成稳定且不重复的完成回执消息。 */
+    runAttempt: integer("run_attempt").notNull().default(1),
+    completionReceiptStatus: text("completion_receipt_status", {
+      enum: ["pending", "generating", "completed", "failed"],
+    })
+      .notNull()
+      .default("pending"),
+    completionMessageId: text("completion_message_id").references(() => messages.id, {
+      onDelete: "set null",
+    }),
+    completionReceiptError: text("completion_receipt_error"),
+    completionReceiptUpdatedAt: timestamp("completion_receipt_updated_at"),
     cancelRequested: boolean("cancel_requested").notNull().default(false),
     leaseOwner: text("lease_owner"),
     leaseExpiresAt: timestamp("lease_expires_at"),

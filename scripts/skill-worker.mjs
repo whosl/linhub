@@ -61,6 +61,16 @@ while (!stopping) {
           completed_at = now(), updated_at = now()
         where id = ${run.id} and status not in ('completed', 'cancelled')
       `;
+      // execute route 在正常失败路径会自行生成回执；这里覆盖网络中断、进程退出等
+      // route 未能收尾的情况。服务端用 runAttempt 做幂等，不会重复生成消息。
+      await fetch(
+        `${appUrl}/api/internal/skill-runs/${encodeURIComponent(run.id)}/receipt`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${workerSecret}` },
+          signal: AbortSignal.timeout(30_000),
+        }
+      ).catch(() => undefined);
     }
   } catch (error) {
     console.error("skill_worker_error", error instanceof Error ? error.message : String(error));

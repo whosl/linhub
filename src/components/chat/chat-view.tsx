@@ -21,6 +21,7 @@ import type {
 import { optimisticPatchRecords } from "@/lib/optimistic-query";
 import {
   deepestLeaf,
+  isSkillRunReceiptMessage,
   useChatStore,
   visibleThread,
 } from "@/stores/chat-store";
@@ -938,7 +939,11 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
   // ---- 分支信息 ----
   const branchInfo = (messageId: string, parentId: string | null): BranchInfo | undefined => {
     if (!session) return undefined;
-    const siblings = session.messages.filter((m) => m.parentId === parentId);
+    const current = session.messages.find((message) => message.id === messageId);
+    if (current && isSkillRunReceiptMessage(current)) return undefined;
+    const siblings = session.messages.filter(
+      (m) => m.parentId === parentId && !isSkillRunReceiptMessage(m)
+    );
     if (siblings.length <= 1) return undefined;
     const index = siblings.findIndex((m) => m.id === messageId);
     return {
@@ -1141,7 +1146,9 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
                   models={defaultableChatModels}
                   branch={isStreaming ? undefined : branchInfo(m.id, m.parentId)}
                   onRegenerate={
-                    m.role === "assistant" && !isStreaming
+                    m.role === "assistant" &&
+                    !isStreaming &&
+                    !isSkillRunReceiptMessage(m)
                       ? (modelId) => handleRegenerate(m.id, modelId)
                       : undefined
                   }
@@ -1156,7 +1163,7 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
                       : undefined
                   }
                   onFeedback={
-                    m.role === "assistant"
+                    m.role === "assistant" && !isSkillRunReceiptMessage(m)
                       ? (fb) => void setFeedback(conversationId, m.id, fb)
                       : undefined
                   }

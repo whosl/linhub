@@ -14,12 +14,13 @@ function escapeIlike(s: string): string {
 }
 
 function deepestLeaf(
-  messages: { id: string; parentId: string | null }[],
+  messages: { id: string; parentId: string | null; parts: unknown[] }[],
   rootId: string
 ) {
   let current = rootId;
   const childrenByParent = new Map<string | null, { id: string }[]>();
   for (const message of messages) {
+    if (isSkillRunReceiptParts(message.parts)) continue;
     const children = childrenByParent.get(message.parentId) ?? [];
     children.push(message);
     childrenByParent.set(message.parentId, children);
@@ -29,6 +30,15 @@ function deepestLeaf(
     if (children.length === 0) return current;
     current = children[children.length - 1].id;
   }
+}
+
+function isSkillRunReceiptParts(parts: unknown[]) {
+  return parts.some(
+    (part) =>
+      Boolean(part) &&
+      typeof part === "object" &&
+      (part as Record<string, unknown>).type === "skill-run-receipt"
+  );
 }
 
 export async function GET(req: NextRequest) {
@@ -120,6 +130,7 @@ export async function GET(req: NextRequest) {
         id: schema.messages.id,
         conversationId: schema.messages.conversationId,
         parentId: schema.messages.parentId,
+        parts: schema.messages.parts,
         createdAt: schema.messages.createdAt,
       })
       .from(schema.messages)
@@ -127,13 +138,14 @@ export async function GET(req: NextRequest) {
       .orderBy(schema.messages.createdAt);
     const messagesByConversation = new Map<
       string,
-      { id: string; parentId: string | null }[]
+      { id: string; parentId: string | null; parts: unknown[] }[]
     >();
     for (const message of messages) {
       const list = messagesByConversation.get(message.conversationId) ?? [];
       list.push({
         id: message.id,
         parentId: message.parentId,
+        parts: message.parts,
       });
       messagesByConversation.set(message.conversationId, list);
     }

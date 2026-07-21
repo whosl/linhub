@@ -61,6 +61,8 @@ interface ChatState {
     newUrl: string,
     editPrompt?: string
   ) => Promise<void>;
+  /** Skill Run 等后台卡片完成后，把服务端持久化的助手回执同步进当前会话。 */
+  upsertBackgroundMessage: (conversationId: string, message: Message) => void;
   removeSession: (conversationId: string) => void;
   clearRedirect: () => void;
 }
@@ -89,13 +91,29 @@ export function visibleThread(
     chain.unshift(cur);
     cur = cur.parentId ? byId.get(cur.parentId) : undefined;
   }
-  return chain;
+  // 后台任务回执是信息流事件，不应该抢占 currentLeaf 或成为普通对话分支。
+  // 只要它关联的卡片消息位于当前分支，就按实际完成时间插入可见信息流。
+  const chainIds = new Set(chain.map((message) => message.id));
+  const receipts = messages.filter(
+    (message) =>
+      !chainIds.has(message.id) &&
+      isSkillRunReceiptMessage(message) &&
+      Boolean(message.parentId && chainIds.has(message.parentId))
+  );
+  return [...chain, ...receipts].sort(
+    (left, right) =>
+      new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime()
+  );
+}
+
+export function isSkillRunReceiptMessage(message: Message) {
+  return message.parts.some((part) => part.type === "skill-run-receipt");
 }
 
 /** 找到某消息子树中最新的叶子 */
 export function deepestLeaf(messages: Message[], rootId: string): string {
   const children = (id: string) =>
-    messages.filter((m) => m.parentId === id);
+    messages.filter((m) => m.parentId === id && !isSkillRunReceiptMessage(m));
   let cur = rootId;
   for (;;) {
     const kids = children(cur);
@@ -601,6 +619,13 @@ export const useChatStore = create<ChatState>((set, get) => {
     startError: undefined,
 
     clearRedirect: () => set({ pendingRedirect: null }),
+
+    upsertBackgroundMessage: (conversationId, message) => {
+      updateSession(conversationId, (session) => ({
+        ...session,
+        messages: upsertMessage(session.messages, message),
+      }));
+    },
 
     removeSession: (conversationId) => {
       bumpSessionVersion(conversationId);

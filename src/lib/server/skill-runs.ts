@@ -8,6 +8,7 @@ import type {
   SkillRunSnapshot,
   SkillRunStatus,
   SkillRunStepStatus,
+  MessagePart,
 } from "@/lib/types";
 
 let tablesReady = false;
@@ -29,6 +30,11 @@ export async function ensureSkillRunTables() {
       input jsonb not null default '{}'::jsonb,
       result jsonb,
       error text,
+      run_attempt integer not null default 1,
+      completion_receipt_status text not null default 'pending',
+      completion_message_id text references messages(id) on delete set null,
+      completion_receipt_error text,
+      completion_receipt_updated_at timestamp,
       cancel_requested boolean not null default false,
       lease_owner text,
       lease_expires_at timestamp,
@@ -68,6 +74,11 @@ export async function ensureSkillRunTables() {
       created_at timestamp not null default now()
     );
     create index if not exists skill_run_event_cursor_idx on skill_run_events(run_id, sequence);
+    alter table skill_runs add column if not exists run_attempt integer not null default 1;
+    alter table skill_runs add column if not exists completion_receipt_status text not null default 'pending';
+    alter table skill_runs add column if not exists completion_message_id text references messages(id) on delete set null;
+    alter table skill_runs add column if not exists completion_receipt_error text;
+    alter table skill_runs add column if not exists completion_receipt_updated_at timestamp;
   `);
   tablesReady = true;
 }
@@ -299,6 +310,11 @@ export async function resetSkillRun(runId: string, ownerId: string) {
       progress: 0,
       error: null,
       result: null,
+      runAttempt: sql`${schema.skillRuns.runAttempt} + 1`,
+      completionReceiptStatus: "pending",
+      completionMessageId: null,
+      completionReceiptError: null,
+      completionReceiptUpdatedAt: null,
       cancelRequested: false,
       leaseOwner: null,
       leaseExpiresAt: null,
@@ -405,6 +421,18 @@ export async function getSkillRunSnapshot(runId: string, ownerId?: string) {
       })
     : [];
   const sourceCount = steps.reduce((sum, step) => sum + step.sourceCount, 0);
+  const [completionMessage] = run.completionMessageId
+    ? await db
+        .select()
+        .from(schema.messages)
+        .where(
+          and(
+            eq(schema.messages.id, run.completionMessageId),
+            eq(schema.messages.conversationId, run.conversationId)
+          )
+        )
+        .limit(1)
+    : [];
   return {
     id: run.id,
     conversationId: run.conversationId,
@@ -433,6 +461,21 @@ export async function getSkillRunSnapshot(runId: string, ownerId?: string) {
     })),
     resultAttachments: attachments,
     sourceCount,
+    completionReceiptStatus: run.completionReceiptStatus,
+    completionMessageId: run.completionMessageId ?? undefined,
+    completionMessage: completionMessage
+      ? {
+          id: completionMessage.id,
+          conversationId: completionMessage.conversationId,
+          parentId: completionMessage.parentId,
+          role: completionMessage.role,
+          parts: completionMessage.parts as MessagePart[],
+          modelId: completionMessage.modelId ?? undefined,
+          createdAt: completionMessage.createdAt.toISOString(),
+          status: completionMessage.status,
+          usage: completionMessage.usage ?? undefined,
+        }
+      : undefined,
     error: run.error ?? undefined,
     startedAt: run.startedAt?.toISOString(),
     completedAt: run.completedAt?.toISOString(),

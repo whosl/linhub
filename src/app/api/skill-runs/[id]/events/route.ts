@@ -1,4 +1,5 @@
 import { requireSession } from "@/lib/server/auth";
+import { ensureSkillRunCompletionReceipt } from "@/lib/server/skill-run-completion-receipt";
 import { getSkillRunSnapshot, listSkillRunEvents } from "@/lib/server/skill-runs";
 
 export const maxDuration = 300;
@@ -42,7 +43,27 @@ export async function GET(
           const snapshot = await getSkillRunSnapshot(id, session.user.id);
           if (!snapshot) break;
           if (events.length > 0) send("snapshot", snapshot);
-          if (["completed", "failed", "cancelled"].includes(snapshot.status)) break;
+          const terminal = ["completed", "failed", "cancelled"].includes(snapshot.status);
+          if (
+            terminal &&
+            (snapshot.completionReceiptStatus === "pending" ||
+              snapshot.completionReceiptStatus === "failed")
+          ) {
+            await ensureSkillRunCompletionReceipt(id);
+            const completedSnapshot = await getSkillRunSnapshot(id, session.user.id);
+            if (completedSnapshot) send("snapshot", completedSnapshot);
+            if (
+              completedSnapshot &&
+              ["completed", "failed"].includes(completedSnapshot.completionReceiptStatus)
+            ) {
+              break;
+            }
+          } else if (
+            terminal &&
+            ["completed", "failed"].includes(snapshot.completionReceiptStatus)
+          ) {
+            break;
+          }
           send("ping", { at: Date.now() });
           await new Promise((resolve) => setTimeout(resolve, 750));
         }

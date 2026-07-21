@@ -271,6 +271,13 @@ export interface SkillRunPart {
   skillName: string;
 }
 
+/** 后台卡片任务完成后生成的独立助手回执；仅用于消息树与幂等关联。 */
+export interface SkillRunReceiptPart {
+  type: "skill-run-receipt";
+  runId: string;
+  runAttempt: number;
+}
+
 export type MessagePart =
   | TextPart
   | ReasoningPart
@@ -278,7 +285,8 @@ export type MessagePart =
   | ImagePart
   | FilePart
   | ToolConfigPart
-  | SkillRunPart;
+  | SkillRunPart
+  | SkillRunReceiptPart;
 
 export interface Message {
   id: string;
@@ -550,6 +558,9 @@ export interface SkillRunSnapshot {
   steps: SkillRunStep[];
   resultAttachments: SkillRunAttachment[];
   sourceCount: number;
+  completionReceiptStatus: "pending" | "generating" | "completed" | "failed";
+  completionMessageId?: string;
+  completionMessage?: Message;
   error?: string;
   startedAt?: string;
   completedAt?: string;

@@ -1,4 +1,6 @@
+import { after } from "next/server";
 import { requireSession } from "@/lib/server/auth";
+import { ensureSkillRunCompletionReceipt } from "@/lib/server/skill-run-completion-receipt";
 import {
   getSkillRunSnapshot,
   requestSkillRunCancellation,
@@ -33,6 +35,7 @@ export async function DELETE(
   }
   const { id } = await params;
   const ok = await requestSkillRunCancellation(id, session.user.id);
+  if (ok) after(() => ensureSkillRunCompletionReceipt(id));
   return ok
     ? Response.json({ ok: true })
     : Response.json({ error: "任务不存在" }, { status: 404 });
