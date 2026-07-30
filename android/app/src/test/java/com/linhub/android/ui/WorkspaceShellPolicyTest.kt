@@ -8,6 +8,42 @@ import org.junit.Test
 
 class WorkspaceShellPolicyTest {
     @Test
+    fun `streaming chat changes do not invalidate app host`() {
+        val initial = LinHubUiState(
+            draft = "第一帧",
+            quotedText = "引用",
+            startingNewConversation = true,
+        )
+
+        repeat(100) { frame ->
+            assertEquals(
+                appHostState(initial),
+                appHostState(
+                    initial.copy(
+                        draft = "流式帧 $frame",
+                        quotedText = null,
+                        startingNewConversation = false,
+                    ),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `global effects invalidate app host`() {
+        val initial = LinHubUiState()
+
+        assertNotEquals(
+            appHostState(initial),
+            appHostState(initial.copy(message = "操作完成")),
+        )
+        assertNotEquals(
+            appHostState(initial),
+            appHostState(initial.copy(pendingShareUrl = "https://example.com/share")),
+        )
+    }
+
+    @Test
     fun `streaming chat changes do not invalidate workspace shell`() {
         val initial = LinHubUiState(
             draft = "第一帧",

@@ -652,6 +652,78 @@ data class SaveSkillRequest(
 )
 
 @Serializable
+data class SkillRunStep(
+    val id: String,
+    val runId: String,
+    val parentStepId: String? = null,
+    val kind: String,
+    val label: String,
+    val status: String,
+    val progress: Int = 0,
+    val sourceCount: Int = 0,
+    val attempt: Int = 0,
+    val modelId: String? = null,
+    val error: String? = null,
+    val startedAt: String? = null,
+    val completedAt: String? = null,
+)
+
+@Serializable
+data class SkillRunAttachment(
+    val id: String,
+    val name: String,
+    val url: String? = null,
+    val mimeType: String? = null,
+    val sizeBytes: Long? = null,
+)
+
+@Serializable
+data class SkillRunSnapshot(
+    val id: String,
+    val conversationId: String,
+    val messageId: String? = null,
+    val skillId: String? = null,
+    val kind: String,
+    val skillName: String,
+    val status: String,
+    val stageLabel: String,
+    val progress: Int = 0,
+    val input: JsonObject = JsonObject(emptyMap()),
+    val steps: List<SkillRunStep> = emptyList(),
+    val resultAttachments: List<SkillRunAttachment> = emptyList(),
+    val sourceCount: Int = 0,
+    val completionReceiptStatus: String = "completed",
+    val completionMessageId: String? = null,
+    val completionMessage: ChatMessage? = null,
+    val error: String? = null,
+    val startedAt: String? = null,
+    val completedAt: String? = null,
+    val createdAt: String,
+    val updatedAt: String,
+)
+
+@Serializable
+data class PptStudioBriefRequest(
+    val topic: String,
+    val audience: String,
+    val pageCount: Int,
+    val theme: String,
+    val mediaPreference: String,
+    val language: String,
+    val outputFormat: String,
+    val additionalInstructions: String? = null,
+)
+
+@Serializable
+data class SkillPackageImportResult(
+    val ok: Boolean,
+    val skillId: String,
+    val name: String,
+    val digest: String,
+    val message: String,
+)
+
+@Serializable
 data class ChatToolToggles(
     val autoRouting: Boolean = false,
     val webSearch: Boolean = true,

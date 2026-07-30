@@ -2,7 +2,6 @@
 
 import * as React from "react";
 import {
-  AlertCircleIcon,
   BrainCircuitIcon,
   BrainIcon,
   ChevronDownIcon,
@@ -60,17 +59,12 @@ export function WorkProcessSummary({
         >
           {isStreaming ? (
             <Loader2Icon className="size-3.5 shrink-0 animate-spin" />
-          ) : errorCount > 0 ? (
-            <AlertCircleIcon className="size-3.5 shrink-0 text-destructive" />
           ) : (
             <BrainCircuitIcon className="size-3.5 shrink-0" />
           )}
           <span className={cn("truncate", isStreaming && "animate-thinking")}>
             {title}
           </span>
-          {errorCount > 0 && (
-            <span className="shrink-0 text-xs text-destructive">· {errorCount} 个失败</span>
-          )}
           <ChevronDownIcon className="size-3.5 shrink-0" />
         </button>
       </div>

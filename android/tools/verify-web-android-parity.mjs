@@ -129,6 +129,7 @@ const apiRouteCoverage = {
   "src/app/api/admin/settings/engine-test/route.ts": ["testAdminEngine"],
   "src/app/api/admin/settings/route.ts": ["adminSettings", "saveAdminSettings"],
   "src/app/api/admin/skills/route.ts": ["adminPendingSkills", "reviewAdminSkill"],
+  "src/app/api/admin/skills/import/route.ts": ["importAdminSkillPackage"],
   "src/app/api/admin/users/[id]/route.ts": [
     "adminUserDetail",
     "updateAdminSubscription",
@@ -163,6 +164,8 @@ const apiRouteCoverage = {
   ],
   "src/app/api/knowledge/[id]/route.ts": ["saveKnowledgeBase", "deleteKnowledgeBase"],
   "src/app/api/knowledge/route.ts": ["knowledgeBases", "saveKnowledgeBase"],
+  "src/app/api/internal/skill-runs/[id]/execute/route.ts": ["skillRun"],
+  "src/app/api/internal/skill-runs/[id]/receipt/route.ts": ["skillRun"],
   "src/app/api/ledger/route.ts": ["ledger"],
   "src/app/api/mcp/[id]/route.ts": ["saveMcpServer", "deleteMcpServer"],
   "src/app/api/mcp/[id]/test/route.ts": ["testMcpServer"],
@@ -188,6 +191,13 @@ const apiRouteCoverage = {
   "src/app/api/redeem/route.ts": ["redeemCode"],
   "src/app/api/skills/[id]/route.ts": ["skill", "saveSkill", "deleteSkill"],
   "src/app/api/skills/route.ts": ["skills", "saveSkill"],
+  "src/app/api/skill-runs/[id]/events/route.ts": ["skillRunEvents"],
+  "src/app/api/skill-runs/[id]/input/route.ts": ["submitPptStudioBrief"],
+  "src/app/api/skill-runs/[id]/route.ts": [
+    "skillRun",
+    "cancelSkillRun",
+    "retrySkillRun",
+  ],
   "src/app/api/styles/[id]/route.ts": ["deleteStyle"],
   "src/app/api/styles/route.ts": ["styles", "saveStyle"],
   "src/app/api/upload/chunked/[id]/[index]/route.ts": [
@@ -312,9 +322,17 @@ for (const [webMethod, androidMethod] of Object.entries(webToAndroid)) {
   if (!androidMethods.has(androidMethod)) {
     fail(`${webMethod} 对应的 LinHubApi.${androidMethod} 不存在`);
   }
+  if (!new RegExp(`\\bcontainer\\.api\\.${androidMethod}\\(`).test(destinations)) {
+    fail(
+      `${webMethod} 对应的 LinHubApi.${androidMethod} 只有声明，没有生产 ViewModel 调用`,
+    );
+  }
 }
 for (const method of androidOnlyCapabilities) {
   if (!androidMethods.has(method)) fail(`Android 扩展能力 LinHubApi.${method} 不存在`);
+  if (!new RegExp(`\\bcontainer\\.api\\.${method}\\(`).test(destinations)) {
+    fail(`Android 扩展能力 LinHubApi.${method} 只有声明，没有生产 ViewModel 调用`);
+  }
 }
 
 const discoveredPages = await listNamedFiles("src/app", "page.tsx");

@@ -50,6 +50,7 @@ import com.linhub.android.core.model.MemoryEntry
 import com.linhub.android.core.model.Model
 import com.linhub.android.core.model.Order
 import com.linhub.android.core.model.Plan
+import com.linhub.android.core.model.PptStudioBriefRequest
 import com.linhub.android.core.model.Project
 import com.linhub.android.core.model.ProjectFile
 import com.linhub.android.core.model.Provider
@@ -62,6 +63,7 @@ import com.linhub.android.core.model.SaveSkillRequest
 import com.linhub.android.core.model.SaveStyleRequest
 import com.linhub.android.core.model.SendMessageRequest
 import com.linhub.android.core.model.Skill
+import com.linhub.android.core.model.SkillRunSnapshot
 import com.linhub.android.core.model.ThemeMode
 import com.linhub.android.core.model.User
 import com.linhub.android.core.model.UploadedAttachment
@@ -83,6 +85,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asStateFlow
@@ -111,6 +114,36 @@ data class AppAppearance(
 internal fun appAppearance(state: LinHubUiState): AppAppearance = AppAppearance(
     themeMode = state.themeMode,
     fontSizePreset = state.fontSizePreset,
+)
+
+data class AppHostState(
+    val phase: AppPhase = AppPhase.Loading,
+    val authMode: AuthMode = AuthMode.SignIn,
+    val authSubmitting: Boolean = false,
+    val bootstrapError: String? = null,
+    val message: String? = null,
+    val pendingShareUrl: String? = null,
+    val pendingPaymentUrl: String? = null,
+    val mediaAssets: List<MediaAsset> = emptyList(),
+    val workspaceRefreshing: Boolean = false,
+    val isOffline: Boolean = false,
+    val sharedArtifact: Artifact? = null,
+    val sharedArtifactLoading: Boolean = false,
+)
+
+internal fun appHostState(state: LinHubUiState): AppHostState = AppHostState(
+    phase = state.phase,
+    authMode = state.authMode,
+    authSubmitting = state.authSubmitting,
+    bootstrapError = state.bootstrapError,
+    message = state.message,
+    pendingShareUrl = state.pendingShareUrl,
+    pendingPaymentUrl = state.pendingPaymentUrl,
+    mediaAssets = state.mediaAssets,
+    workspaceRefreshing = state.workspaceRefreshing,
+    isOffline = state.isOffline,
+    sharedArtifact = state.sharedArtifact,
+    sharedArtifactLoading = state.sharedArtifactLoading,
 )
 
 data class WorkspaceShellState(
@@ -341,6 +374,8 @@ class LinHubViewModel(
 ) : ViewModel() {
     private val _state = MutableStateFlow(LinHubUiState())
     val state = _state.asStateFlow()
+    private val _skillRunCardStates = MutableStateFlow<Map<String, SkillRunCardUiState>>(emptyMap())
+    val skillRunCardStates = _skillRunCardStates.asStateFlow()
     val appearance = state
         .map(::appAppearance)
         .distinctUntilChanged()
@@ -348,6 +383,22 @@ class LinHubViewModel(
             scope = viewModelScope,
             started = SharingStarted.Eagerly,
             initialValue = appAppearance(_state.value),
+        )
+    val appHost = state
+        .map(::appHostState)
+        .distinctUntilChanged()
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = appHostState(_state.value),
+        )
+    val workspaceShell = state
+        .map(::workspaceShellState)
+        .distinctUntilChanged()
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = workspaceShellState(_state.value),
         )
     private val streamJobs = mutableMapOf<String, Job>()
     private val clientGenerationIds = mutableMapOf<String, String>()
@@ -367,6 +418,10 @@ class LinHubViewModel(
     private var projectUploadJob: Job? = null
     private var knowledgeUploadJob: Job? = null
     private val knowledgePollJobs = mutableMapOf<String, Job>()
+    private val skillRunStreamJobs = mutableMapOf<String, Job>()
+    private val skillRunCacheLoadJobs = mutableMapOf<String, Job>()
+    private val skillRunCacheWriteJobs = mutableMapOf<String, Job>()
+    private val skillRunObserverCounts = mutableMapOf<String, Int>()
     private var speechJob: Job? = null
     private var cacheObserverJob: Job? = null
     private var preferenceObserverJob: Job? = null
@@ -384,6 +439,7 @@ class LinHubViewModel(
     private val pendingMessageImageEdits = ConcurrentHashMap<String, PendingMessageImageEdit>()
     private val messageImageEditGate = KeyedSingleFlightGate<String>()
     private val readRequestGate = KeyedSingleFlightGate<String>()
+    private val skillRunMutationGate = KeyedSingleFlightGate<String>()
     private val destinationLoadingTracker = ReferenceCountedLoadingTracker<WorkspaceDestination>()
     private val authMutationGate = SingleFlightMutationGate()
     private val skillsMutationGate = SingleFlightMutationGate()
@@ -405,6 +461,7 @@ class LinHubViewModel(
         const val PAYLOAD_BILLING = "billing"
         const val PAYLOAD_SETTINGS = "settings"
         const val PAYLOAD_ARTIFACTS_PREFIX = "artifacts:"
+        const val PAYLOAD_SKILL_RUN_PREFIX = "skill-run:"
         const val PENDING_MESSAGE_IMAGE_EDIT_PREFIX = "operation:message-image:"
         const val PAYLOAD_MEDIA_PREFIX = "media:"
         const val READ_PROJECTS = "read:projects"
@@ -418,6 +475,9 @@ class LinHubViewModel(
         const val CONVERSATIONS_TTL_MILLIS = 30_000L
         const val MODELS_TTL_MILLIS = 15 * 60_000L
         const val STREAM_CACHE_DEBOUNCE_MILLIS = 300L
+        const val SKILL_RUN_STREAM_RETRY_INITIAL_MILLIS = 750L
+        const val SKILL_RUN_STREAM_RETRY_MAX_MILLIS = 10_000L
+        const val SKILL_RUN_CACHE_DEBOUNCE_MILLIS = 180L
         const val WORKSPACE_PAYLOAD_TTL_MILLIS = 60_000L
         const val BILLING_PAYLOAD_TTL_MILLIS = 30_000L
         const val MEDIA_PAYLOAD_TTL_MILLIS = 30_000L
@@ -493,6 +553,11 @@ class LinHubViewModel(
         viewModelScope.coroutineContext.cancelChildren()
         streamJobs.values.forEach { it.cancel() }
         streamJobs.clear()
+        skillRunStreamJobs.clear()
+        skillRunCacheLoadJobs.clear()
+        skillRunCacheWriteJobs.clear()
+        skillRunObserverCounts.clear()
+        _skillRunCardStates.value = emptyMap()
         clientGenerationIds.clear()
         conversationRevisions.clear()
         cacheFlushJobs.values.forEach { it.cancel() }
@@ -4187,6 +4252,232 @@ class LinHubViewModel(
         }
     }
 
+    private fun updateSkillRunCardState(
+        id: String,
+        transform: (SkillRunCardUiState) -> SkillRunCardUiState,
+    ) {
+        _skillRunCardStates.update { states ->
+            val current = states[id] ?: SkillRunCardUiState()
+            val next = transform(current)
+            if (next == current) states else states + (id to next)
+        }
+    }
+
+    fun observeSkillRun(id: String) {
+        if (id.isBlank() || BuildConfig.BENCHMARK_ENABLED) return
+        skillRunObserverCounts[id] = skillRunObserverCounts.getOrDefault(id, 0) + 1
+        restoreCachedSkillRun(id)
+        ensureSkillRunStreaming(id)
+    }
+
+    fun skillRunCardState(id: String): Flow<SkillRunCardUiState> =
+        skillRunCardStates.selectSkillRunCardState(id)
+
+    fun stopObservingSkillRun(id: String) {
+        val next = skillRunObserverCounts.getOrDefault(id, 0) - 1
+        if (next > 0) {
+            skillRunObserverCounts[id] = next
+            return
+        }
+        skillRunObserverCounts.remove(id)
+        skillRunStreamJobs.remove(id)?.cancel()
+        updateSkillRunCardState(id) { it.copy(loading = false) }
+    }
+
+    fun refreshSkillRun(id: String) {
+        if (id.isBlank()) return
+        skillRunStreamJobs.remove(id)?.cancel()
+        ensureSkillRunStreaming(id, force = true)
+    }
+
+    fun cancelSkillRun(id: String) = mutateSkillRun(id) {
+        container.api.cancelSkillRun(id)
+        container.api.skillRun(id)
+    }
+
+    fun retrySkillRun(id: String) = mutateSkillRun(id) {
+        container.api.retrySkillRun(id)
+        container.api.skillRun(id)
+    }
+
+    fun submitPptStudioBrief(id: String, input: PptStudioBriefRequest) {
+        val normalized = input.copy(
+            topic = input.topic.trim(),
+            audience = input.audience.trim(),
+            pageCount = input.pageCount.coerceIn(3, 30),
+            additionalInstructions = input.additionalInstructions?.trim()?.takeIf(String::isNotEmpty),
+        )
+        if (normalized.topic.length < 2 || normalized.audience.isEmpty()) {
+            updateSkillRunCardState(id) { it.copy(error = "请填写演示主题和目标受众") }
+            return
+        }
+        mutateSkillRun(id) { container.api.submitPptStudioBrief(id, normalized) }
+    }
+
+    private fun ensureSkillRunStreaming(id: String, force: Boolean = false) {
+        if (!hasActiveSession()) return
+        val existing = _skillRunCardStates.value[id]?.snapshot
+        if (
+            !force && existing != null &&
+            isSettledSkillRun(existing.status, existing.completionReceiptStatus)
+        ) return
+        if (skillRunStreamJobs[id]?.isActive == true) return
+        if (existing == null) {
+            updateSkillRunCardState(id) { it.copy(loading = true, error = null) }
+        }
+        skillRunStreamJobs[id] = viewModelScope.launch {
+            val ownerJob = coroutineContext[Job]
+            var retryDelayMillis = SKILL_RUN_STREAM_RETRY_INITIAL_MILLIS
+            try {
+                while (
+                    hasActiveSession() &&
+                    skillRunObserverCounts.getOrDefault(id, 0) > 0
+                ) {
+                    var streamError: Throwable? = null
+                    try {
+                        container.api.skillRunEvents(id).collect { snapshot ->
+                            retryDelayMillis = SKILL_RUN_STREAM_RETRY_INITIAL_MILLIS
+                            publishSkillRunSnapshot(snapshot)
+                        }
+                    } catch (error: Throwable) {
+                        if (error is CancellationException) throw error
+                        if (handleUnauthorized(error)) return@launch
+                        streamError = error
+                    }
+
+                    val current = _skillRunCardStates.value[id]?.snapshot
+                    if (
+                        current != null &&
+                        isSettledSkillRun(current.status, current.completionReceiptStatus)
+                    ) break
+
+                    // SSE 在代理、网络切换或 290 秒服务端窗口后可能正常/异常结束。
+                    // 先做一次权威 GET，既补齐连接尾部事件，也给旧代理提供兼容降级。
+                    val recovery = runSuspendCatching { container.api.skillRun(id) }
+                    val recovered = recovery.getOrNull()
+                    if (recovered != null) {
+                        publishSkillRunSnapshot(recovered)
+                        if (isSettledSkillRun(recovered.status, recovered.completionReceiptStatus)) break
+                    } else {
+                        val recoveryError = recovery.exceptionOrNull()
+                        if (recoveryError != null && handleUnauthorized(recoveryError)) return@launch
+                        val visibleError = recoveryError ?: streamError
+                        if (visibleError != null) {
+                            updateSkillRunCardState(id) {
+                                it.copy(loading = false, error = visibleError.userMessage())
+                            }
+                        }
+                    }
+
+                    delay(retryDelayMillis)
+                    retryDelayMillis = nextSkillRunReconnectDelay(
+                        retryDelayMillis,
+                        SKILL_RUN_STREAM_RETRY_MAX_MILLIS,
+                    )
+                }
+            } finally {
+                if (skillRunStreamJobs[id] === ownerJob) skillRunStreamJobs.remove(id)
+            }
+        }
+    }
+
+    private fun restoreCachedSkillRun(id: String) {
+        if (
+            _skillRunCardStates.value[id]?.snapshot != null ||
+            skillRunCacheLoadJobs[id]?.isActive == true
+        ) return
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            val ownerJob = coroutineContext[Job]
+            try {
+                val cached = readCachedPayload<SkillRunSnapshot>("$PAYLOAD_SKILL_RUN_PREFIX$id")
+                updateSkillRunCardState(id) { state ->
+                    val selected = selectSkillRunSnapshot(
+                        expectedId = id,
+                        current = state.snapshot,
+                        cached = cached,
+                    ) ?: return@updateSkillRunCardState state
+                    state.copy(snapshot = selected, loading = false)
+                }
+            } finally {
+                if (skillRunCacheLoadJobs[id] === ownerJob) skillRunCacheLoadJobs.remove(id)
+            }
+        }
+        skillRunCacheLoadJobs[id] = job
+        job.start()
+    }
+
+    private fun mutateSkillRun(
+        id: String,
+        action: suspend () -> SkillRunSnapshot,
+    ) {
+        if (id.isBlank() || !skillRunMutationGate.tryAcquire(id)) return
+        skillRunStreamJobs.remove(id)?.cancel()
+        updateSkillRunCardState(id) { it.copy(mutating = true, error = null) }
+        viewModelScope.launch {
+            try {
+                runSuspendCatching(action)
+                    .onSuccess { snapshot ->
+                        publishSkillRunSnapshot(snapshot)
+                    }
+                    .onFailure { error ->
+                        if (handleUnauthorized(error)) return@onFailure
+                        updateSkillRunCardState(id) { it.copy(error = error.userMessage()) }
+                    }
+            } finally {
+                skillRunMutationGate.release(id)
+                updateSkillRunCardState(id) { it.copy(mutating = false) }
+                if (
+                    hasActiveSession() && skillRunObserverCounts.getOrDefault(id, 0) > 0
+                ) ensureSkillRunStreaming(id)
+            }
+        }
+    }
+
+    private fun publishSkillRunSnapshot(snapshot: SkillRunSnapshot) {
+        updateSkillRunCardState(snapshot.id) {
+            it.copy(snapshot = snapshot, loading = false, error = null)
+        }
+        snapshot.completionMessage?.let { completionMessage ->
+            _state.update { state ->
+                val existingTranscript = state.transcripts[snapshot.conversationId]
+                    ?: return@update state
+                state.copy(
+                    transcripts = state.transcripts + mapOf(
+                        snapshot.conversationId to existingTranscript.copy(
+                            messages = upsertSkillRunCompletionMessage(
+                                existingTranscript.messages,
+                                completionMessage,
+                            ),
+                        ),
+                    ),
+                )
+            }
+        }
+        if (snapshot.completionMessage != null) {
+            scheduleTranscriptCache(snapshot.conversationId, immediately = true)
+        }
+        scheduleSkillRunCache(snapshot)
+    }
+
+    private fun scheduleSkillRunCache(snapshot: SkillRunSnapshot) {
+        skillRunCacheWriteJobs.remove(snapshot.id)?.cancel()
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            val ownerJob = coroutineContext[Job]
+            try {
+                if (!snapshot.status.isTerminalSkillRunStatus()) {
+                    delay(SKILL_RUN_CACHE_DEBOUNCE_MILLIS)
+                }
+                writeCachedPayload("$PAYLOAD_SKILL_RUN_PREFIX${snapshot.id}", snapshot)
+            } finally {
+                if (skillRunCacheWriteJobs[snapshot.id] === ownerJob) {
+                    skillRunCacheWriteJobs.remove(snapshot.id)
+                }
+            }
+        }
+        skillRunCacheWriteJobs[snapshot.id] = job
+        job.start()
+    }
+
     fun showComposerError(message: String) = showMessage(message)
 
     fun onAppBackgrounded() {
@@ -4685,6 +4976,19 @@ class LinHubViewModel(
             ))
         }
         if (approve) "技能已通过" else "技能已拒绝"
+    }
+
+    fun importAdminSkillPackage(uri: Uri) = runAdminMutation {
+        val picked = withContext(Dispatchers.IO) {
+            container.readContent(uri, MAX_ADMIN_SKILL_PACKAGE_BYTES)
+        }
+        require(picked.name.endsWith(".zip", ignoreCase = true)) {
+            "请选择 .zip Skill 包"
+        }
+        val result = container.api.importAdminSkillPackage(picked.name, picked.bytes)
+        _state.update { it.copy(skillsLoaded = false) }
+        loadSkills(force = true)
+        result.message
     }
 
     fun saveAdminSettings(input: AdminSettingsPatch) = runAdminMutation {
@@ -6921,6 +7225,11 @@ class LinHubViewModel(
         viewModelScope.coroutineContext.cancelChildren()
         streamJobs.values.forEach(Job::cancel)
         streamJobs.clear()
+        skillRunStreamJobs.clear()
+        skillRunCacheLoadJobs.clear()
+        skillRunCacheWriteJobs.clear()
+        skillRunObserverCounts.clear()
+        _skillRunCardStates.value = emptyMap()
         clientGenerationIds.clear()
         cacheFlushJobs.values.forEach(Job::cancel)
         cacheFlushJobs.clear()
@@ -7163,6 +7472,7 @@ private const val FOREGROUND_REFRESH_THRESHOLD_MILLIS = 5_000L
 private const val FOREGROUND_DESTINATION_REFRESH_THRESHOLD_MILLIS = 30_000L
 private const val MAX_KNOWLEDGE_FILE_BYTES = 30 * 1024 * 1024
 private const val MAX_PROJECT_FILE_BYTES = 20 * 1024 * 1024
+private const val MAX_ADMIN_SKILL_PACKAGE_BYTES = 20 * 1024 * 1024
 private const val MAX_PROJECT_UPLOAD_COUNT = 20
 private const val MAX_KNOWLEDGE_UPLOAD_COUNT = 20
 private const val KNOWLEDGE_POLL_INTERVAL_MILLIS = 1_500L

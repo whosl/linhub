@@ -37,24 +37,12 @@ import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Psychology
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -78,6 +66,7 @@ import com.linhub.android.core.model.MemoryEntry
 import com.linhub.android.BuildConfig
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.linhub.android.ui.design.LinHubSwitch
 import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -372,7 +361,7 @@ private fun AccountSettings(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
-                            Switch(
+                            LinHubSwitch(
                                 checked = state.messageRailEnabled,
                                 onCheckedChange = onSetMessageRailEnabled,
                                 modifier = Modifier.scale(0.72f),
@@ -832,7 +821,7 @@ private fun McpSettings(
                                 overflow = TextOverflow.Ellipsis,
                             )
                         }
-                        Switch(
+                        LinHubSwitch(
                             checked = server.enabled,
                             onCheckedChange = { onToggle(server) },
                             enabled = !loading,

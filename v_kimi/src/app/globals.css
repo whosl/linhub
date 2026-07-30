@@ -1,0 +1,438 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ---------- v_kimi 设计系统:v1 暖色系 + 毛玻璃质感 ---------- */
+
+:root {
+  --font-geist-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  --font-geist-mono: ui-monospace, "SFMono-Regular", "SF Mono", Consolas,
+    "Liberation Mono", monospace;
+
+  /* 基底:奶油暖白(v1) */
+  --background: #faf9f5;
+  --foreground: #3d3929;
+  --card: #ffffff;
+  --card-foreground: #3d3929;
+  --popover: #ffffff;
+  --popover-foreground: #3d3929;
+
+  /* 主色:陶土橙(v1) */
+  --primary: #c96442;
+  --primary-foreground: #ffffff;
+
+  --secondary: #f0eee6;
+  --secondary-foreground: #535146;
+  --muted: #f0eee6;
+  --muted-foreground: #83827d;
+  --accent: #ebe9e0;
+  --accent-foreground: #3d3929;
+
+  --destructive: #c2410c;
+  --destructive-foreground: #ffffff;
+
+  --border: #e3e1d9;
+  --input: #e3e1d9;
+  --ring: #c96442;
+
+  /* 侧栏 */
+  --sidebar: #f5f4ee;
+  --sidebar-foreground: #535146;
+  --sidebar-accent: #e9e7dd;
+  --sidebar-border: #e3e1d9;
+
+  /* 聊天气泡 */
+  --bubble-user: #eee9df;
+  --bubble-user-foreground: #3d3929;
+
+  --success: #2f9e6e;
+  --warning: #d97706;
+
+  /* 毛玻璃 */
+  --glass-bg: rgb(255 255 255 / 0.7);
+  --glass-bg-strong: rgb(255 255 255 / 0.85);
+  --glass-border: rgb(255 255 255 / 0.65);
+  --glass-shadow: 0 8px 32px rgb(61 57 41 / 0.08);
+
+  /* 渐变与光晕(暖陶土) */
+  --gradient-brand: linear-gradient(120deg, #c96442, #d97757 55%, #e0927a);
+  --gradient-brand-soft: linear-gradient(120deg, #d98a6e, #e3a68d);
+  --glow-primary: 0 0 0 1px rgb(201 100 66 / 0.35), 0 0 24px rgb(201 100 66 / 0.22);
+
+  /* 环境光斑(暖色) */
+  --ambient-1: rgb(201 100 66 / 0.1);
+  --ambient-2: rgb(217 119 87 / 0.08);
+  --ambient-3: rgb(230 181 126 / 0.07);
+
+  /* 阴影层级(暖灰) */
+  --shadow-card: 0 1px 2px rgb(61 57 41 / 0.04), 0 4px 16px rgb(61 57 41 / 0.06);
+  --shadow-lift: 0 4px 8px rgb(61 57 41 / 0.05), 0 12px 32px rgb(61 57 41 / 0.1);
+
+  --radius: 0.75rem;
+}
+
+.dark {
+  --background: #262624;
+  --foreground: #eceae2;
+  --card: #30302e;
+  --card-foreground: #eceae2;
+  --popover: #30302e;
+  --popover-foreground: #eceae2;
+
+  --primary: #d97757;
+  --primary-foreground: #ffffff;
+
+  --secondary: #3a3a37;
+  --secondary-foreground: #c2c0b6;
+  --muted: #33332f;
+  --muted-foreground: #9c9a90;
+  --accent: #3e3e3a;
+  --accent-foreground: #eceae2;
+
+  --destructive: #e5674a;
+  --destructive-foreground: #ffffff;
+
+  --border: #3e3d38;
+  --input: #4a4945;
+  --ring: #d97757;
+
+  --sidebar: #1f1e1d;
+  --sidebar-foreground: #c2c0b6;
+  --sidebar-accent: #33322f;
+  --sidebar-border: #33322f;
+
+  --bubble-user: #3a3a35;
+  --bubble-user-foreground: #eceae2;
+
+  --success: #4ade80;
+  --warning: #fbbf24;
+
+  --glass-bg: rgb(38 38 36 / 0.65);
+  --glass-bg-strong: rgb(38 38 36 / 0.85);
+  --glass-border: rgb(255 255 255 / 0.08);
+  --glass-shadow: 0 8px 32px rgb(0 0 0 / 0.35);
+
+  --gradient-brand: linear-gradient(120deg, #d97757, #e08a68 55%, #e8a182);
+  --gradient-brand-soft: linear-gradient(120deg, #e09a7e, #e8b198);
+  --glow-primary: 0 0 0 1px rgb(217 119 87 / 0.45), 0 0 32px rgb(217 119 87 / 0.3);
+
+  --ambient-1: rgb(217 119 87 / 0.12);
+  --ambient-2: rgb(201 100 66 / 0.1);
+  --ambient-3: rgb(230 181 126 / 0.06);
+
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.25), 0 4px 16px rgb(0 0 0 / 0.22);
+  --shadow-lift: 0 4px 8px rgb(0 0 0 / 0.28), 0 12px 32px rgb(0 0 0 / 0.36);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-bubble-user: var(--bubble-user);
+  --color-bubble-user-foreground: var(--bubble-user-foreground);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 10px);
+
+  --font-sans: var(--font-geist-sans), "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", sans-serif;
+  --font-serif: "Georgia", "Songti SC", serif;
+  --font-mono: var(--font-geist-mono), "SF Mono", "Menlo", monospace;
+}
+
+* {
+  border-color: var(--border);
+}
+
+html {
+  height: 100%;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  height: 100%;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* ---------- 毛玻璃 ---------- */
+.glass {
+  background: var(--glass-bg);
+  backdrop-filter: blur(24px) saturate(1.3);
+  -webkit-backdrop-filter: blur(24px) saturate(1.3);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+}
+
+.glass-strong {
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(32px) saturate(1.5);
+  -webkit-backdrop-filter: blur(32px) saturate(1.5);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+}
+
+/* ---------- 渐变文字 / 品牌渐变 ---------- */
+.text-gradient {
+  background: var(--gradient-brand);
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+}
+
+.bg-brand {
+  background: var(--gradient-brand);
+}
+
+.bg-brand-soft {
+  background: var(--gradient-brand-soft);
+}
+
+/* 主按钮渐变 + 光晕 */
+.btn-brand {
+  background: var(--gradient-brand);
+  color: #fff;
+  box-shadow: 0 2px 8px rgb(201 100 66 / 0.32);
+  transition: box-shadow 0.25s ease, transform 0.15s ease, filter 0.2s ease;
+}
+.btn-brand:hover {
+  filter: brightness(1.06);
+  box-shadow: 0 4px 20px rgb(201 100 66 / 0.42);
+}
+.btn-brand:active {
+  transform: scale(0.97);
+}
+
+/* focus 发光描边 */
+.glow-focus:focus-within,
+.glow-focus:focus-visible {
+  box-shadow: var(--glow-primary);
+  border-color: transparent;
+  outline: none;
+}
+
+/* ---------- 卡片 ---------- */
+.card-elevated {
+  background: var(--card);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-card);
+  transition: box-shadow 0.25s ease, transform 0.25s ease, border-color 0.25s ease;
+}
+.card-elevated:hover {
+  box-shadow: var(--shadow-lift);
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--primary) 30%, var(--border));
+}
+
+/* ---------- 环境光背景 ---------- */
+.ambient-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+}
+.ambient-bg::before,
+.ambient-bg::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(90px);
+}
+.ambient-bg::before {
+  width: 55vw;
+  height: 55vw;
+  top: -18vw;
+  right: -12vw;
+  background: radial-gradient(circle, var(--ambient-1), transparent 65%);
+  animation: ambient-drift 26s ease-in-out infinite alternate;
+}
+.ambient-bg::after {
+  width: 45vw;
+  height: 45vw;
+  bottom: -14vw;
+  left: -10vw;
+  background: radial-gradient(circle, var(--ambient-2), transparent 65%);
+  animation: ambient-drift 32s ease-in-out infinite alternate-reverse;
+}
+
+@keyframes ambient-drift {
+  from {
+    transform: translate(0, 0) scale(1);
+  }
+  to {
+    transform: translate(-4vw, 3vw) scale(1.12);
+  }
+}
+
+/* ---------- 细滚动条 ---------- */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted-foreground) 25%, transparent);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--primary) 45%, transparent);
+}
+
+/* ---------- 文本选区 ---------- */
+::selection {
+  background: color-mix(in srgb, var(--primary) 25%, transparent);
+}
+
+/* ---------- 动效 ---------- */
+
+@keyframes lh-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes lh-pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@keyframes lh-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes lh-gradient-flow {
+  0%,
+  100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+@keyframes lh-breathe {
+  0%,
+  100% {
+    opacity: 0.6;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.04);
+  }
+}
+
+.animate-fade-up {
+  animation: lh-fade-up 0.4s cubic-bezier(0.21, 1.02, 0.73, 1) both;
+}
+
+/* 流动渐变(品牌文字/边框) */
+.animate-gradient {
+  background-size: 200% 200%;
+  animation: lh-gradient-flow 6s ease infinite;
+}
+
+/* 呼吸光晕 */
+.animate-breathe {
+  animation: lh-breathe 3s ease-in-out infinite;
+}
+
+/* 骨架屏 shimmer */
+.skeleton {
+  border-radius: var(--radius-md);
+  background: linear-gradient(
+    90deg,
+    var(--muted) 25%,
+    color-mix(in srgb, var(--muted) 40%, var(--foreground) 8%) 50%,
+    var(--muted) 75%
+  );
+  background-size: 200% 100%;
+  animation: lh-shimmer 1.6s linear infinite;
+}
+
+/* 思考中的呼吸文字 */
+.animate-thinking {
+  background: linear-gradient(
+    90deg,
+    var(--muted-foreground) 40%,
+    var(--foreground) 50%,
+    var(--muted-foreground) 60%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: lh-shimmer 2.2s linear infinite;
+}
+
+/* 流式输出末尾光标 */
+.streaming-cursor::after {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 15px;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  border-radius: 2px;
+  background: var(--gradient-brand);
+  animation: lh-pulse-soft 1s ease-in-out infinite;
+}
+
+/* 减少动态偏好 */
+@media (prefers-reduced-motion: reduce) {
+  .ambient-bg::before,
+  .ambient-bg::after,
+  .animate-gradient,
+  .animate-breathe {
+    animation: none;
+  }
+}

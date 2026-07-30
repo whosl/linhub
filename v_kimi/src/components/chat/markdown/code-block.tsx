@@ -1,0 +1,200 @@
+"use client";
+
+import * as React from "react";
+import {
+  CheckIcon,
+  ChevronDownIcon,
+  CopyIcon,
+  Loader2Icon,
+  PlayIcon,
+  XIcon,
+} from "lucide-react";
+import { cn } from "@/lib/utils";
+import { copyTextToClipboard } from "@/lib/clipboard";
+import { CopyFallbackDialog } from "@/components/ui/copy-fallback-dialog";
+import { codeToHtml } from "shiki";
+import { useTheme } from "next-themes";
+
+const COLLAPSE_THRESHOLD = 24; // 行数超过则可折叠
+
+export function CodeBlock({
+  language,
+  code,
+  showRunButton = true,
+}: {
+  language: string;
+  code: string;
+  showRunButton?: boolean;
+}) {
+  const { resolvedTheme } = useTheme();
+  const [html, setHtml] = React.useState<string | null>(null);
+  const [copied, setCopied] = React.useState(false);
+  const [manualCopyText, setManualCopyText] = React.useState<string | null>(null);
+  const lines = code.split("\n").length;
+  const collapsible = lines > COLLAPSE_THRESHOLD;
+  const [collapsed, setCollapsed] = React.useState(collapsible);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    codeToHtml(code, {
+      lang: language || "text",
+      theme: resolvedTheme === "dark" ? "vesper" : "github-light",
+    })
+      .then((out) => {
+        if (!cancelled) setHtml(out);
+      })
+      .catch(() => {
+        // 未知语言回退为纯文本
+        codeToHtml(code, {
+          lang: "text",
+          theme: resolvedTheme === "dark" ? "vesper" : "github-light",
+        }).then((out) => {
+          if (!cancelled) setHtml(out);
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [code, language, resolvedTheme]);
+
+  const copy = async () => {
+    try {
+      await copyTextToClipboard(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setManualCopyText(code);
+    }
+  };
+
+  const lang = language.toLowerCase();
+  const runnable =
+    showRunButton && ["python", "py", "javascript", "js", "html"].includes(lang);
+  const [running, setRunning] = React.useState(false);
+  const [output, setOutput] = React.useState<string | null>(null);
+  const [showHtmlPreview, setShowHtmlPreview] = React.useState(false);
+
+  const run = async () => {
+    if (running) return;
+    if (lang === "html") {
+      setShowHtmlPreview((v) => !v);
+      return;
+    }
+    setRunning(true);
+    setOutput(null);
+    try {
+      const runner = await import("@/lib/code-runner");
+      const result =
+        lang === "python" || lang === "py"
+          ? await runner.runPython(code)
+          : await runner.runJavaScript(code);
+      setOutput(result);
+    } catch (e) {
+      setOutput(`❌ ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <div className="group/code my-3 overflow-hidden rounded-xl border bg-card shadow-[var(--shadow-card)] dark:border-white/10 dark:bg-[#201f1c]">
+      <div className="flex h-9 items-center justify-between border-b bg-muted/50 pl-3.5 pr-1.5 dark:border-white/10 dark:bg-white/[0.03]">
+        <span className="flex items-center gap-2 font-mono text-xs text-muted-foreground">
+          <span className="size-1.5 rounded-full bg-primary/70" />
+          {language || "text"}
+        </span>
+        <div className="flex items-center gap-0.5">
+          {runnable && (
+            <button
+              onClick={run}
+              disabled={running}
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground transition-all hover:bg-accent hover:text-foreground active:scale-95 disabled:opacity-60"
+              title={lang === "html" ? "预览 HTML" : "在浏览器沙箱中运行"}
+            >
+              {running ? (
+                <Loader2Icon className="size-3 animate-spin" />
+              ) : (
+                <PlayIcon className="size-3" />
+              )}
+              {lang === "html" ? (showHtmlPreview ? "收起预览" : "预览") : "运行"}
+            </button>
+          )}
+          <button
+            onClick={copy}
+            className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground transition-all hover:bg-accent hover:text-foreground active:scale-95"
+          >
+            {copied ? (
+              <>
+                <CheckIcon className="size-3 text-success" /> 已复制
+              </>
+            ) : (
+              <>
+                <CopyIcon className="size-3" /> 复制
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+
+      <div
+        className={cn(
+          "relative overflow-x-auto text-[13px] leading-relaxed transition-all [&_pre]:!bg-transparent [&_pre]:p-3.5 [&_pre]:!outline-none",
+          collapsed && "max-h-[430px] overflow-y-hidden"
+        )}
+      >
+        {html ? (
+          <div dangerouslySetInnerHTML={{ __html: html }} />
+        ) : (
+          <pre className="p-3.5 font-mono">{code}</pre>
+        )}
+        {collapsed && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-card to-transparent dark:from-[#201f1c]" />
+        )}
+      </div>
+
+      {/* HTML 预览 */}
+      {showHtmlPreview && (
+        <iframe
+          srcDoc={code}
+          sandbox="allow-scripts"
+          className="h-72 w-full border-t bg-white"
+          title="HTML 预览"
+        />
+      )}
+
+      {/* 运行输出 */}
+      {output !== null && (
+        <div className="border-t">
+          <div className="flex items-center justify-between bg-muted/40 px-3.5 py-1">
+            <span className="text-[11px] font-medium text-muted-foreground">输出</span>
+            <button
+              onClick={() => setOutput(null)}
+              className="rounded p-0.5 text-muted-foreground hover:bg-accent"
+            >
+              <XIcon className="size-3" />
+            </button>
+          </div>
+          <pre className="max-h-56 overflow-auto whitespace-pre-wrap px-3.5 py-2.5 font-mono text-xs text-foreground/90">
+            {output}
+          </pre>
+        </div>
+      )}
+
+      {collapsible && (
+        <button
+          onClick={() => setCollapsed(!collapsed)}
+          className="flex w-full items-center justify-center gap-1 border-t py-1.5 text-xs text-muted-foreground transition-colors hover:bg-accent/60 dark:border-white/10"
+        >
+          <ChevronDownIcon
+            className={cn("size-3.5 transition-transform", !collapsed && "rotate-180")}
+          />
+          {collapsed ? `展开全部 ${lines} 行` : "收起"}
+        </button>
+      )}
+      <CopyFallbackDialog
+        text={manualCopyText}
+        onClose={() => setManualCopyText(null)}
+      />
+    </div>
+  );
+}

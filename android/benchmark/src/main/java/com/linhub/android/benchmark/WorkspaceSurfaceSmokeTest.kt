@@ -67,7 +67,7 @@ class WorkspaceSurfaceSmokeTest {
         clickScrollableTab("模型与计价", adminTabY, "添加模型")
         clickScrollableTab("套餐", adminTabY, "添加套餐")
         clickScrollableTab("用户", adminTabY, "benchmark@linhub.invalid")
-        clickScrollableTab("技能审核", adminTabY, "暂无待审核技能")
+        clickScrollableTab("技能审核", adminTabY, "导入 Skill 包")
         clickScrollableTab("系统设置", adminTabY, "站点与默认模型")
         clickScrollableTab("全局 MCP", adminTabY, "还没有全局 MCP 服务器。")
         clickScrollableTab("兑换码", adminTabY, "生成兑换码")

@@ -24,9 +24,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -37,7 +34,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusDirection
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.contentDescription
@@ -53,6 +49,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.linhub.android.R
+import com.linhub.android.ui.design.LinHubActionButton
+import com.linhub.android.ui.design.LinHubAmbientBackground
+import com.linhub.android.ui.design.LinHubPanel
+import com.linhub.android.ui.design.LinHubTextField
 
 /**
  * 登录与注册页直接复刻 Web AuthShell：同样的 384px 最大宽度、48px 品牌标、
@@ -71,18 +71,26 @@ fun AuthScreen(
     val focusManager = LocalFocusManager.current
     val signIn = mode == AuthMode.SignIn
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 16.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(
+    LinHubAmbientBackground(Modifier.fillMaxSize()) {
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .widthIn(max = 384.dp)
-                .animateContentSize(spring(stiffness = 500f)),
+                .fillMaxSize()
+                .padding(horizontal = 16.dp),
+            contentAlignment = Alignment.Center,
         ) {
+            LinHubPanel(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 384.dp),
+                cornerRadius = 28.dp,
+                padding = PaddingValues(horizontal = 24.dp, vertical = 26.dp),
+                shadow = 18.dp,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .animateContentSize(spring(stiffness = 500f)),
+                ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -156,34 +164,15 @@ fun AuthScreen(
                         },
                     ),
                 )
-                Button(
+                LinHubActionButton(
+                    text = if (signIn) "登录" else "注册",
                     onClick = { onSubmit(name, email, password) },
                     enabled = !submitting,
+                    loading = submitting,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(40.dp),
-                    shape = RoundedCornerShape(8.dp),
-                    contentPadding = PaddingValues(horizontal = 24.dp),
-                    elevation = ButtonDefaults.buttonElevation(
-                        defaultElevation = 1.dp,
-                        pressedElevation = 0.dp,
-                        disabledElevation = 0.dp,
-                    ),
-                ) {
-                    if (submitting) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.onPrimary,
-                        )
-                    } else {
-                        Text(
-                            text = if (signIn) "登录" else "注册",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium,
-                        )
-                    }
-                }
+                        .height(50.dp),
+                )
             }
 
             Row(
@@ -213,6 +202,8 @@ fun AuthScreen(
                     fontWeight = FontWeight.Medium,
                 )
             }
+                }
+            }
         }
     }
 }
@@ -227,58 +218,22 @@ private fun WebAuthField(
     keyboardActions: KeyboardActions,
     visualTransformation: VisualTransformation = VisualTransformation.None,
 ) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val focused by interactionSource.collectIsFocusedAsState()
-    val shape = RoundedCornerShape(8.dp)
-    val borderColor = if (focused) {
-        MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
-    } else {
-        MaterialTheme.colorScheme.outline
-    }
-    val textColor = if (enabled) {
-        MaterialTheme.colorScheme.onSurface
-    } else {
-        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-    }
-
-    BasicTextField(
+    LinHubTextField(
         value = value,
         onValueChange = onValueChange,
+        placeholder = placeholder,
         modifier = Modifier
             .fillMaxWidth()
-            .height(36.dp)
-            .background(MaterialTheme.colorScheme.surface, shape)
-            .border(1.dp, borderColor, shape)
-            .semantics { contentDescription = placeholder }
-            .padding(horizontal = 12.dp),
+            .height(52.dp),
         enabled = enabled,
         singleLine = true,
-        interactionSource = interactionSource,
         textStyle = TextStyle(
-            color = textColor,
-            fontSize = 14.sp,
-            lineHeight = 20.sp,
+            fontSize = 15.sp,
+            lineHeight = 22.sp,
         ),
-        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
         visualTransformation = visualTransformation,
         keyboardOptions = keyboardOptions,
         keyboardActions = keyboardActions,
-        decorationBox = { innerTextField ->
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.CenterStart,
-            ) {
-                if (value.isEmpty()) {
-                    Text(
-                        text = placeholder,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 14.sp,
-                        lineHeight = 20.sp,
-                    )
-                }
-                innerTextField()
-            }
-        },
     )
 }
 

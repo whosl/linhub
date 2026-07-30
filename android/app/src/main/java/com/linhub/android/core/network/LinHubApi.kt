@@ -37,6 +37,7 @@ import com.linhub.android.core.model.McpTestResponse
 import com.linhub.android.core.model.MemoryEntry
 import com.linhub.android.core.model.Order
 import com.linhub.android.core.model.Plan
+import com.linhub.android.core.model.PptStudioBriefRequest
 import com.linhub.android.core.model.Provider
 import com.linhub.android.core.model.Project
 import com.linhub.android.core.model.ProjectFile
@@ -59,6 +60,8 @@ import com.linhub.android.core.model.SignInRequest
 import com.linhub.android.core.model.SignUpRequest
 import com.linhub.android.core.model.ShareArtifactResponse
 import com.linhub.android.core.model.Skill
+import com.linhub.android.core.model.SkillPackageImportResult
+import com.linhub.android.core.model.SkillRunSnapshot
 import com.linhub.android.core.model.SubscriptionAdminRequest
 import com.linhub.android.core.model.TranscriptionResponse
 import com.linhub.android.core.model.User
@@ -834,6 +837,112 @@ class LinHubApi(
 
     suspend fun adminPendingSkills(): List<Skill> =
         executeJson(request("api/admin/skills").get().build())
+
+    suspend fun importAdminSkillPackage(
+        name: String,
+        bytes: ByteArray,
+    ): SkillPackageImportResult = executeJson(
+        request("api/admin/skills/import")
+            .post(
+                multipartFile(
+                    name = name,
+                    mimeType = "application/zip",
+                    bytes = bytes,
+                ),
+            )
+            .build(),
+        uploadClient,
+    )
+
+    suspend fun skillRun(id: String): SkillRunSnapshot =
+        executeJson(request("api/skill-runs/${id.urlSegment()}").get().build())
+
+    /**
+     * 持续读取服务端 Skill Run 的 SSE 快照。
+     *
+     * 服务端还会发送 run-event 与 ping；原生端只消费权威 snapshot，避免像轮询实现那样
+     * 每次进度变化都重新建立 HTTP 连接和反序列化完整响应。流正常结束并不保证任务已经
+     * 进入终态，重连与 GET 降级由 ViewModel 负责。
+     */
+    fun skillRunEvents(id: String): Flow<SkillRunSnapshot> = callbackFlow {
+        val call = streamClient.newCall(
+            request("api/skill-runs/${id.urlSegment()}/events")
+                .header("Accept", "text/event-stream")
+                .get()
+                .build(),
+        )
+        val reader = launch(Dispatchers.IO) {
+            try {
+                call.execute().use { response ->
+                    if (!response.isSuccessful) {
+                        throw ApiException(response.code, errorMessage(response))
+                    }
+                    val source = response.body.source()
+                    var eventName = "message"
+                    val data = StringBuilder()
+
+                    fun dispatchEvent() {
+                        if (eventName == "snapshot" && data.isNotEmpty()) {
+                            runCatching {
+                                json.decodeFromString<SkillRunSnapshot>(data.toString())
+                            }.onSuccess { trySend(it) }
+                            // 单个损坏事件不应关闭长连接；后续 snapshot 仍可恢复状态。
+                        }
+                        eventName = "message"
+                        data.clear()
+                    }
+
+                    while (!source.exhausted()) {
+                        val line = source.readUtf8Line() ?: break
+                        if (line.isEmpty()) {
+                            dispatchEvent()
+                            continue
+                        }
+                        when {
+                            line.startsWith(":") -> Unit
+                            line.startsWith("event:") -> {
+                                eventName = line.substringAfter(':').trimStart()
+                            }
+                            line.startsWith("data:") -> {
+                                if (data.isNotEmpty()) data.append('\n')
+                                data.append(line.substringAfter(':').removePrefix(" "))
+                            }
+                        }
+                    }
+                    if (data.isNotEmpty()) dispatchEvent()
+                }
+            } catch (error: Throwable) {
+                if (!call.isCanceled()) close(error)
+            } finally {
+                close()
+            }
+        }
+        awaitClose {
+            call.cancel()
+            reader.cancel()
+        }
+    }
+
+    suspend fun cancelSkillRun(id: String) {
+        executeUnit(request("api/skill-runs/${id.urlSegment()}").delete().build())
+    }
+
+    suspend fun retrySkillRun(id: String) {
+        executeUnit(
+            request("api/skill-runs/${id.urlSegment()}")
+                .post(EMPTY_JSON)
+                .build(),
+        )
+    }
+
+    suspend fun submitPptStudioBrief(
+        id: String,
+        input: PptStudioBriefRequest,
+    ): SkillRunSnapshot = executeJson(
+        request("api/skill-runs/${id.urlSegment()}/input")
+            .post(json.encodeToString(input).toRequestBody(JSON_MEDIA_TYPE))
+            .build(),
+    )
 
     suspend fun reviewAdminSkill(id: String, approve: Boolean) {
         executeUnit(

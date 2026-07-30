@@ -1,5 +1,24 @@
 package com.linhub.android.ui
 
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.AccountBalanceWallet
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.CloudDownload
+import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Science
+import androidx.compose.material3.ButtonDefaults
+
+
+
+
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -27,37 +46,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.AccountBalanceWallet
-import androidx.compose.material.icons.rounded.CheckCircle
-import androidx.compose.material.icons.rounded.CloudDownload
-import androidx.compose.material.icons.rounded.Delete
-import androidx.compose.material.icons.rounded.Edit
-import androidx.compose.material.icons.rounded.Key
-import androidx.compose.material.icons.rounded.Menu
-import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.Science
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -88,6 +81,7 @@ import com.linhub.android.core.model.Provider
 import com.linhub.android.core.model.Skill
 import com.linhub.android.core.model.User
 import com.linhub.android.core.model.UsageRecord
+import com.linhub.android.ui.design.LinHubSwitch
 import java.util.Locale
 import java.math.BigDecimal
 import java.math.RoundingMode
@@ -121,6 +115,7 @@ fun AdminScreen(
     onUpdateSubscription: (User, String?, Int) -> Unit,
     onDeleteUser: (User) -> Unit,
     onReviewSkill: (Skill, Boolean) -> Unit,
+    onImportSkillPackage: (Uri) -> Unit,
     onSaveSettings: (AdminSettingsPatch) -> Unit,
     onTestEngine: (EngineTestRequest) -> Unit,
     onSaveMcp: (McpServerRequest) -> Unit,
@@ -132,6 +127,11 @@ fun AdminScreen(
     val section = state.selectedSection
     val sectionLoaded = isAdminSectionLoaded(section, state.loadedResources)
     val sectionLoading = loading || isAdminSectionLoading(section, state.loadingResources)
+    val skillPackagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        uri?.let(onImportSkillPackage)
+    }
     Scaffold(
         modifier = modifier,
         contentWindowInsets = WindowInsets(0),
@@ -173,7 +173,14 @@ fun AdminScreen(
                         onUpdateSubscription, onDeleteUser,
                     )
                     AdminSection.Skills -> AdminSkills(
-                        state.pendingSkills, sectionLoading, onReviewSkill,
+                        skills = state.pendingSkills,
+                        loading = sectionLoading,
+                        onReview = onReviewSkill,
+                        onImport = {
+                            skillPackagePicker.launch(
+                                arrayOf("application/zip", "application/octet-stream"),
+                            )
+                        },
                     )
                     AdminSection.Settings -> AdminSettings(
                         state, sectionLoading, onSaveSettings, onTestEngine,
@@ -378,7 +385,7 @@ private fun ProviderEnabledSwitch(
     loading: Boolean,
     onSave: (AdminProviderRequest) -> Unit,
 ) {
-    Switch(
+    LinHubSwitch(
         checked = provider.enabled,
         onCheckedChange = { onSave(provider.toRequest(enabled = it)) },
         enabled = !loading,
@@ -464,7 +471,7 @@ private fun RemoteModelsDialog(
         text = {
             if (loading && models.isEmpty()) {
                 Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator()
+                    CircularProgressIndicator(strokeWidth = 2.dp)
                 }
             } else {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -563,7 +570,7 @@ private fun AdminModels(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    Switch(
+                    LinHubSwitch(
                         model.enabled,
                         { onSave(AdminModelRequest(id = model.id, enabled = it)) },
                         modifier = Modifier.scale(0.72f),
@@ -708,7 +715,7 @@ private fun AdminPlans(
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
-                    Switch(
+                    LinHubSwitch(
                         plan.enabled,
                         { onSave(plan.toRequest(enabled = it)) },
                         modifier = Modifier.scale(0.72f),
@@ -1233,8 +1240,20 @@ private fun adminLedgerReasonLabel(reason: String): String = when (reason) {
 }
 
 @Composable
-private fun AdminSkills(skills: List<Skill>, loading: Boolean, onReview: (Skill, Boolean) -> Unit) {
-    AdminList(null, loading, null) {
+private fun AdminSkills(
+    skills: List<Skill>,
+    loading: Boolean,
+    onReview: (Skill, Boolean) -> Unit,
+    onImport: () -> Unit,
+) {
+    AdminList("导入 Skill 包", loading, onImport) {
+        item {
+            Text(
+                "选择不超过 20 MB 的 .zip Skill 包。导入后先保存为私有草稿，审核后才能执行脚本或公开发布。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         if (skills.isEmpty()) item { EmptyAdmin("暂无待审核技能") }
         items(skills, key = Skill::id) { skill ->
             AdminCard {
@@ -1506,7 +1525,7 @@ private fun AdminMcp(
                         Text(server.name, fontWeight = FontWeight.SemiBold)
                         Text("${server.url} · ${server.status} · ${server.tools.size} 个工具", style = MaterialTheme.typography.bodySmall)
                     }
-                    Switch(
+                    LinHubSwitch(
                         server.enabled,
                         {
                             onSave(McpServerRequest(
@@ -1804,7 +1823,7 @@ private fun AdminConfirm(
 private fun ToggleLine(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(label, modifier = Modifier.weight(1f))
-        Switch(checked, onChange, modifier = Modifier.scale(0.72f))
+        LinHubSwitch(checked, onChange, modifier = Modifier.scale(0.72f))
     }
 }
 

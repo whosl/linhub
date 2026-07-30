@@ -16,8 +16,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -31,30 +29,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
+import com.linhub.android.ui.design.LinHubActionButton
+import com.linhub.android.ui.design.LinHubAmbientBackground
+import com.linhub.android.ui.design.LinHubSpinner
+import com.linhub.android.ui.design.LinHubPanel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.Lifecycle
 
 @Composable
 fun LinHubApp(viewModel: LinHubViewModel) {
-    val state by viewModel.state.collectAsStateWithLifecycle()
-    val workspaceShell = remember(
-        state.destination,
-        state.drawerOpenRequest,
-        state.user,
-        state.conversations,
-        state.projects,
-        state.selectedConversationId,
-        state.pinnedProjectIds,
-        state.collapsedProjectIds,
-        state.failedConversationRenames,
-        state.conversationSearch,
-        state.searchResults,
-        state.themeMode,
-        state.fontSizePreset,
-    ) {
-        workspaceShellState(state)
-    }
+    val host by viewModel.appHost.collectAsStateWithLifecycle()
+    val workspaceShell by viewModel.workspaceShell.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
     val openExternalLink: (String) -> Unit = { url ->
@@ -67,10 +53,10 @@ fun LinHubApp(viewModel: LinHubViewModel) {
         }
     }
     MediaThumbnailPrefetch(
-        assets = state.mediaAssets,
-        enabled = state.phase == AppPhase.Chat &&
-            !state.workspaceRefreshing &&
-            !state.isOffline,
+        assets = host.mediaAssets,
+        enabled = host.phase == AppPhase.Chat &&
+            !host.workspaceRefreshing &&
+            !host.isOffline,
     )
 
     LifecycleEventEffect(Lifecycle.Event.ON_START) {
@@ -80,21 +66,21 @@ fun LinHubApp(viewModel: LinHubViewModel) {
         viewModel.onAppBackgrounded()
     }
 
-    LaunchedEffect(state.message) {
-        state.message?.let {
+    LaunchedEffect(host.message) {
+        host.message?.let {
             snackbarHostState.showSnackbar(it)
             viewModel.consumeMessage()
         }
     }
-    LaunchedEffect(state.pendingShareUrl) {
-        val url = state.pendingShareUrl ?: return@LaunchedEffect
+    LaunchedEffect(host.pendingShareUrl) {
+        val url = host.pendingShareUrl ?: return@LaunchedEffect
         if (launchArtifactShare(context, url) == ArtifactShareLaunchResult.CopiedFallback) {
             viewModel.showComposerError("无法打开系统分享，链接已复制")
         }
         viewModel.consumeShareUrl()
     }
-    LaunchedEffect(state.pendingPaymentUrl) {
-        val url = state.pendingPaymentUrl ?: return@LaunchedEffect
+    LaunchedEffect(host.pendingPaymentUrl) {
+        val url = host.pendingPaymentUrl ?: return@LaunchedEffect
         val paymentPageOpened = runCatching {
             context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
         }.onFailure {
@@ -104,11 +90,25 @@ fun LinHubApp(viewModel: LinHubViewModel) {
     }
 
     Scaffold(
-        snackbarHost = { SnackbarHost(snackbarHostState) },
+        snackbarHost = {
+            SnackbarHost(snackbarHostState) { data ->
+                LinHubPanel(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                    cornerRadius = 18.dp,
+                    padding = androidx.compose.foundation.layout.PaddingValues(
+                        horizontal = 16.dp,
+                        vertical = 13.dp,
+                    ),
+                    shadow = 14.dp,
+                ) {
+                    Text(data.visuals.message, style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        },
         contentWindowInsets = WindowInsets(0),
     ) { padding ->
         AnimatedContent(
-            targetState = state.phase,
+            targetState = host.phase,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
@@ -121,12 +121,12 @@ fun LinHubApp(viewModel: LinHubViewModel) {
         ) { phase ->
             when (phase) {
                 AppPhase.Loading -> LoadingScreen(
-                    error = state.bootstrapError,
+                    error = host.bootstrapError,
                     onRetry = viewModel::retryBootstrap,
                 )
                 AppPhase.Authentication -> AuthScreen(
-                    mode = state.authMode,
-                    submitting = state.authSubmitting,
+                    mode = host.authMode,
+                    submitting = host.authSubmitting,
                     onModeChange = viewModel::setAuthMode,
                     onSubmit = viewModel::authenticate,
                 )
@@ -153,7 +153,8 @@ fun LinHubApp(viewModel: LinHubViewModel) {
                     onFontSizePresetChange = viewModel::setFontSizePreset,
                     onSignOut = viewModel::signOut,
                 ) { workspacePadding, openDrawer ->
-                    when (state.destination) {
+                    StateBoundWorkspaceContent(viewModel) { state ->
+                        when (state.destination) {
                         WorkspaceDestination.Chat -> Box(
                             Modifier
                                 .fillMaxSize()
@@ -195,6 +196,13 @@ fun LinHubApp(viewModel: LinHubViewModel) {
                                 onDownloadImage = viewModel::downloadImage,
                                 onEditMessageImage = viewModel::editMessageImage,
                                 onOpenArtifact = viewModel::openArtifact,
+                                skillRunState = viewModel::skillRunCardState,
+                                onObserveSkillRun = viewModel::observeSkillRun,
+                                onStopObservingSkillRun = viewModel::stopObservingSkillRun,
+                                onRefreshSkillRun = viewModel::refreshSkillRun,
+                                onCancelSkillRun = viewModel::cancelSkillRun,
+                                onRetrySkillRun = viewModel::retrySkillRun,
+                                onSubmitPptBrief = viewModel::submitPptStudioBrief,
                                 onCloseArtifact = viewModel::closeArtifact,
                                 onShareArtifact = viewModel::shareArtifact,
                                 onSaveArtifact = viewModel::saveArtifact,
@@ -336,6 +344,7 @@ fun LinHubApp(viewModel: LinHubViewModel) {
                             onUpdateSubscription = viewModel::updateAdminSubscription,
                             onDeleteUser = viewModel::deleteAdminUser,
                             onReviewSkill = viewModel::reviewAdminSkill,
+                            onImportSkillPackage = viewModel::importAdminSkillPackage,
                             onSaveSettings = viewModel::saveAdminSettings,
                             onTestEngine = viewModel::testAdminEngine,
                             onSaveMcp = viewModel::saveAdminMcpServer,
@@ -344,15 +353,16 @@ fun LinHubApp(viewModel: LinHubViewModel) {
                             onGenerateCodes = viewModel::generateAdminRedeemCodes,
                             modifier = Modifier.padding(workspacePadding),
                         )
+                        }
                     }
                 }
             }
         }
     }
-    state.sharedArtifact?.let { artifact ->
+    host.sharedArtifact?.let { artifact ->
         ArtifactDialog(
             artifact = artifact,
-            loading = state.sharedArtifactLoading,
+            loading = host.sharedArtifactLoading,
             onDismiss = viewModel::closeSharedArtifact,
             onShare = viewModel::shareOpenedSharedArtifact,
             onSave = viewModel::saveArtifact,
@@ -362,20 +372,35 @@ fun LinHubApp(viewModel: LinHubViewModel) {
 }
 
 @Composable
+private fun StateBoundWorkspaceContent(
+    viewModel: LinHubViewModel,
+    content: @Composable (LinHubUiState) -> Unit,
+) {
+    val state by viewModel.state.collectAsStateWithLifecycle()
+    content(state)
+}
+
+@Composable
 private fun LoadingScreen(error: String?, onRetry: () -> Unit) {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-            modifier = Modifier.padding(32.dp),
-        ) {
-            BrandMark()
-            if (error == null) {
-                CircularProgressIndicator(strokeWidth = 2.dp)
-                Text("正在载入工作区", style = MaterialTheme.typography.bodyMedium)
-            } else {
-                Text(error, style = MaterialTheme.typography.bodyMedium)
-                Button(onClick = onRetry) { Text("重试") }
+    LinHubAmbientBackground(Modifier.fillMaxSize()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+                modifier = Modifier.padding(32.dp),
+            ) {
+                BrandMark()
+                if (error == null) {
+                    LinHubSpinner(size = 22.dp)
+                    Text(
+                        "正在载入工作区",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    Text(error, style = MaterialTheme.typography.bodyMedium)
+                    LinHubActionButton(text = "重试", onClick = onRetry)
+                }
             }
         }
     }

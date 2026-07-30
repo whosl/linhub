@@ -29,6 +29,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -67,6 +68,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -134,35 +136,19 @@ import androidx.compose.material.icons.rounded.Unarchive
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.ZoomIn
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.NavigationDrawerItemDefaults
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
-import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -181,6 +167,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Path
@@ -222,6 +209,7 @@ import com.linhub.android.core.model.KnowledgeBase
 import com.linhub.android.core.model.McpServer
 import com.linhub.android.core.model.Model
 import com.linhub.android.core.model.Project
+import com.linhub.android.core.model.PptStudioBriefRequest
 import com.linhub.android.core.model.Skill
 import com.linhub.android.core.model.ThemeMode
 import com.linhub.android.core.model.UploadedAttachment
@@ -231,6 +219,15 @@ import com.linhub.android.data.string
 import com.linhub.android.data.type
 import com.linhub.android.ui.markdown.MarkdownText
 import com.linhub.android.ui.markdown.MarkdownEngine
+import com.linhub.android.ui.design.LinHubAmbientBackground
+import com.linhub.android.ui.design.LinHubIconButton
+import com.linhub.android.ui.design.LinHubOrb
+import com.linhub.android.ui.design.LinHubPanel
+import com.linhub.android.ui.design.LinHubSpinner
+import com.linhub.android.ui.design.LinHubSuggestion
+import com.linhub.android.ui.design.LinHubTextField
+import com.linhub.android.ui.design.LinHubSwitch
+import com.linhub.android.ui.design.linHubPressable
 import com.linhub.android.BuildConfig
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
@@ -249,6 +246,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -258,6 +256,16 @@ import kotlinx.serialization.json.intOrNull
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.Lifecycle
+
+private data class SkillRunUiBindings(
+    val stateFor: (String) -> Flow<SkillRunCardUiState>,
+    val onObserve: (String) -> Unit,
+    val onStopObserving: (String) -> Unit,
+    val onRefresh: (String) -> Unit,
+    val onCancel: (String) -> Unit,
+    val onRetry: (String) -> Unit,
+    val onSubmitPptBrief: (String, PptStudioBriefRequest) -> Unit,
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -297,6 +305,13 @@ fun ChatScreen(
     onDownloadImage: (Uri, String) -> Unit,
     onEditMessageImage: (String, String, String, ByteArray?) -> Unit,
     onOpenArtifact: (String) -> Unit,
+    skillRunState: (String) -> Flow<SkillRunCardUiState>,
+    onObserveSkillRun: (String) -> Unit,
+    onStopObservingSkillRun: (String) -> Unit,
+    onRefreshSkillRun: (String) -> Unit,
+    onCancelSkillRun: (String) -> Unit,
+    onRetrySkillRun: (String) -> Unit,
+    onSubmitPptBrief: (String, PptStudioBriefRequest) -> Unit,
     onCloseArtifact: () -> Unit,
     onShareArtifact: (Artifact) -> Unit,
     onSaveArtifact: (Uri, String) -> Unit,
@@ -304,6 +319,15 @@ fun ChatScreen(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val recorder = remember { WavAudioRecorder() }
+    val skillRunBindings = SkillRunUiBindings(
+        stateFor = skillRunState,
+        onObserve = onObserveSkillRun,
+        onStopObserving = onStopObservingSkillRun,
+        onRefresh = onRefreshSkillRun,
+        onCancel = onCancelSkillRun,
+        onRetry = onRetrySkillRun,
+        onSubmitPptBrief = onSubmitPptBrief,
+    )
     var recording by remember { mutableStateOf(false) }
     val attachmentPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments(),
@@ -437,14 +461,34 @@ fun ChatScreen(
         )
     }
 
-    Scaffold(
+    LinHubAmbientBackground(Modifier.fillMaxSize()) {
+        Scaffold(
+            containerColor = Color.Transparent,
             contentWindowInsets = WindowInsets(0),
             topBar = {
-                TopAppBar(
+                Row(
                     modifier = Modifier
                         .statusBarsPadding()
-                        .height(60.dp),
-                    title = {
+                        .fillMaxWidth()
+                        .height(64.dp)
+                        .padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    LinHubIconButton(
+                        onClick = onOpenDrawer,
+                        contentDescription = "打开侧栏",
+                    ) {
+                        Icon(
+                            Icons.Rounded.Menu,
+                            contentDescription = null,
+                            modifier = Modifier.size(17.dp),
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(horizontal = 6.dp),
+                    ) {
                         if (selectedConversation != null || activeSkill != null || activeProject != null) {
                             ConversationTitle(
                                 conversation = selectedConversation,
@@ -456,70 +500,62 @@ fun ChatScreen(
                                 onRename = onRenameConversation,
                             )
                         }
-                    },
-                    navigationIcon = {
-                        IconButton(onClick = onOpenDrawer) {
-                            Icon(
-                                Icons.Rounded.Menu,
-                                contentDescription = "打开侧栏",
-                                modifier = Modifier.size(16.dp),
-                            )
-                        }
-                    },
-                    actions = {
-                        Surface(
-                            modifier = Modifier.padding(end = 12.dp),
-                            shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.surface,
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                            shadowElevation = 5.dp,
+                    }
+                    LinHubPanel(
+                        cornerRadius = 16.dp,
+                        shadow = 7.dp,
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(1.dp),
                         ) {
-                            Row(
-                                modifier = Modifier.padding(4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            LinHubIconButton(
+                                onClick = onNewConversation,
+                                size = 32.dp,
+                                contentDescription = headerNewConversationLabel,
                             ) {
-                                IconButton(onClick = onNewConversation, modifier = Modifier.size(28.dp)) {
-                                    Icon(
-                                        Icons.Outlined.AddComment,
-                                        contentDescription = headerNewConversationLabel,
-                                        modifier = Modifier.size(14.dp),
-                                    )
-                                }
-                                state.selectedConversationId?.let { conversationId ->
-                                    state.artifacts[conversationId]?.lastOrNull()?.let { artifact ->
-                                        IconButton(onClick = { onOpenArtifact(artifact.id) }, modifier = Modifier.size(28.dp)) {
-                                            Icon(Icons.Rounded.Code, contentDescription = "打开作品", modifier = Modifier.size(14.dp))
-                                        }
-                                    }
-                                }
-                                if (state.styles.isNotEmpty()) {
-                                    StyleMenu(
-                                        styles = state.styles,
-                                        selectedStyleId = state.selectedStyleId,
-                                        onSelectStyle = onSelectStyle,
-                                    )
-                                } else {
-                                    IconButton(
-                                        onClick = {},
-                                        enabled = false,
-                                        modifier = Modifier.size(28.dp),
+                                Icon(
+                                    Icons.Outlined.AddComment,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(15.dp),
+                                )
+                            }
+                            state.selectedConversationId?.let { conversationId ->
+                                state.artifacts[conversationId]?.lastOrNull()?.let { artifact ->
+                                    LinHubIconButton(
+                                        onClick = { onOpenArtifact(artifact.id) },
+                                        size = 32.dp,
+                                        contentDescription = "打开作品",
                                     ) {
-                                        Icon(
-                                            Icons.Rounded.MoreHoriz,
-                                            contentDescription = "对话设置",
-                                            modifier = Modifier.size(14.dp),
-                                        )
+                                        Icon(Icons.Rounded.Code, contentDescription = null, modifier = Modifier.size(15.dp))
                                     }
                                 }
                             }
+                            if (state.styles.isNotEmpty()) {
+                                StyleMenu(
+                                    styles = state.styles,
+                                    selectedStyleId = state.selectedStyleId,
+                                    onSelectStyle = onSelectStyle,
+                                )
+                            } else {
+                                LinHubIconButton(
+                                    onClick = {},
+                                    enabled = false,
+                                    size = 32.dp,
+                                    contentDescription = "对话设置",
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.MoreHoriz,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(15.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f),
+                                    )
+                                }
+                            }
                         }
-                    },
-                    colors = androidx.compose.material3.TopAppBarDefaults.topAppBarColors(
-                        containerColor = Color.Transparent,
-                    ),
-                    windowInsets = WindowInsets(0),
-                )
+                    }
+                }
             },
             bottomBar = {
                 if (!landingVisible) composer()
@@ -556,10 +592,12 @@ fun ChatScreen(
                 onDownloadImage = onDownloadImage,
                 onEditMessageImage = onEditMessageImage,
                 onOpenArtifact = onOpenArtifact,
+                skillRuns = skillRunBindings,
                 onOpenLink = onOpenExternalLink,
                 onToggleSpeech = onToggleSpeech,
                 emptyComposer = composer,
             )
+        }
     }
     state.selectedArtifact?.let { artifact ->
         ArtifactDialog(
@@ -733,12 +771,16 @@ internal fun ConversationDrawer(
     }
 
     Box {
-        ModalDrawerSheet(
+        LinHubAmbientBackground(
             modifier = Modifier
                 .width(304.dp)
-                .fillMaxHeight(),
-            drawerShape = RectangleShape,
-            drawerContainerColor = drawerColor,
+                .fillMaxHeight()
+                .background(drawerColor)
+                .border(
+                    width = 1.dp,
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.75f),
+                    shape = RectangleShape,
+                ),
         ) {
             Column(
                 modifier = Modifier
@@ -1265,23 +1307,30 @@ private fun WebDrawerRow(
     selected: Boolean = false,
     tint: Color? = null,
 ) {
-    val shape = RoundedCornerShape(8.dp)
+    val shape = RoundedCornerShape(14.dp)
     val drawerForeground = if (MaterialTheme.colorScheme.background.luminance() < 0.5f) Color(0xFFC2C0B6) else Color(0xFF535146)
     val resolvedTint = tint ?: drawerForeground
+    val rowColor by animateColorAsState(
+        targetValue = if (selected) {
+            MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
+        } else {
+            Color.Transparent
+        },
+        animationSpec = spring(stiffness = 560f),
+        label = "drawer-row-color",
+    )
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(36.dp)
+            .height(42.dp)
             .clip(shape)
-            .background(
-                if (selected) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent,
-            )
-            .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp),
+            .background(rowColor)
+            .linHubPressable(onClick = onClick)
+            .padding(horizontal = 11.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp), tint = resolvedTint)
-        Spacer(Modifier.width(10.dp))
+        Spacer(Modifier.width(11.dp))
         Text(
             label,
             style = MaterialTheme.typography.bodyMedium.copy(
@@ -1865,6 +1914,7 @@ private fun ChatBody(
     onDownloadImage: (Uri, String) -> Unit,
     onEditMessageImage: (String, String, String, ByteArray?) -> Unit,
     onOpenArtifact: (String) -> Unit,
+    skillRuns: SkillRunUiBindings,
     onOpenLink: (String) -> Unit,
     onToggleSpeech: (ChatMessage) -> Unit,
     emptyComposer: @Composable () -> Unit,
@@ -2013,6 +2063,7 @@ private fun ChatBody(
                     onEditMessageImage = onEditMessageImage,
                     imageEditing = message.id in editingImageMessageIds,
                     onOpenArtifact = onOpenArtifact,
+                    skillRuns = skillRuns,
                     onOpenLink = onOpenLink,
                     speechActive = speechMessageId == message.id,
                     speechLoading = speechMessageId == message.id && speechLoading,
@@ -2496,6 +2547,9 @@ private fun EmptyConversation(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         } else {
+            LinHubOrb(
+                modifier = Modifier.padding(bottom = 16.dp),
+            )
             Text(
                 skill?.name ?: "$greeting，${userName.ifBlank { "朋友" }}",
                 modifier = Modifier.padding(bottom = if (skill == null) 27.dp else 8.dp),
@@ -2556,25 +2610,13 @@ private fun EmptyConversation(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 rowPrompts.forEach { (label, prompt) ->
-                    OutlinedButton(
+                    LinHubSuggestion(
+                        text = label,
                         onClick = { onPrompt(prompt) },
                         modifier = Modifier
                             .weight(1f)
-                            .height(38.dp),
-                        shape = RoundedCornerShape(12.dp),
-                        contentPadding = PaddingValues(horizontal = 12.dp),
-                    ) {
-                        Text(
-                            label,
-                            modifier = Modifier.fillMaxWidth(),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.labelLarge.copy(
-                                fontSize = 12.sp,
-                                lineHeight = 16.sp,
-                            ),
-                        )
-                    }
+                            .height(46.dp),
+                    )
                 }
             }
         }
@@ -2597,6 +2639,7 @@ private fun MessageItem(
     onEditMessageImage: (String, String, String, ByteArray?) -> Unit,
     imageEditing: Boolean,
     onOpenArtifact: (String) -> Unit,
+    skillRuns: SkillRunUiBindings,
     onOpenLink: (String) -> Unit,
     speechActive: Boolean,
     speechLoading: Boolean,
@@ -2604,6 +2647,7 @@ private fun MessageItem(
     modifier: Modifier = Modifier,
 ) {
     val isUser = message.role == "user"
+    val isSkillRunReceipt = message.isSkillRunReceiptMessage()
     val userBubbleColor = if (MaterialTheme.colorScheme.background.luminance() < 0.5f) {
         Color(0xFF3A3A35)
     } else {
@@ -2671,6 +2715,7 @@ private fun MessageItem(
                                 part = part,
                                 onOpenArtifact = onOpenArtifact,
                                 onDownload = onDownloadImage,
+                                skillRuns = skillRuns,
                             )
                         }
                     }
@@ -2681,10 +2726,12 @@ private fun MessageItem(
                     return@forEachIndexed
                 }
                 if (isUser && editing && part.type() == "text") {
-                    OutlinedTextField(
+                    LinHubTextField(
                         value = editText,
                         onValueChange = { editText = it },
+                        placeholder = "编辑消息",
                         modifier = Modifier.fillMaxWidth(),
+                        singleLine = false,
                         minLines = 2,
                         maxLines = 8,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
@@ -2704,6 +2751,7 @@ private fun MessageItem(
                         onDownloadImage = onDownloadImage,
                         onEditMessageImage = onEditMessageImage,
                         onOpenArtifact = onOpenArtifact,
+                        skillRuns = skillRuns,
                     )
                 }
             }
@@ -2712,7 +2760,7 @@ private fun MessageItem(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    CircularProgressIndicator(modifier = Modifier.size(11.dp), strokeWidth = 1.5.dp)
+                    LinHubSpinner(size = 11.dp)
                     Text("正在发送…", style = MaterialTheme.typography.labelSmall)
                 }
             }
@@ -2739,7 +2787,7 @@ private fun MessageItem(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp)
+                    LinHubSpinner(size = 12.dp)
                     Text("生成中", style = MaterialTheme.typography.labelSmall)
                 }
             }
@@ -2762,12 +2810,20 @@ private fun MessageItem(
                         ) { Text("发送") }
                     } else {
                         branch?.let { BranchSwitcher(it, onSwitchLeaf) }
-                        IconButton(onClick = { editing = true }, modifier = Modifier.size(34.dp)) {
-                            Icon(Icons.Rounded.Edit, contentDescription = "编辑并重发", modifier = Modifier.size(17.dp))
+                        LinHubIconButton(
+                            onClick = { editing = true },
+                            size = 34.dp,
+                            contentDescription = "编辑并重发",
+                        ) {
+                            Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(17.dp))
                         }
                         if (textContent.isNotBlank()) {
-                            IconButton(onClick = copyText, modifier = Modifier.size(34.dp)) {
-                                Icon(Icons.Rounded.ContentCopy, contentDescription = "复制", modifier = Modifier.size(17.dp))
+                            LinHubIconButton(
+                                onClick = copyText,
+                                size = 34.dp,
+                                contentDescription = "复制",
+                            ) {
+                                Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(17.dp))
                             }
                         }
                     }
@@ -2779,46 +2835,52 @@ private fun MessageItem(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     if (textContent.isNotBlank()) {
-                        IconButton(onClick = copyText, modifier = Modifier.size(34.dp)) {
-                            Icon(Icons.Rounded.ContentCopy, contentDescription = "复制", modifier = Modifier.size(17.dp))
+                        LinHubIconButton(onClick = copyText, size = 34.dp, contentDescription = "复制") {
+                            Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(17.dp))
                         }
                     }
-                    IconButton(onClick = onRegenerate, modifier = Modifier.size(34.dp)) {
-                        Icon(
-                            Icons.Rounded.Refresh,
-                            contentDescription = "重新生成",
-                            modifier = Modifier.size(18.dp),
-                        )
-                    }
-                    IconButton(
-                        onClick = { onFeedback(if (message.feedback == "up") null else "up") },
-                        modifier = Modifier.size(34.dp),
-                    ) {
-                        Icon(
-                            Icons.Rounded.ThumbUp,
+                    if (!isSkillRunReceipt) {
+                        LinHubIconButton(onClick = onRegenerate, size = 34.dp, contentDescription = "重新生成") {
+                            Icon(
+                                Icons.Rounded.Refresh,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                        LinHubIconButton(
+                            onClick = { onFeedback(if (message.feedback == "up") null else "up") },
+                            size = 34.dp,
+                            selected = message.feedback == "up",
                             contentDescription = "有帮助",
-                            modifier = Modifier.size(17.dp),
-                            tint = if (message.feedback == "up") {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            },
-                        )
-                    }
-                    IconButton(
-                        onClick = { onFeedback(if (message.feedback == "down") null else "down") },
-                        modifier = Modifier.size(34.dp),
-                    ) {
-                        Icon(
-                            Icons.Rounded.ThumbDown,
+                        ) {
+                            Icon(
+                                Icons.Rounded.ThumbUp,
+                                contentDescription = null,
+                                modifier = Modifier.size(17.dp),
+                                tint = if (message.feedback == "up") {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                            )
+                        }
+                        LinHubIconButton(
+                            onClick = { onFeedback(if (message.feedback == "down") null else "down") },
+                            size = 34.dp,
+                            selected = message.feedback == "down",
                             contentDescription = "没有帮助",
-                            modifier = Modifier.size(17.dp),
-                            tint = if (message.feedback == "down") {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            },
-                        )
+                        ) {
+                            Icon(
+                                Icons.Rounded.ThumbDown,
+                                contentDescription = null,
+                                modifier = Modifier.size(17.dp),
+                                tint = if (message.feedback == "down") {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                            )
+                        }
                     }
                     if (textContent.isNotBlank()) {
                         SpeechButton(
@@ -2827,8 +2889,8 @@ private fun MessageItem(
                             onClick = onToggleSpeech,
                         )
                     }
-                    IconButton(onClick = onQuote, modifier = Modifier.size(34.dp)) {
-                        Icon(Icons.Rounded.FormatQuote, contentDescription = "引用", modifier = Modifier.size(17.dp))
+                    LinHubIconButton(onClick = onQuote, size = 34.dp, contentDescription = "引用") {
+                        Icon(Icons.Rounded.FormatQuote, contentDescription = null, modifier = Modifier.size(17.dp))
                     }
                     modelName?.takeIf(String::isNotBlank)?.let { label ->
                         Text(
@@ -2858,24 +2920,26 @@ private fun BranchSwitcher(
     branch: MessageBranchInfo,
     onSwitchLeaf: (String) -> Unit,
 ) {
-    IconButton(
+    LinHubIconButton(
         onClick = { branch.previousLeafId?.let(onSwitchLeaf) },
         enabled = branch.previousLeafId != null,
-        modifier = Modifier.size(34.dp),
+        size = 34.dp,
+        contentDescription = "上一分支",
     ) {
-        Icon(Icons.Rounded.ChevronLeft, contentDescription = "上一分支")
+        Icon(Icons.Rounded.ChevronLeft, contentDescription = null)
     }
     Text(
         "${branch.index + 1}/${branch.total}",
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
-    IconButton(
+    LinHubIconButton(
         onClick = { branch.nextLeafId?.let(onSwitchLeaf) },
         enabled = branch.nextLeafId != null,
-        modifier = Modifier.size(34.dp),
+        size = 34.dp,
+        contentDescription = "下一分支",
     ) {
-        Icon(Icons.Rounded.ChevronRight, contentDescription = "下一分支")
+        Icon(Icons.Rounded.ChevronRight, contentDescription = null)
     }
 }
 
@@ -2885,14 +2949,19 @@ private fun SpeechButton(
     loading: Boolean,
     onClick: () -> Unit,
 ) {
-    IconButton(onClick = onClick, modifier = Modifier.size(34.dp)) {
+    LinHubIconButton(
+        onClick = onClick,
+        size = 34.dp,
+        selected = active,
+        contentDescription = if (active) "停止朗读" else "朗读",
+    ) {
         if (loading) {
-            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+            LinHubSpinner(size = 16.dp)
         } else {
             Icon(
                 if (active) Icons.AutoMirrored.Rounded.VolumeOff
                 else Icons.AutoMirrored.Rounded.VolumeUp,
-                contentDescription = if (active) "停止朗读" else "朗读",
+                contentDescription = null,
                 modifier = Modifier.size(18.dp),
                 tint = if (active) {
                     MaterialTheme.colorScheme.primary
@@ -2919,6 +2988,7 @@ private fun MessagePart(
     onDownloadImage: (Uri, String) -> Unit,
     onEditMessageImage: (String, String, String, ByteArray?) -> Unit,
     onOpenArtifact: (String) -> Unit,
+    skillRuns: SkillRunUiBindings,
 ) {
     when (part.type()) {
         "text" -> if (renderMarkdown) {
@@ -2961,6 +3031,18 @@ private fun MessagePart(
             onDownload = onDownloadImage,
         )
         "tool-config" -> RoutingDecisionPart(part)
+        "skill-run" -> {
+            val runId = part.string("runId").orEmpty()
+            if (runId.isNotBlank()) {
+                BoundSkillRunPanel(
+                    runId = runId,
+                    fallbackSkillName = part.string("skillName") ?: "Skill",
+                    initialTopic = "",
+                    skillRuns = skillRuns,
+                    onDownload = onDownloadImage,
+                )
+            }
+        }
         "image" -> ImageMessagePart(
             part = part,
             messageId = messageId,
@@ -2973,6 +3055,34 @@ private fun MessagePart(
             title = part.string("name") ?: "附件",
         )
     }
+}
+
+@Composable
+private fun BoundSkillRunPanel(
+    runId: String,
+    fallbackSkillName: String,
+    initialTopic: String,
+    skillRuns: SkillRunUiBindings,
+    onDownload: (Uri, String) -> Unit,
+) {
+    val stateFlow = remember(runId) { skillRuns.stateFor(runId) }
+    val cardState by stateFlow.collectAsState(initial = SkillRunCardUiState())
+    SkillRunPanel(
+        runId = runId,
+        fallbackSkillName = fallbackSkillName,
+        initialTopic = initialTopic,
+        snapshot = cardState.snapshot,
+        loading = cardState.loading,
+        mutating = cardState.mutating,
+        error = cardState.error,
+        onObserve = skillRuns.onObserve,
+        onStopObserving = skillRuns.onStopObserving,
+        onRefresh = skillRuns.onRefresh,
+        onCancel = skillRuns.onCancel,
+        onRetry = skillRuns.onRetry,
+        onSubmitPptBrief = skillRuns.onSubmitPptBrief,
+        onDownload = onDownload,
+    )
 }
 
 /**
@@ -3734,6 +3844,9 @@ private fun runningToolStatus(toolName: String, state: String): String {
             else -> "搜索"
         }
         toolName == "run_code" -> "运行代码"
+        toolName == "start_deep_research" -> "启动深度调研"
+        toolName == "start_data_analysis" -> "启动数据分析"
+        toolName == "start_ppt_studio" -> "打开 PPT 工作室"
         toolName == "search_knowledge" -> "检索知识库"
         toolName.startsWith("pptx_") || toolName.startsWith("dashi_") -> "处理演示文稿"
         toolName.contains("artifact", ignoreCase = true) -> "生成作品"
@@ -4068,9 +4181,22 @@ private fun ToolResultDeliverables(
     part: JsonObject,
     onOpenArtifact: (String) -> Unit,
     onDownload: (Uri, String) -> Unit,
+    skillRuns: SkillRunUiBindings,
 ) {
     if (part.string("state") != "success") return
     val result = part.objectValue("result") ?: return
+    val skillRunId = result.string("skillRunId")
+    if (!skillRunId.isNullOrBlank()) {
+        val args = part.objectValue("args") ?: JsonObject(emptyMap())
+        BoundSkillRunPanel(
+            runId = skillRunId,
+            fallbackSkillName = result.string("skillName") ?: "Skill",
+            initialTopic = args.string("topic").orEmpty(),
+            skillRuns = skillRuns,
+            onDownload = onDownload,
+        )
+        return
+    }
     val artifactId = result.string("artifactId")
     val attachments = result.objectItems("attachments")
     if (artifactId.isNullOrBlank() && attachments.isEmpty()) return
@@ -4761,6 +4887,9 @@ private fun toolLabel(name: String, args: JsonObject, preview: String?): String 
         "analyze_image" -> "识别图片"
         "analyze_spreadsheet" -> "分析表格"
         "run_code" -> "运行代码"
+        "start_deep_research" -> "启动深度调研"
+        "start_data_analysis" -> "启动数据分析"
+        "start_ppt_studio" -> "打开 PPT 工作室"
         "save_memory" -> "记录记忆"
         "search_memory" -> "检索记忆"
         "search_knowledge" -> value?.let { "检索知识库「$it」" } ?: "检索知识库"
@@ -4772,6 +4901,9 @@ private fun toolLabel(name: String, args: JsonObject, preview: String?): String 
         "pptx_extract_text" -> "提取 PPT 内容"
         "pptx_analyze_template" -> "分析 PPT 模板"
         "pptx_create_deck" -> value?.let { "生成 PPT「$it」" } ?: "生成 PPT"
+        "dashi_query_layouts" -> "查询 ${args.string("theme") ?: "Dashi"} 版式"
+        "dashi_inspect_layouts" -> "检查 Dashi 页面字段"
+        "dashi_render_deck" -> "渲染 Dashi PPT"
         else -> name
     }
 }
@@ -4854,16 +4986,13 @@ private fun ChatComposer(
             it.mimeType == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     }
     Box {
-        Surface(
+        LinHubPanel(
             modifier = Modifier
                 .fillMaxWidth()
                 .imePadding()
                 .padding(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 24.dp),
-            shape = RoundedCornerShape(24.dp),
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 0.dp,
-            shadowElevation = 2.dp,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            cornerRadius = 28.dp,
+            shadow = 14.dp,
         ) {
             Column(Modifier.fillMaxWidth()) {
                 AnimatedVisibility(!quotedText.isNullOrBlank()) {
@@ -4940,27 +5069,20 @@ private fun ChatComposer(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                TextField(
+                BasicTextField(
                     value = value,
                     onValueChange = onValueChange,
                     enabled = enabled,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .animateContentSize(),
-                    placeholder = {
-                        Text(
-                            pendingProject?.let { "在「${it.name}」中发消息…" }
-                                ?: "给 LinHub 发消息…",
-                            style = MaterialTheme.typography.bodyLarge.copy(
-                                fontSize = 15.sp,
-                                lineHeight = 22.sp,
-                            ),
-                        )
-                    },
+                        .animateContentSize()
+                        .padding(horizontal = 17.dp, vertical = 13.dp),
                     textStyle = MaterialTheme.typography.bodyLarge.copy(
+                        color = MaterialTheme.colorScheme.onSurface,
                         fontSize = 15.sp,
                         lineHeight = 22.sp,
                     ),
+                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                     minLines = 1,
                     maxLines = 6,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
@@ -4968,13 +5090,22 @@ private fun ChatComposer(
                         focusManager.clearFocus()
                         onSend()
                     }),
-                    colors = TextFieldDefaults.colors(
-                        focusedContainerColor = Color.Transparent,
-                        unfocusedContainerColor = Color.Transparent,
-                        disabledContainerColor = Color.Transparent,
-                        focusedIndicatorColor = Color.Transparent,
-                        unfocusedIndicatorColor = Color.Transparent,
-                    ),
+                    decorationBox = { inner ->
+                        Box(contentAlignment = Alignment.CenterStart) {
+                            if (value.isEmpty()) {
+                                Text(
+                                    pendingProject?.let { "在「${it.name}」中发消息…" }
+                                        ?: "给 LinHub 发消息…",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.74f),
+                                    style = MaterialTheme.typography.bodyLarge.copy(
+                                        fontSize = 15.sp,
+                                        lineHeight = 22.sp,
+                                    ),
+                                )
+                            }
+                            inner()
+                        }
+                    },
                 )
                 Row(
                     modifier = Modifier
@@ -4982,37 +5113,56 @@ private fun ChatComposer(
                         .padding(start = 6.dp, end = 7.dp, bottom = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    IconButton(
+                    LinHubIconButton(
                         onClick = onPickAttachments,
                         enabled = enabled && !isStreaming,
-                        modifier = Modifier.size(32.dp),
+                        size = 34.dp,
+                        contentDescription = "上传文件或图片",
                     ) {
-                        Icon(Icons.Rounded.AttachFile, contentDescription = "上传文件或图片", modifier = Modifier.size(16.dp))
+                        Icon(Icons.Rounded.AttachFile, contentDescription = null, modifier = Modifier.size(17.dp))
                     }
-                    IconButton(
-                        onClick = {
-                            onRequestToolOptions()
-                            toolsOpen = true
-                        },
-                        enabled = enabled,
-                        modifier = Modifier.size(32.dp),
-                    ) {
-                        Icon(Icons.Rounded.Tune, contentDescription = "工具", modifier = Modifier.size(16.dp))
+                    Box {
+                        LinHubIconButton(
+                            onClick = {
+                                onRequestToolOptions()
+                                toolsOpen = true
+                            },
+                            enabled = enabled,
+                            selected = tools.autoRouting || tools.webSearch || tools.imageGeneration ||
+                                tools.codeRunner || tools.knowledgeSearch || tools.mcpServerIds.isNotEmpty() ||
+                                tools.knowledgeBaseIds.isNotEmpty(),
+                            size = 34.dp,
+                            contentDescription = "工具",
+                        ) {
+                            Icon(Icons.Rounded.Tune, contentDescription = null, modifier = Modifier.size(17.dp))
+                        }
+                        ToolControlsMenu(
+                            expanded = toolsOpen,
+                            tools = tools,
+                            isAdmin = isAdmin,
+                            knowledgeBases = knowledgeBases,
+                            mcpServers = mcpServers,
+                            loading = toolOptionsLoading,
+                            onToolsChange = onUpdateTools,
+                            onDismiss = { toolsOpen = false },
+                        )
                     }
                     Spacer(Modifier.weight(1f))
                     modelSelector()
-                    IconButton(
+                    LinHubIconButton(
                         onClick = onToggleRecording,
                         enabled = enabled && !isStreaming && !transcribing,
-                        modifier = Modifier.size(32.dp),
+                        selected = recording,
+                        size = 34.dp,
+                        contentDescription = if (recording) "停止录音" else "语音输入",
                     ) {
                         if (transcribing) {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            LinHubSpinner(size = 16.dp)
                         } else {
                             Icon(
                                 if (recording) Icons.Rounded.Stop else Icons.Rounded.Mic,
-                                contentDescription = if (recording) "停止录音" else "语音输入",
-                                modifier = Modifier.size(16.dp),
+                                contentDescription = null,
+                                modifier = Modifier.size(17.dp),
                                 tint = if (recording) {
                                     MaterialTheme.colorScheme.error
                                 } else {
@@ -5029,14 +5179,15 @@ private fun ChatComposer(
                         },
                         label = "send-stop",
                     ) { streaming ->
-                        IconButton(
+                        LinHubIconButton(
                             onClick = if (streaming) onStop else onSend,
                             enabled = streaming || canSend,
-                            modifier = Modifier.size(32.dp),
+                            size = 36.dp,
+                            contentDescription = if (streaming) "停止生成" else "发送",
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .size(26.dp)
+                                    .size(30.dp)
                                     .background(
                                     if (streaming) {
                                         MaterialTheme.colorScheme.onSurface
@@ -5051,7 +5202,7 @@ private fun ChatComposer(
                             ) {
                                 Icon(
                                     if (streaming) Icons.Rounded.Stop else Icons.Rounded.ArrowUpward,
-                                    contentDescription = if (streaming) "停止生成" else "发送",
+                                    contentDescription = null,
                                     tint = if (streaming) {
                                         MaterialTheme.colorScheme.surface
                                     } else if (canSend) {
@@ -5059,24 +5210,13 @@ private fun ChatComposer(
                                     } else {
                                         MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
                                     },
-                                    modifier = Modifier.size(13.dp),
+                                    modifier = Modifier.size(14.dp),
                                 )
                             }
                         }
                     }
                 }
             }
-        }
-        if (toolsOpen) {
-            ToolControlsDialog(
-                tools = tools,
-                isAdmin = isAdmin,
-                knowledgeBases = knowledgeBases,
-                mcpServers = mcpServers,
-                loading = toolOptionsLoading,
-                onToolsChange = onUpdateTools,
-                onDismiss = { toolsOpen = false },
-            )
         }
     }
 }
@@ -5204,7 +5344,8 @@ private fun ComposerAttachment(
 }
 
 @Composable
-private fun ToolControlsDialog(
+private fun ToolControlsMenu(
+    expanded: Boolean,
     tools: ChatToolToggles,
     isAdmin: Boolean,
     knowledgeBases: List<KnowledgeBase>,
@@ -5216,67 +5357,66 @@ private fun ToolControlsDialog(
     var view by remember { mutableStateOf(ToolControlsView.Root) }
     val globalServers = mcpServers.filter { it.scope == "global" }
     val userServers = mcpServers.filter { it.scope == "user" }
-    AlertDialog(
+    LaunchedEffect(expanded) {
+        if (!expanded) view = ToolControlsView.Root
+    }
+    DropdownMenu(
+        expanded = expanded,
         onDismissRequest = onDismiss,
-        title = {
-            when (view) {
-                ToolControlsView.Root -> Text("工具")
-                ToolControlsView.Knowledge -> SecondaryMenuHeader("资料检索") {
-                    view = ToolControlsView.Root
+        modifier = Modifier.widthIn(min = 280.dp, max = 340.dp),
+    ) {
+        AnimatedContent(
+            targetState = view,
+            transitionSpec = {
+                (fadeIn() + scaleIn(initialScale = 0.98f)) togetherWith
+                    (fadeOut() + scaleOut(targetScale = 0.98f))
+            },
+            label = "tool-secondary-menu",
+        ) { activeView ->
+            Column(Modifier.widthIn(min = 280.dp, max = 340.dp)) {
+                when (activeView) {
+                    ToolControlsView.Root -> Text(
+                        "工具",
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    ToolControlsView.Knowledge -> {
+                        SecondaryMenuHeader("资料检索") { view = ToolControlsView.Root }
+                        HorizontalDivider()
+                    }
+                    ToolControlsView.Tools -> {
+                        SecondaryMenuHeader("工具设置") { view = ToolControlsView.Root }
+                        HorizontalDivider()
+                    }
                 }
-                ToolControlsView.Tools -> SecondaryMenuHeader("工具设置") {
-                    view = ToolControlsView.Root
-                }
-            }
-        },
-        text = {
-            AnimatedContent(
-                targetState = view,
-                transitionSpec = {
-                    (fadeIn() + scaleIn(initialScale = 0.98f)) togetherWith
-                        (fadeOut() + scaleOut(targetScale = 0.98f))
-                },
-                label = "tool-secondary-menu",
-            ) { activeView ->
-                LazyColumn(
-                    modifier = Modifier.heightIn(max = 520.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     when (activeView) {
-                    ToolControlsView.Root -> {
-                        item {
+                        ToolControlsView.Root -> {
                             ToolToggleRow(
                                 icon = { Icon(Icons.Rounded.SmartToy, contentDescription = null) },
                                 label = "智能选择",
                                 checked = tools.autoRouting,
                                 onChange = { onToolsChange(tools.copy(autoRouting = it)) },
                             )
-                        }
-                        item {
                             ToolToggleRow(
                                 icon = { Icon(Icons.Rounded.Search, contentDescription = null) },
                                 label = "联网搜索",
                                 checked = tools.webSearch,
                                 onChange = { onToolsChange(tools.copy(webSearch = it)) },
                             )
-                        }
-                        item {
                             ToolToggleRow(
                                 icon = { Icon(Icons.Rounded.Image, contentDescription = null) },
                                 label = "生成或编辑图片",
                                 checked = tools.imageGeneration,
                                 onChange = { onToolsChange(tools.copy(imageGeneration = it)) },
                             )
-                        }
-                        item {
                             ToolNavigationRow(
                                 icon = { Icon(Icons.Rounded.Storage, contentDescription = null) },
                                 label = "资料检索",
                                 value = if (tools.knowledgeBaseIds.isEmpty()) "全部知识库" else "已选 1 个",
                                 onClick = { view = ToolControlsView.Knowledge },
                             )
-                        }
-                        item {
                             ToolNavigationRow(
                                 icon = { Icon(Icons.Rounded.Link, contentDescription = null) },
                                 label = "工具设置",
@@ -5284,23 +5424,20 @@ private fun ToolControlsDialog(
                                 onClick = { view = ToolControlsView.Tools },
                             )
                         }
-                    }
 
-                    ToolControlsView.Knowledge -> {
-                        item {
+                        ToolControlsView.Knowledge -> {
                             ToolToggleRow(
                                 icon = { Icon(Icons.Rounded.Storage, contentDescription = null) },
                                 label = "开启资料检索",
                                 checked = tools.knowledgeSearch,
                                 onChange = { onToolsChange(tools.copy(knowledgeSearch = it)) },
                             )
-                        }
-                        if (loading) {
-                            item { ToolOptionsLoading() }
-                        } else if (knowledgeBases.isEmpty()) {
-                            item { EmptyToolOptions("暂无可检索的知识库") }
-                        } else {
-                            items(knowledgeBases, key = { "tool-kb-${it.id}" }) { knowledgeBase ->
+                            if (loading) {
+                                ToolOptionsLoading()
+                            } else if (knowledgeBases.isEmpty()) {
+                                EmptyToolOptions("暂无可检索的知识库")
+                            } else {
+                                knowledgeBases.forEach { knowledgeBase ->
                                 val specificallySelected = knowledgeBase.id in tools.knowledgeBaseIds
                                 ToolChoiceRow(
                                     title = knowledgeBase.name,
@@ -5325,22 +5462,20 @@ private fun ToolControlsDialog(
                                 )
                             }
                         }
-                    }
+                        }
 
-                    ToolControlsView.Tools -> {
-                        item {
+                        ToolControlsView.Tools -> {
                             ToolToggleRow(
                                 icon = { Icon(Icons.Rounded.Terminal, contentDescription = null) },
                                 label = "开启代码运行",
                                 checked = tools.codeRunner,
                                 onChange = { onToolsChange(tools.copy(codeRunner = it)) },
                             )
-                        }
-                        if (loading) {
-                            item { ToolOptionsLoading() }
-                        } else {
-                            if (isAdmin) {
-                                items(globalServers, key = { "tool-global-mcp-${it.id}" }) { server ->
+                            if (loading) {
+                                ToolOptionsLoading()
+                            } else {
+                                if (isAdmin) {
+                                    globalServers.forEach { server ->
                                     ToolChoiceRow(
                                         title = server.name,
                                         subtitle = "全局自动启用 · ${server.tools.size} 个工具",
@@ -5350,41 +5485,40 @@ private fun ToolControlsDialog(
                                         onSelect = {},
                                     )
                                 }
-                            }
-                            items(userServers, key = { "tool-user-mcp-${it.id}" }) { server ->
-                                val specificallySelected = server.id in tools.mcpServerIds
-                                ToolChoiceRow(
-                                    title = server.name,
-                                    subtitle = "我的 · ${server.tools.size} 个工具",
-                                    state = when {
-                                        tools.mcpServerIds.isEmpty() -> ToolChoiceState.Default
-                                        specificallySelected -> ToolChoiceState.Selected
-                                        else -> ToolChoiceState.Off
-                                    },
-                                    icon = { Icon(Icons.Rounded.Link, contentDescription = null) },
-                                    onSelect = {
-                                        onToolsChange(
-                                            tools.copy(
-                                                mcpServerIds = exclusiveToolSelection(
-                                                    tools.mcpServerIds,
-                                                    server.id,
+                                }
+                                userServers.forEach { server ->
+                                    val specificallySelected = server.id in tools.mcpServerIds
+                                    ToolChoiceRow(
+                                        title = server.name,
+                                        subtitle = "我的 · ${server.tools.size} 个工具",
+                                        state = when {
+                                            tools.mcpServerIds.isEmpty() -> ToolChoiceState.Default
+                                            specificallySelected -> ToolChoiceState.Selected
+                                            else -> ToolChoiceState.Off
+                                        },
+                                        icon = { Icon(Icons.Rounded.Link, contentDescription = null) },
+                                        onSelect = {
+                                            onToolsChange(
+                                                tools.copy(
+                                                    mcpServerIds = exclusiveToolSelection(
+                                                        tools.mcpServerIds,
+                                                        server.id,
+                                                    ),
                                                 ),
-                                            ),
-                                        )
-                                    },
-                                )
-                            }
-                            if (userServers.isEmpty() && (!isAdmin || globalServers.isEmpty())) {
-                                item { EmptyToolOptions("暂无可配置的个人 MCP 服务器") }
+                                            )
+                                        },
+                                    )
+                                }
+                                if (userServers.isEmpty() && (!isAdmin || globalServers.isEmpty())) {
+                                    EmptyToolOptions("暂无可配置的个人 MCP 服务器")
+                                }
                             }
                         }
                     }
-                    }
                 }
             }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
-    )
+        }
+    }
 }
 
 private enum class ToolControlsView { Root, Knowledge, Tools }
@@ -5461,7 +5595,7 @@ private fun ToolToggleRow(
     ) {
         icon()
         Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-        Switch(checked = checked, onCheckedChange = onChange)
+        LinHubSwitch(checked = checked, onCheckedChange = onChange)
     }
 }
 
@@ -5847,13 +5981,23 @@ private const val MAX_VOICE_RECORDING_MILLIS = 5 * 60_000L
 private fun visibleThread(messages: List<ChatMessage>, requestedLeafId: String?): List<ChatMessage> {
     if (messages.isEmpty()) return emptyList()
     val byId = messages.associateBy { it.id }
-    var current = requestedLeafId?.let(byId::get) ?: messages.last()
+    var current = requestedLeafId?.let(byId::get)
+        ?.takeUnless(ChatMessage::isSkillRunReceiptMessage)
+        ?: messages.lastOrNull { !it.isSkillRunReceiptMessage() }
+        ?: return messages.sortedBy(ChatMessage::createdAt)
     val chain = ArrayDeque<ChatMessage>()
     while (true) {
         chain.addFirst(current)
         current = current.parentId?.let(byId::get) ?: break
     }
-    return chain.toList()
+    val chainList = chain.toList()
+    val chainIds = chainList.mapTo(mutableSetOf(), ChatMessage::id)
+    val receipts = messages.filter { message ->
+        message.id !in chainIds &&
+            message.isSkillRunReceiptMessage() &&
+            message.parentId?.let(chainIds::contains) == true
+    }
+    return (chainList + receipts).sortedBy(ChatMessage::createdAt)
 }
 
 /** O(1) 替换流式路径最后一项，同时复用此前已经解析好的树路径。 */
@@ -5877,7 +6021,9 @@ private data class MessageBranchInfo(
 )
 
 private class MessageBranchIndex(messages: List<ChatMessage>) {
-    private val siblingsByParent = messages.groupBy(ChatMessage::parentId)
+    private val siblingsByParent = messages
+        .filterNot(ChatMessage::isSkillRunReceiptMessage)
+        .groupBy(ChatMessage::parentId)
     private val deepestLeafById = mutableMapOf<String, String>()
 
     fun info(message: ChatMessage): MessageBranchInfo? {
@@ -5903,6 +6049,9 @@ private class MessageBranchIndex(messages: List<ChatMessage>) {
         current.id
     }
 }
+
+private fun ChatMessage.isSkillRunReceiptMessage(): Boolean =
+    parts.any { it.type() == "skill-run-receipt" }
 
 private fun ChatMessage.textContent(): String = parts
     .filter { it.type() == "text" }

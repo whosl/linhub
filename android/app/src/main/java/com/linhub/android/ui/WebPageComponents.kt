@@ -2,7 +2,6 @@ package com.linhub.android.ui
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,17 +18,18 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Menu
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
@@ -40,6 +40,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.linhub.android.ui.design.LinHubActionButton
+import com.linhub.android.ui.design.LinHubIconButton
+import com.linhub.android.ui.design.linHubPressable
 
 @Composable
 internal fun WebPageHeader(
@@ -56,8 +59,12 @@ internal fun WebPageHeader(
             .padding(horizontal = 16.dp),
     ) {
         Box(modifier = Modifier.height(44.dp), contentAlignment = Alignment.CenterStart) {
-            IconButton(onClick = onOpenMenu, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Rounded.Menu, contentDescription = "打开侧栏", modifier = Modifier.size(17.dp))
+            LinHubIconButton(
+                onClick = onOpenMenu,
+                size = 36.dp,
+                contentDescription = "打开侧栏",
+            ) {
+                Icon(Icons.Rounded.Menu, contentDescription = null, modifier = Modifier.size(17.dp))
             }
         }
         Row(
@@ -95,18 +102,16 @@ internal fun WebHeaderAction(
     onClick: () -> Unit,
     enabled: Boolean = true,
 ) {
-    Button(
+    LinHubActionButton(
+        text = label,
         onClick = onClick,
         enabled = enabled,
-        modifier = Modifier.height(38.dp),
-        shape = RoundedCornerShape(10.dp),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp),
-        elevation = ButtonDefaults.buttonElevation(defaultElevation = 1.dp),
-    ) {
-        Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp))
-        Spacer(Modifier.size(7.dp))
-        Text(label, style = MaterialTheme.typography.labelLarge)
-    }
+        modifier = Modifier.height(46.dp),
+        leading = {
+            Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.size(7.dp))
+        },
+    )
 }
 
 @Composable
@@ -157,13 +162,11 @@ internal fun WebEmptyState(
             textAlign = TextAlign.Center,
         )
         if (actionLabel != null && onAction != null) {
-            Button(
+            LinHubActionButton(
+                text = actionLabel,
                 onClick = onAction,
                 modifier = Modifier.padding(top = 18.dp),
-                shape = RoundedCornerShape(10.dp),
-            ) {
-                Text(actionLabel)
-            }
+            )
         }
     }
 }
@@ -186,37 +189,28 @@ internal fun WebTabRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         labels.forEachIndexed { index, label ->
-            Surface(
+            val selected = selectedIndex == index
+            val itemColor by animateColorAsState(
+                targetValue = if (selected) MaterialTheme.colorScheme.surface else Color.Transparent,
+                animationSpec = spring(stiffness = 620f),
+                label = "tab-color-$index",
+            )
+            val shape = RoundedCornerShape(12.dp)
+            Box(
                 modifier = Modifier
                     .height(30.dp)
-                    .clickable { onSelect(index) },
-                shape = RoundedCornerShape(8.dp),
-                color = if (selectedIndex == index) {
-                    MaterialTheme.colorScheme.surface
-                } else {
-                    Color.Transparent
-                },
-                border = if (selectedIndex == index) {
-                    BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.55f))
-                } else {
-                    null
-                },
-                shadowElevation = if (selectedIndex == index) 1.dp else 0.dp,
+                    .then(if (selected) Modifier.shadow(3.dp, shape) else Modifier)
+                    .clip(shape)
+                    .background(itemColor)
+                    .linHubPressable { onSelect(index) },
+                contentAlignment = Alignment.Center,
             ) {
-                Box(
-                    modifier = Modifier.padding(horizontal = 12.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        label,
-                        color = if (selectedIndex == index) {
-                            MaterialTheme.colorScheme.onSurface
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                        style = MaterialTheme.typography.labelLarge,
-                    )
-                }
+                Text(
+                    label,
+                    modifier = Modifier.padding(horizontal = 13.dp),
+                    color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelLarge,
+                )
             }
         }
     }
@@ -235,31 +229,27 @@ internal fun WebFilterRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         labels.forEachIndexed { index, label ->
-            Surface(
+            val selected = selectedIndex == index
+            val itemColor by animateColorAsState(
+                targetValue = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
+                animationSpec = spring(stiffness = 620f),
+                label = "filter-color-$index",
+            )
+            val shape = RoundedCornerShape(14.dp)
+            Box(
                 modifier = Modifier
-                    .height(34.dp)
-                    .clickable { onSelect(index) },
-                shape = RoundedCornerShape(10.dp),
-                color = if (selectedIndex == index) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.surfaceVariant
-                },
+                    .height(38.dp)
+                    .clip(shape)
+                    .background(itemColor)
+                    .linHubPressable { onSelect(index) }
+                    .padding(horizontal = 14.dp),
+                contentAlignment = Alignment.Center,
             ) {
-                Box(
-                    modifier = Modifier.padding(horizontal = 13.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        label,
-                        color = if (selectedIndex == index) {
-                            MaterialTheme.colorScheme.onPrimary
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                        style = MaterialTheme.typography.labelLarge,
-                    )
-                }
+                Text(
+                    label,
+                    color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelLarge,
+                )
             }
         }
     }

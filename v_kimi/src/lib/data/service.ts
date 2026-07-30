@@ -1,0 +1,205 @@
+import type {
+  AppSettings,
+  AdminUserDetail,
+  EngineTestInput,
+  EngineTestResult,
+  Artifact,
+  ChatStyle,
+  Conversation,
+  KnowledgeBase,
+  KnowledgeDocument,
+  LedgerEntry,
+  McpServer,
+  MediaAsset,
+  MemoryEntry,
+  Message,
+  Model,
+  Order,
+  Plan,
+  Project,
+  ProjectFile,
+  Provider,
+  RemoteModel,
+  SendMessageInput,
+  Skill,
+  StreamEvent,
+  UsageRecord,
+  User,
+} from "@/lib/types";
+
+export type ProjectPatch = Partial<{
+  name: string;
+  description: string | null;
+  instructions: string | null;
+  color: string | null;
+  modelId: string | null;
+  knowledgeBaseIds: string[];
+}>;
+
+/**
+ * 数据服务接口 — UI 只依赖此接口。
+ * MockDataService（P0-P1）与 ApiDataService（P2+）都实现它。
+ */
+export interface DataService {
+  // ---- 当前用户 ----
+  getCurrentUser(): Promise<User | null>;
+  updateProfile(patch: {
+    name?: string;
+    avatarUrl?: string;
+    defaultModelId?: string | null;
+  }): Promise<User>;
+
+  // ---- 模型与风格 ----
+  listModels(): Promise<Model[]>;
+  /** 模型列表 + 当前用户/全局的默认模型 id（聊天页用） */
+  listModelsWithDefault(): Promise<{ models: Model[]; defaultModelId?: string }>;
+  listStyles(): Promise<ChatStyle[]>;
+  saveStyle(style: Partial<ChatStyle> & { name: string }): Promise<ChatStyle>;
+  deleteStyle(id: string): Promise<void>;
+
+  // ---- 会话 ----
+  listConversations(): Promise<Conversation[]>;
+  getConversation(id: string): Promise<Conversation | null>;
+  listMessages(conversationId: string): Promise<Message[]>;
+  updateConversation(
+    id: string,
+    patch: Partial<
+      Pick<Conversation, "title" | "pinned" | "archived" | "currentLeafId" | "modelId"> & {
+        projectId: string | null;
+      }
+    >
+  ): Promise<Conversation>;
+  deleteConversation(id: string): Promise<void>;
+  searchConversations(query: string): Promise<Conversation[]>;
+
+  // ---- 聊天（流式） ----
+  sendMessage(input: SendMessageInput): AsyncIterable<StreamEvent>;
+  streamConversation(conversationId: string): AsyncIterable<StreamEvent>;
+  stopGeneration(conversationId?: string): Promise<void>;
+  regenerate(
+    conversationId: string,
+    assistantMessageId: string,
+    modelId?: string,
+    optimisticIds?: {
+      clientGenerationId: string;
+      clientAssistantMessageId: string;
+    }
+  ): AsyncIterable<StreamEvent>;
+  setFeedback(messageId: string, feedback: "up" | "down" | null): Promise<void>;
+  replaceMessageImage(
+    messageId: string,
+    oldUrl: string,
+    newUrl: string,
+    editPrompt?: string
+  ): Promise<void>;
+  editImage(input: {
+    image: string;
+    mask?: string | null;
+    prompt: string;
+    operationKey?: string;
+  }): Promise<{ url: string }>;
+
+  // ---- Artifacts ----
+  listArtifacts(conversationId: string): Promise<Artifact[]>;
+  getArtifact(id: string): Promise<Artifact | null>;
+  shareArtifact(id: string): Promise<{ shareToken: string }>;
+
+  // ---- Projects ----
+  listProjects(): Promise<Project[]>;
+  getProject(id: string): Promise<Project | null>;
+  saveProject(p: Partial<Project> & { name: string }): Promise<Project>;
+  updateProject(id: string, patch: ProjectPatch): Promise<Project>;
+  deleteProject(id: string): Promise<void>;
+  listProjectConversations(projectId: string): Promise<Conversation[]>;
+  uploadProjectFile(projectId: string, file: File): Promise<ProjectFile>;
+  deleteProjectFile(fileId: string): Promise<void>;
+
+  // ---- 记忆 ----
+  listMemories(): Promise<MemoryEntry[]>;
+  saveMemory(entry: Partial<MemoryEntry> & { content: string }): Promise<MemoryEntry>;
+  deleteMemory(id: string): Promise<void>;
+
+  // ---- 知识库 ----
+  listKnowledgeBases(): Promise<KnowledgeBase[]>;
+  saveKnowledgeBase(kb: Partial<KnowledgeBase> & { name: string }): Promise<KnowledgeBase>;
+  deleteKnowledgeBase(id: string): Promise<void>;
+  listDocuments(kbId: string): Promise<KnowledgeDocument[]>;
+  uploadDocument(kbId: string, file: File): Promise<KnowledgeDocument>;
+  deleteDocument(kbId: string, docId: string): Promise<void>;
+
+  // ---- Skills ----
+  listMySkills(): Promise<Skill[]>;
+  listMarketSkills(): Promise<Skill[]>;
+  getSkill(id: string): Promise<Skill | null>;
+  saveSkill(
+    s: Partial<Skill> & { name: string; shareToMarket?: boolean }
+  ): Promise<Skill>;
+  deleteSkill(id: string): Promise<void>;
+
+  // ---- 文件 / 媒体 ----
+  listMediaAssets(opts?: {
+    kind?: "upload" | "generated" | "edited" | "all";
+    q?: string;
+    cursor?: string;
+    limit?: number;
+  }): Promise<{ items: MediaAsset[]; nextCursor?: string }>;
+  deleteMediaAsset(id: string): Promise<void>;
+
+  // ---- MCP ----
+  listMcpServers(scope: "global" | "user"): Promise<McpServer[]>;
+  saveMcpServer(s: Partial<McpServer> & { name: string; url: string }): Promise<McpServer>;
+  deleteMcpServer(id: string): Promise<void>;
+  testMcpServer(id: string): Promise<{ ok: boolean; tools: McpServer["tools"]; error?: string }>;
+
+  // ---- 语音 ----
+  transcribeAudio(audio: Blob): Promise<{ text: string }>;
+  synthesizeSpeech(text: string): Promise<{ audioUrl: string }>;
+
+  // ---- 计费（用户侧） ----
+  listUsageRecords(): Promise<UsageRecord[]>;
+  listLedger(): Promise<LedgerEntry[]>;
+  listPlans(): Promise<Plan[]>;
+  createOrder(input: { kind: Order["kind"]; amountCents?: number; planId?: string }): Promise<Order>;
+  redeemCode(code: string): Promise<{ amountCents: number }>;
+
+  // ---- 管理端 ----
+  admin: AdminService;
+}
+
+export interface AdminService {
+  listProviders(): Promise<Provider[]>;
+  saveProvider(p: Partial<Provider> & { kind: Provider["kind"]; name: string; apiKey?: string }): Promise<Provider>;
+  deleteProvider(id: string): Promise<void>;
+  listAllModels(): Promise<Model[]>;
+  saveModel(m: Partial<Model> & { id?: string }): Promise<Model>;
+  deleteModel(id: string): Promise<void>;
+  /** 调供应商 API 拉取远端模型列表（标记哪些已添加） */
+  listRemoteModels(providerId: string): Promise<RemoteModel[]>;
+  /** 批量添加选中的远端模型，返回新增数量 */
+  addRemoteModels(providerId: string, slugs: string[]): Promise<{ added: number }>;
+  getSettings(): Promise<AppSettings>;
+  saveSettings(
+    patch: Partial<AppSettings> & {
+      tavilyApiKey?: string;
+      mimoApiKey?: string;
+      imageGenApiKey?: string;
+      ttsApiKey?: string;
+      asrApiKey?: string;
+    }
+  ): Promise<AppSettings>;
+  testEngineConnection(input: EngineTestInput): Promise<EngineTestResult>;
+  listUsers(): Promise<User[]>;
+  getUserDetail(userId: string): Promise<AdminUserDetail>;
+  grantBalance(userId: string, amountCents: number, note?: string): Promise<void>;
+  updateUserSubscription(
+    userId: string,
+    input: { planId: string | null; expiresInDays?: number }
+  ): Promise<AdminUserDetail>;
+  deleteUser(userId: string): Promise<void>;
+  listAllPlans(): Promise<Plan[]>;
+  savePlan(p: Partial<Plan> & { name: string }): Promise<Plan>;
+  deletePlan(id: string): Promise<void>;
+  listPendingSkills(): Promise<Skill[]>;
+  reviewSkill(id: string, approve: boolean): Promise<void>;
+  listAllUsage(): Promise<UsageRecord[]>;
+}
