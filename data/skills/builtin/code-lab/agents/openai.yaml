@@ -1,0 +1,4 @@
+interface:
+  display_name: "代码实验室"
+  short_description: "在隔离沙盒中安全运行 Python、Node.js 和 Bash 并交付输出文件"
+  default_prompt: "请使用代码实验室在安全沙盒中运行并验证这段代码。"

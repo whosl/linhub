@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { and, asc, eq } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 import { requireSession } from "@/lib/server/auth";
+import { abortConversationGeneration } from "@/lib/server/chat-task-registry";
 
 async function ownedConversation(id: string, userId: string) {
   const [c] = await db
@@ -11,6 +12,22 @@ async function ownedConversation(id: string, userId: string) {
       and(eq(schema.conversations.id, id), eq(schema.conversations.ownerId, userId))
     );
   return c ?? null;
+}
+
+function toUiConversation(c: typeof schema.conversations.$inferSelect) {
+  return {
+    id: c.id,
+    title: c.title,
+    projectId: c.projectId ?? undefined,
+    skillId: c.skillId ?? undefined,
+    modelId: c.modelId,
+    styleId: c.styleId ?? undefined,
+    pinned: c.pinned,
+    archived: c.archived,
+    currentLeafId: c.currentLeafId ?? undefined,
+    createdAt: c.createdAt.toISOString(),
+    updatedAt: c.updatedAt.toISOString(),
+  };
 }
 
 export async function GET(
@@ -30,18 +47,7 @@ export async function GET(
     .orderBy(asc(schema.messages.createdAt));
 
   return Response.json({
-    conversation: {
-      id: c.id,
-      title: c.title,
-      projectId: c.projectId ?? undefined,
-      modelId: c.modelId,
-      styleId: c.styleId ?? undefined,
-      pinned: c.pinned,
-      archived: c.archived,
-      currentLeafId: c.currentLeafId ?? undefined,
-      createdAt: c.createdAt.toISOString(),
-      updatedAt: c.updatedAt.toISOString(),
-    },
+    conversation: toUiConversation(c),
     messages: msgs.map((m) => ({
       id: m.id,
       conversationId: m.conversationId,
@@ -82,7 +88,23 @@ export async function PATCH(
   if (typeof body.title === "string") patch.title = body.title.slice(0, 100);
   if (typeof body.pinned === "boolean") patch.pinned = body.pinned;
   if (typeof body.archived === "boolean") patch.archived = body.archived;
-  if (typeof body.currentLeafId === "string") patch.currentLeafId = body.currentLeafId;
+  if (
+    typeof body.currentLeafId === "string" &&
+    body.currentLeafId !== c.currentLeafId
+  ) {
+    const [message] = await db
+      .select({ id: schema.messages.id })
+      .from(schema.messages)
+      .where(
+        and(
+          eq(schema.messages.id, body.currentLeafId),
+          eq(schema.messages.conversationId, id)
+        )
+      )
+      .limit(1);
+    if (!message) return Response.json({ error: "分支不存在" }, { status: 400 });
+    patch.currentLeafId = body.currentLeafId;
+  }
   if (typeof body.modelId === "string") patch.modelId = body.modelId;
   if (body.projectId !== undefined) {
     if (body.projectId === null) {
@@ -103,11 +125,16 @@ export async function PATCH(
     }
   }
 
-  await db
+  if (Object.keys(patch).length === 0) {
+    return Response.json(toUiConversation(c));
+  }
+
+  const [updated] = await db
     .update(schema.conversations)
     .set({ ...patch, updatedAt: new Date() })
-    .where(eq(schema.conversations.id, id));
-  return Response.json({ ok: true });
+    .where(eq(schema.conversations.id, id))
+    .returning();
+  return Response.json(toUiConversation(updated));
 }
 
 export async function DELETE(
@@ -119,6 +146,15 @@ export async function DELETE(
   const { id } = await params;
   const c = await ownedConversation(id, session.user.id);
   if (!c) return Response.json({ error: "not found" }, { status: 404 });
-  await db.delete(schema.conversations).where(eq(schema.conversations.id, id));
+  abortConversationGeneration(id, session.user.id);
+  const deleted = await db
+    .delete(schema.conversations)
+    .where(
+      and(eq(schema.conversations.id, id), eq(schema.conversations.ownerId, session.user.id))
+    )
+    .returning({ id: schema.conversations.id });
+  if (deleted.length === 0) {
+    return Response.json({ error: "not found" }, { status: 404 });
+  }
   return Response.json({ ok: true });
 }

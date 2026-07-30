@@ -1,7 +1,28 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
+import { bearer } from "better-auth/plugins";
+import { eq, sql } from "drizzle-orm";
 import { headers } from "next/headers";
 import { db, schema } from "./db";
+import { ensureSeeded } from "./seed";
+
+/** 注册开关校验：首个用户放行；否则尊重 settings.registrationEnabled */
+export async function assertRegistrationAllowed() {
+  await ensureSeeded();
+  const [existing] = await db
+    .select({ id: schema.users.id })
+    .from(schema.users)
+    .limit(1);
+  if (!existing) return;
+  const [s] = await db
+    .select({ enabled: schema.settings.registrationEnabled })
+    .from(schema.settings)
+    .where(eq(schema.settings.id, "global"))
+    .limit(1);
+  if (s && !s.enabled) {
+    throw new Error("当前未开放注册，请联系管理员");
+  }
+}
 
 export const auth = betterAuth({
   database: drizzleAdapter(db, {
@@ -14,6 +35,7 @@ export const auth = betterAuth({
     },
     usePlural: true,
   }),
+  plugins: [bearer()],
   emailAndPassword: {
     enabled: true,
     minPasswordLength: 8,
@@ -35,24 +57,20 @@ export const auth = betterAuth({
   databaseHooks: {
     user: {
       create: {
-        // 第一个注册的用户自动成为管理员
+        // 第一个注册的用户自动成为管理员（事务 + advisory lock 防并发）
         before: async (user) => {
-          const [existing] = await db.select({ id: schema.users.id }).from(schema.users).limit(1);
-          // H5：管理员关闭注册后拒绝新用户（首个用户/未初始化设置时放行）
-          if (existing) {
-            const { eq } = await import("drizzle-orm");
-            const [s] = await db
-              .select({ enabled: schema.settings.registrationEnabled })
-              .from(schema.settings)
-              .where(eq(schema.settings.id, "global"));
-            if (s && !s.enabled) {
-              throw new Error("当前未开放注册，请联系管理员");
-            }
-          }
+          await assertRegistrationAllowed();
+          const role = await db.transaction(async (tx) => {
+            await tx.execute(sql`SELECT pg_advisory_xact_lock(8723641)`);
+            const [countRow] = await tx
+              .select({ count: sql<number>`count(*)::int` })
+              .from(schema.users);
+            return (countRow?.count ?? 0) === 0 ? "admin" : "user";
+          });
           return {
             data: {
               ...user,
-              role: existing ? "user" : "admin",
+              role,
               // 新用户赠送 ¥3 体验额度
               balanceCents: 300,
             },

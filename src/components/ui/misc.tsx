@@ -106,7 +106,7 @@ export function TabsList({
   return (
     <TabsPrimitive.List
       className={cn(
-        "inline-flex h-9 items-center gap-1 rounded-lg bg-muted p-1 text-muted-foreground",
+        "flex h-9 w-full max-w-full items-center gap-1 overflow-x-auto rounded-lg bg-muted p-1 text-muted-foreground [scrollbar-width:none] sm:inline-flex sm:w-auto [&::-webkit-scrollbar]:hidden",
         className
       )}
       {...props}
@@ -121,7 +121,7 @@ export function TabsTrigger({
   return (
     <TabsPrimitive.Trigger
       className={cn(
-        "inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium transition-all focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-card data-[state=active]:text-foreground data-[state=active]:shadow-sm",
+        "inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium transition-all focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-card data-[state=active]:text-foreground data-[state=active]:shadow-sm",
         className
       )}
       {...props}
@@ -156,8 +156,17 @@ export function Select({
   placeholder?: string;
   className?: string;
 }) {
+  const emptyOptionValue = "__linhub_select_empty__";
+  const hasEmptyOption = options.some((option) => option.value === "");
+  const selectValue = hasEmptyOption && value === "" ? emptyOptionValue : value;
+
   return (
-    <SelectPrimitive.Root value={value} onValueChange={onValueChange}>
+    <SelectPrimitive.Root
+      value={selectValue}
+      onValueChange={(nextValue) => {
+        onValueChange(nextValue === emptyOptionValue ? "" : nextValue);
+      }}
+    >
       <SelectPrimitive.Trigger
         className={cn(
           "flex h-9 w-full items-center justify-between gap-2 rounded-lg border border-input bg-card px-3 text-sm shadow-xs transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[placeholder]:text-muted-foreground",
@@ -179,7 +188,7 @@ export function Select({
             {options.map((o) => (
               <SelectPrimitive.Item
                 key={o.value}
-                value={o.value}
+                value={o.value === "" ? emptyOptionValue : o.value}
                 className="relative flex cursor-default select-none items-center rounded-lg py-1.5 pl-8 pr-3 text-sm outline-none focus:bg-accent data-[disabled]:opacity-50"
               >
                 <span className="absolute left-2 flex size-4 items-center justify-center">

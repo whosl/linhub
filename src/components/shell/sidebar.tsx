@@ -1,13 +1,15 @@
 "use client";
 
 import * as React from "react";
+import Image from "next/image";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { AnimatePresence, motion } from "motion/react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import {
-  ArchiveIcon,
   BookOpenIcon,
+  ChevronDownIcon,
+  FileIcon,
   FolderIcon,
   MessageSquarePlusIcon,
   MoreHorizontalIcon,
@@ -17,10 +19,9 @@ import {
   PinOffIcon,
   SearchIcon,
   SparklesIcon,
-  Trash2Icon,
 } from "lucide-react";
 import { getDataService } from "@/lib/data";
-import type { Conversation } from "@/lib/types";
+import type { Conversation, Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -28,17 +29,22 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useUiStore } from "@/stores/ui-store";
 import { UserMenu } from "./user-menu";
-import { toast } from "sonner";
+import { ProjectEditDialog } from "./project-edit-dialog";
+import {
+  ConversationActionMenu,
+  type ConversationActionHandlers,
+  useConversationActions,
+} from "@/components/shell/conversation-actions";
 
 const NAV_ITEMS = [
   { href: "/projects", label: "项目", icon: FolderIcon },
   { href: "/skills", label: "技能", icon: SparklesIcon },
   { href: "/knowledge", label: "知识库", icon: BookOpenIcon },
+  { href: "/files", label: "文件", icon: FileIcon },
 ];
 
 function groupLabel(c: Conversation): string {
@@ -51,78 +57,118 @@ function groupLabel(c: Conversation): string {
   return "更早";
 }
 
+function SidebarSectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="px-2 pb-1 pt-2 text-xs font-medium text-muted-foreground md:text-[11px]">
+      {children}
+    </p>
+  );
+}
+
 export function Sidebar() {
   const pathname = usePathname();
-  const router = useRouter();
-  const queryClient = useQueryClient();
-  const { sidebarCollapsed, toggleSidebar, setSearchOpen, mobileSidebarOpen, setMobileSidebar } =
+  const { sidebarCollapsed, toggleSidebar, setSearchOpen, mobileSidebarOpen, setMobileSidebar, setEditingProjectId, collapsedProjects, toggleProjectCollapsed, pinnedProjects, toggleProjectPinned } =
     useUiStore();
+  const { actions, dialogs } = useConversationActions();
 
   const { data: conversations = [] } = useQuery({
     queryKey: ["conversations"],
     queryFn: () => getDataService().listConversations(),
   });
+  const { data: projects = [] } = useQuery({
+    queryKey: ["projects"],
+    queryFn: () => getDataService().listProjects(),
+  });
 
   const active = conversations.filter((c) => !c.archived);
-  const pinned = active.filter((c) => c.pinned);
-  const recent = active.filter((c) => !c.pinned);
+  const archived = conversations.filter((c) => c.archived);
 
-  const grouped = recent.reduce<Record<string, Conversation[]>>((acc, c) => {
+  // 按项目分组：项目内会话 + 无项目会话
+  const knownProjectIds = new Set(projects.map((p) => p.id));
+  const projectConvs = active.filter(
+    (c) => c.projectId && knownProjectIds.has(c.projectId)
+  );
+  const noProjectConvs = active.filter(
+    (c) => !c.projectId || !knownProjectIds.has(c.projectId)
+  );
+  const pinned = noProjectConvs.filter((c) => c.pinned);
+  const recent = noProjectConvs.filter((c) => !c.pinned);
+  const allProjectGroups = projects
+    .map((p) => ({
+      project: p,
+      conversations: projectConvs
+        .filter((c) => c.projectId === p.id)
+        .sort((a, b) => Number(b.pinned) - Number(a.pinned)),
+    }))
+    .filter((g) => g.conversations.length > 0)
+    .sort((a, b) => {
+      const aPinned = pinnedProjects.has(a.project.id);
+      const bPinned = pinnedProjects.has(b.project.id);
+      if (aPinned !== bPinned) return aPinned ? -1 : 1;
+      return 0;
+    });
+  const pinnedProjectGroups = allProjectGroups.filter((g) =>
+    pinnedProjects.has(g.project.id)
+  );
+  const projectGroups = allProjectGroups.filter(
+    (g) => !pinnedProjects.has(g.project.id)
+  );
+
+  const grouped = noProjectConvs.reduce<Record<string, Conversation[]>>((acc, c) => {
     (acc[groupLabel(c)] ??= []).push(c);
     return acc;
   }, {});
   const groupOrder = ["今天", "昨天", "近 7 天", "近 30 天", "更早"];
 
-  const mutateConversation = async (
-    id: string,
-    patch: Parameters<ReturnType<typeof getDataService>["updateConversation"]>[1]
-  ) => {
-    await getDataService().updateConversation(id, patch);
-    queryClient.invalidateQueries({ queryKey: ["conversations"] });
-  };
+  const renderContent = (mobile: boolean) => {
+    const sidebarButtonLabel = mobile ? "关闭侧栏" : "收起侧栏";
+    const handleSidebarButtonClick = () => {
+      if (mobile) {
+        setMobileSidebar(false);
+        return;
+      }
+      toggleSidebar();
+    };
 
-  const handleDelete = async (c: Conversation) => {
-    await getDataService().deleteConversation(c.id);
-    queryClient.invalidateQueries({ queryKey: ["conversations"] });
-    toast.success("会话已删除");
-    if (pathname === `/chat/${c.id}`) router.push("/");
-  };
-
-  const handleRename = async (c: Conversation) => {
-    const title = window.prompt("重命名会话", c.title);
-    if (title && title.trim()) await mutateConversation(c.id, { title: title.trim() });
-  };
-
-  const content = (
+    return (
     <div className="flex h-full flex-col">
       {/* 顶部：logo 与折叠 */}
       <div className="flex items-center justify-between px-3 pt-3">
         <Link
           href="/"
-          className="flex items-center gap-2 rounded-lg px-1.5 py-1 text-[15px] font-semibold tracking-tight transition-colors hover:bg-sidebar-accent"
+          className="flex items-center gap-2.5 rounded-lg px-1.5 py-1 text-xl font-semibold tracking-tight transition-colors hover:bg-sidebar-accent md:gap-2 md:text-[15px]"
         >
-          <span className="flex size-6 items-center justify-center rounded-md bg-primary font-serif text-sm text-primary-foreground">
-            L
+          <span className="flex size-8 items-center justify-center md:size-6" aria-hidden="true">
+            <Image
+              src="/icon.svg"
+              alt=""
+              width={32}
+              height={32}
+              priority
+              className="size-full object-contain"
+            />
           </span>
           LinHub
         </Link>
-        <Tooltip label="收起侧栏" shortcut="⌘\">
+        <Tooltip label={sidebarButtonLabel} shortcut="⌘\">
           <Button
+            type="button"
+            aria-label={sidebarButtonLabel}
             variant="ghost"
             size="icon-sm"
             className="text-sidebar-foreground"
-            onClick={toggleSidebar}
+            onClick={handleSidebarButtonClick}
           >
             <PanelLeftIcon />
           </Button>
         </Tooltip>
       </div>
 
-      {/* 新对话 / 搜索 */}
+      {/* 固定操作：新对话 / 搜索 */}
       <div className="flex flex-col gap-0.5 px-3 pt-4">
         <Link
           href="/"
-          className="group flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm font-medium text-primary transition-colors hover:bg-sidebar-accent"
+          className="group flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-[15px] font-medium text-primary transition-colors hover:bg-sidebar-accent md:text-sm"
         >
           <MessageSquarePlusIcon className="size-4" />
           新对话
@@ -131,55 +177,106 @@ export function Sidebar() {
           </kbd>
         </Link>
         <button
+          type="button"
           onClick={() => setSearchOpen(true)}
-          className="flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm text-sidebar-foreground transition-colors hover:bg-sidebar-accent"
+          className="flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-[15px] text-sidebar-foreground transition-colors hover:bg-sidebar-accent md:text-sm"
         >
           <SearchIcon className="size-4" />
-          搜索会话
+          搜索对话
         </button>
-        {NAV_ITEMS.map((item) => (
-          <Link
-            key={item.href}
-            href={item.href}
-            className={cn(
-              "flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm text-sidebar-foreground transition-colors hover:bg-sidebar-accent",
-              pathname.startsWith(item.href) &&
-                "bg-sidebar-accent font-medium text-foreground"
-            )}
-          >
-            <item.icon className="size-4" />
-            {item.label}
-          </Link>
-        ))}
       </div>
 
-      {/* 会话列表 */}
+      {/* 可滚动导航与会话列表 */}
       <div className="mt-4 flex-1 overflow-y-auto px-3 pb-2">
-        {pinned.length > 0 && (
-          <ConversationGroup
-            label="已置顶"
-            conversations={pinned}
-            pathname={pathname}
-            onTogglePin={(c) => mutateConversation(c.id, { pinned: !c.pinned })}
-            onArchive={(c) => mutateConversation(c.id, { archived: true })}
-            onRename={handleRename}
-            onDelete={handleDelete}
-          />
-        )}
-        {groupOrder.map(
-          (g) =>
-            grouped[g] && (
-              <ConversationGroup
-                key={g}
-                label={g}
-                conversations={grouped[g]}
+        <div className="mb-4 flex flex-col gap-0.5">
+          {NAV_ITEMS.map((item) => (
+            <Link
+              key={item.href}
+              href={item.href}
+              className={cn(
+                "flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-[15px] text-sidebar-foreground transition-colors hover:bg-sidebar-accent md:text-sm",
+                pathname.startsWith(item.href) &&
+                  "bg-sidebar-accent font-medium text-foreground"
+              )}
+            >
+              <item.icon className="size-4" />
+              {item.label}
+            </Link>
+          ))}
+        </div>
+        {(pinnedProjectGroups.length > 0 || pinned.length > 0) && (
+          <div className="mb-3">
+            <SidebarSectionLabel>已置顶</SidebarSectionLabel>
+            {pinnedProjectGroups.map(({ project: p, conversations: pConvs }) => (
+              <ProjectGroup
+                key={`pinned-proj-${p.id}`}
+                project={p}
+                conversations={pConvs}
                 pathname={pathname}
-                onTogglePin={(c) => mutateConversation(c.id, { pinned: !c.pinned })}
-                onArchive={(c) => mutateConversation(c.id, { archived: true })}
-                onRename={handleRename}
-                onDelete={handleDelete}
+                collapsed={collapsedProjects.has(p.id)}
+                pinned
+                onToggleCollapse={() => toggleProjectCollapsed(p.id)}
+                onTogglePin={() => toggleProjectPinned(p.id)}
+                onEdit={() => setEditingProjectId(p.id)}
+                projects={projects}
+                actions={actions}
               />
-            )
+            ))}
+            {pinned.length > 0 && (
+              <ConversationGroup
+                conversations={pinned}
+                pathname={pathname}
+                projects={projects}
+                actions={actions}
+              />
+            )}
+          </div>
+        )}
+        {projectGroups.length > 0 && (
+          <div className="mb-3">
+            <SidebarSectionLabel>项目</SidebarSectionLabel>
+            {projectGroups.map(({ project: p, conversations: pConvs }) => (
+              <ProjectGroup
+                key={`proj-${p.id}`}
+                project={p}
+                conversations={pConvs}
+                pathname={pathname}
+                collapsed={collapsedProjects.has(p.id)}
+                pinned={pinnedProjects.has(p.id)}
+                onToggleCollapse={() => toggleProjectCollapsed(p.id)}
+                onTogglePin={() => toggleProjectPinned(p.id)}
+                onEdit={() => setEditingProjectId(p.id)}
+                projects={projects}
+                actions={actions}
+              />
+            ))}
+          </div>
+        )}
+        {(recent.length > 0 || archived.length > 0) && (
+          <div className="mb-3">
+            {groupOrder.map(
+              (g) =>
+                grouped[g] && (
+                  <ConversationGroup
+                    key={g}
+                    label={g}
+                    conversations={grouped[g]}
+                    pathname={pathname}
+                    projects={projects}
+                    actions={actions}
+                  />
+                )
+            )}
+            {archived.length > 0 && (
+              <ConversationGroup
+                label="已归档"
+                conversations={archived}
+                pathname={pathname}
+                projects={projects}
+                actions={actions}
+              />
+            )}
+          </div>
         )}
       </div>
 
@@ -188,7 +285,8 @@ export function Sidebar() {
         <UserMenu />
       </div>
     </div>
-  );
+    );
+  };
 
   return (
     <>
@@ -199,7 +297,7 @@ export function Sidebar() {
         transition={{ type: "spring", stiffness: 380, damping: 38 }}
         className="relative z-30 hidden h-full shrink-0 overflow-hidden border-r border-sidebar-border bg-sidebar md:block"
       >
-        <div className="h-full w-[272px]">{content}</div>
+        <div className="h-full w-[272px]">{renderContent(false)}</div>
       </motion.aside>
 
       {/* 移动端抽屉 */}
@@ -223,11 +321,14 @@ export function Sidebar() {
                 if ((e.target as HTMLElement).closest("a")) setMobileSidebar(false);
               }}
             >
-              {content}
+              {renderContent(true)}
             </motion.aside>
           </>
         )}
       </AnimatePresence>
+
+      <ProjectEditDialog />
+      {dialogs}
     </>
   );
 }
@@ -236,24 +337,22 @@ function ConversationGroup({
   label,
   conversations,
   pathname,
-  onTogglePin,
-  onArchive,
-  onRename,
-  onDelete,
+  projects,
+  actions,
 }: {
-  label: string;
+  label?: string;
   conversations: Conversation[];
   pathname: string;
-  onTogglePin: (c: Conversation) => void;
-  onArchive: (c: Conversation) => void;
-  onRename: (c: Conversation) => void;
-  onDelete: (c: Conversation) => void;
+  projects: { id: string; name: string; color?: string }[];
+  actions: ConversationActionHandlers;
 }) {
   return (
     <div className="mb-3">
-      <p className="px-2 pb-1 text-[11px] font-medium text-muted-foreground">
-        {label}
-      </p>
+      {label && (
+        <p className="px-2 pb-1 text-xs font-medium text-muted-foreground md:text-[11px]">
+          {label}
+        </p>
+      )}
       {conversations.map((c) => {
         const isActive = pathname === `/chat/${c.id}`;
         return (
@@ -267,7 +366,7 @@ function ConversationGroup({
             <Link
               href={`/chat/${c.id}`}
               className={cn(
-                "flex-1 truncate px-2 py-1.5 text-sm text-sidebar-foreground",
+                "flex-1 truncate px-2 py-1.5 text-[15px] text-sidebar-foreground md:text-sm",
                 isActive && "font-medium text-foreground"
               )}
             >
@@ -276,44 +375,136 @@ function ConversationGroup({
               )}
               {c.title}
             </Link>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button
-                  className={cn(
-                    "mr-1 rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-border focus:opacity-100 group-hover:opacity-100",
-                    isActive && "opacity-100"
-                  )}
-                >
-                  <MoreHorizontalIcon className="size-4" />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" side="right">
-                <DropdownMenuItem onClick={() => onRename(c)}>
-                  <PencilIcon /> 重命名
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => onTogglePin(c)}>
-                  {c.pinned ? (
-                    <>
-                      <PinOffIcon /> 取消置顶
-                    </>
-                  ) : (
-                    <>
-                      <PinIcon /> 置顶
-                    </>
-                  )}
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => onArchive(c)}>
-                  <ArchiveIcon /> 归档
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem variant="destructive" onClick={() => onDelete(c)}>
-                  <Trash2Icon /> 删除
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <ConversationActionMenu
+              conversation={c}
+              projects={projects}
+              actions={actions}
+              triggerClassName={cn(isActive && "opacity-100")}
+            />
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/** 项目分组：可折叠文件夹 + ⋯ 菜单（编辑/新对话/删除） */
+function ProjectGroup({
+  project,
+  conversations,
+  pathname,
+  collapsed,
+  pinned,
+  onToggleCollapse,
+  onTogglePin,
+  onEdit,
+  projects,
+  actions,
+}: {
+  project: Project;
+  conversations: Conversation[];
+  pathname: string;
+  collapsed: boolean;
+  pinned: boolean;
+  onToggleCollapse: () => void;
+  onTogglePin: () => void;
+  onEdit: () => void;
+  projects: { id: string; name: string; color?: string }[];
+  actions: ConversationActionHandlers;
+}) {
+  return (
+    <div className="mb-1">
+      {/* 项目标题行 */}
+      <div className="group/proj flex items-center rounded-lg transition-colors hover:bg-sidebar-accent">
+        <button
+          type="button"
+          onClick={onToggleCollapse}
+          aria-expanded={!collapsed}
+          aria-label={`${collapsed ? "展开" : "收起"}项目「${project.name}」`}
+          className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1.5 text-[15px] text-sidebar-foreground md:text-sm"
+        >
+          {pinned ? (
+            <PinIcon className="size-4 shrink-0 text-muted-foreground" />
+          ) : (
+            <FolderIcon className="size-4 shrink-0 text-muted-foreground" />
+          )}
+          <span className="truncate">{project.name}</span>
+          <ChevronDownIcon
+            className={cn(
+              "ml-auto size-3.5 shrink-0 text-muted-foreground transition-transform",
+              collapsed && "-rotate-90"
+            )}
+          />
+        </button>
+        {/* ⋯ 菜单 */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              aria-label={`项目「${project.name}」更多操作`}
+              className="mr-1 rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-border focus:opacity-100 group-hover/proj:opacity-100"
+            >
+              <MoreHorizontalIcon className="size-4" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" side="right">
+            <DropdownMenuItem onClick={onTogglePin}>
+              {pinned ? (
+                <>
+                  <PinOffIcon /> 取消置顶
+                </>
+              ) : (
+                <>
+                  <PinIcon /> 置顶
+                </>
+              )}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={onEdit}>
+              <PencilIcon /> 编辑项目
+            </DropdownMenuItem>
+            <DropdownMenuItem asChild>
+              <Link href={`/?project=${project.id}`}>
+                <MessageSquarePlusIcon className="size-4" /> 在项目中新对话
+              </Link>
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+
+      {/* 展开的对话列表 */}
+      {!collapsed && conversations.length > 0 && (
+        <div className="ml-3 border-l border-sidebar-border pl-1">
+          {conversations.map((c) => {
+            const isActive = pathname === `/chat/${c.id}`;
+            return (
+              <div
+                key={c.id}
+                className={cn(
+                  "group relative flex items-center rounded-lg transition-colors hover:bg-sidebar-accent",
+                  isActive && "bg-sidebar-accent"
+                )}
+              >
+                <Link
+                  href={`/chat/${c.id}`}
+                  className={cn(
+                    "flex-1 truncate px-2 py-1.5 text-[15px] text-sidebar-foreground md:text-sm",
+                    isActive && "font-medium text-foreground"
+                  )}
+                >
+                  {c.pinned && <PinIcon className="mr-1.5 inline size-3 text-muted-foreground" />}
+                  {c.title}
+                </Link>
+                <ConversationActionMenu
+                  conversation={c}
+                  projects={projects}
+                  actions={actions}
+                  triggerClassName={cn(isActive && "opacity-100")}
+                />
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

@@ -19,7 +19,8 @@ export async function GET(
     .where(
       and(
         eq(schema.conversations.projectId, id),
-        eq(schema.conversations.ownerId, session.user.id)
+        eq(schema.conversations.ownerId, session.user.id),
+        eq(schema.conversations.archived, false)
       )
     )
     .orderBy(desc(schema.conversations.updatedAt));

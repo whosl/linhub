@@ -1,11 +1,28 @@
 import { NextRequest } from "next/server";
 import { asc, eq } from "drizzle-orm";
+import { z } from "zod";
 import { db, schema } from "@/lib/server/db";
 import { requireAdmin } from "@/lib/server/auth";
 import { ensureSeeded } from "@/lib/server/seed";
-import type { Plan } from "@/lib/types";
+import { parseBody } from "@/lib/server/validate";
 
 const uid = () => crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+
+// I1: 校验套餐字段，价格/额度必须非负
+const PlanUpsertSchema = z.object({
+  id: z.string().optional(),
+  name: z.string().min(1, "名称不能为空"),
+  description: z.string().default(""),
+  priceCentsPerMonth: z.number().int().nonnegative().default(0),
+  monthlyQuotaCents: z
+    .number()
+    .int()
+    .refine((value) => value === -1 || value >= 0, "月额度必须为 -1 或非负整数")
+    .default(0),
+  modelTier: z.enum(["free", "pro"]).default("free"),
+  features: z.array(z.string()).default([]),
+  enabled: z.boolean().default(true),
+});
 
 export async function GET() {
   await ensureSeeded();
@@ -27,17 +44,17 @@ export async function POST(req: NextRequest) {
   } catch {
     return Response.json({ error: "无权限" }, { status: 403 });
   }
-  const body = (await req.json()) as Partial<Plan> & { name: string };
-  if (!body.name?.trim()) return Response.json({ error: "名称不能为空" }, { status: 400 });
+  const body = await parseBody(req, PlanUpsertSchema);
+  if (body instanceof Response) return body; // 400 校验失败
 
   const values = {
     name: body.name,
-    description: body.description ?? "",
-    priceCentsPerMonth: body.priceCentsPerMonth ?? 0,
-    monthlyQuotaCents: body.monthlyQuotaCents ?? 0,
-    modelTier: body.modelTier ?? ("free" as const),
-    features: body.features ?? [],
-    enabled: body.enabled ?? true,
+    description: body.description,
+    priceCentsPerMonth: body.priceCentsPerMonth,
+    monthlyQuotaCents: body.monthlyQuotaCents,
+    modelTier: body.modelTier,
+    features: body.features,
+    enabled: body.enabled,
   };
   const id = body.id ?? `plan-${uid()}`;
   if (body.id) {

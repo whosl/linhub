@@ -1,0 +1,101 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+/* 设计 token:Claude 风格 —— 暖色、简洁、充足留白 */
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", "Helvetica Neue",
+    sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  /* 浅色(默认) */
+  --color-bg: #faf9f5;          /* 奶油背景 */
+  --color-surface: #ffffff;     /* 卡片/表面 */
+  --color-surface-2: #f3f2ec;   /* 次级表面(hover/输入底) */
+  --color-border: #e8e6dd;
+  --color-text: #1f1e1b;        /* 近黑暖灰 */
+  --color-text-2: #6b6a63;      /* 次级文字 */
+  --color-text-3: #a3a199;      /* 弱文字 */
+  --color-primary: #c96442;     /* 陶土橙 */
+  --color-primary-hover: #b2553a;
+  --color-primary-soft: #f6e8e2; /* 主色淡底 */
+  --color-on-primary: #ffffff;
+  --color-danger: #c23b3b;
+  --color-danger-soft: #f9e6e6;
+  --color-success: #3d8a5a;
+
+  /* 圆角 */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+}
+
+/* 深色 token,挂到 .dark 作用域下,配合 @custom-variant 生效 */
+.dark {
+  --color-bg: #262624;
+  --color-surface: #2f2e2b;
+  --color-surface-2: #3a3935;
+  --color-border: #45443f;
+  --color-text: #ece9e2;
+  --color-text-2: #b3b0a6;
+  --color-text-3: #7d7b72;
+  --color-primary: #d97757;
+  --color-primary-hover: #e08a6c;
+  --color-primary-soft: #4a352c;
+  --color-on-primary: #1f1e1b;
+  --color-danger: #e06c6c;
+  --color-danger-soft: #4a2e2e;
+  --color-success: #5fb87f;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* 细滚动条 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--color-text) 20%, transparent)
+    transparent;
+}
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+*::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-text) 20%, transparent);
+  border-radius: 3px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 流式输出光标:闪烁竖条 */
+.streaming-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 1.1em;
+  margin-left: 2px;
+  border-radius: 2px;
+  background: var(--color-primary);
+  vertical-align: text-bottom;
+  animation: cursor-blink 1s steps(1) infinite;
+}
+@keyframes cursor-blink {
+  50% {
+    opacity: 0;
+  }
+}

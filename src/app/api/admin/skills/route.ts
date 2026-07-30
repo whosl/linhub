@@ -2,10 +2,12 @@ import { NextRequest } from "next/server";
 import { desc, eq } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 import { requireAdmin } from "@/lib/server/auth";
+import { ensureSeeded } from "@/lib/server/seed";
 import { skillToUi } from "../../skills/util";
 
 /** 待审核 Skill 列表 */
 export async function GET() {
+  await ensureSeeded();
   try {
     await requireAdmin();
   } catch {
@@ -21,6 +23,7 @@ export async function GET() {
 
 /** 审核：{ id, approve } */
 export async function POST(req: NextRequest) {
+  await ensureSeeded();
   try {
     await requireAdmin();
   } catch {
@@ -29,7 +32,12 @@ export async function POST(req: NextRequest) {
   const { id, approve } = (await req.json()) as { id: string; approve: boolean };
   await db
     .update(schema.skills)
-    .set({ visibility: approve ? "public" : "private", updatedAt: new Date() })
+    .set({
+      visibility: approve ? "public" : "private",
+      reviewStatus: approve ? "approved" : "rejected",
+      publishedAt: approve ? new Date() : null,
+      updatedAt: new Date(),
+    })
     .where(eq(schema.skills.id, id));
   return Response.json({ ok: true });
 }

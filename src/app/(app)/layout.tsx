@@ -15,6 +15,7 @@ import { useGlobalShortcuts } from "@/lib/hooks/use-shortcuts";
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const { sidebarCollapsed, toggleSidebar, setMobileSidebar } = useUiStore();
   const pathname = usePathname();
+  const isChatSurface = pathname === "/" || pathname.startsWith("/chat/");
   useGlobalShortcuts();
 
   // 移动端：从左边缘右滑打开侧栏
@@ -46,7 +47,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       <main className="relative flex min-w-0 flex-1 flex-col">
         {/* 折叠态的展开按钮（桌面） */}
         <AnimatePresence>
-          {sidebarCollapsed && (
+          {sidebarCollapsed && !isChatSurface && (
             <motion.div
               initial={{ opacity: 0, x: -8 }}
               animate={{ opacity: 1, x: 0 }}
@@ -54,7 +55,13 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
               className="absolute left-3 top-3 z-20 hidden md:block"
             >
               <Tooltip label="展开侧栏" shortcut="⌘\">
-                <Button variant="ghost" size="icon-sm" onClick={toggleSidebar}>
+                <Button
+                  type="button"
+                  aria-label="展开侧栏"
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={toggleSidebar}
+                >
                   <PanelLeftIcon />
                 </Button>
               </Tooltip>
@@ -63,15 +70,19 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         </AnimatePresence>
 
         {/* 移动端顶栏按钮 */}
-        <div className="absolute left-3 top-3 z-20 md:hidden">
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={() => setMobileSidebar(true)}
-          >
-            <MenuIcon />
-          </Button>
-        </div>
+        {!isChatSurface && (
+          <div className="absolute left-3 top-3 z-20 md:hidden">
+            <Button
+              type="button"
+              aria-label="打开侧栏"
+              variant="ghost"
+              size="icon-sm"
+              onClick={() => setMobileSidebar(true)}
+            >
+              <MenuIcon />
+            </Button>
+          </div>
+        )}
 
         <AnimatePresence mode="popLayout" initial={false}>
           <motion.div

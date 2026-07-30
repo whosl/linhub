@@ -10,10 +10,15 @@ import {
   PlugIcon,
   PlusIcon,
   Trash2Icon,
-  UserIcon,
 } from "lucide-react";
 import { getDataService } from "@/lib/data";
-import type { McpServer } from "@/lib/types";
+import { clientRandomUUID } from "@/lib/client-id";
+import type { ChatStyle, McpServer, MemoryEntry, User } from "@/lib/types";
+import {
+  optimisticInsertRecord,
+  optimisticPatchRecords,
+  optimisticRemoveRecord,
+} from "@/lib/optimistic-query";
 import { formatRelativeTime } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input, Textarea } from "@/components/ui/input";
@@ -32,19 +37,21 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 import { PageContainer, PageHeader } from "@/components/shell/page-header";
+import { useUiStore } from "@/stores/ui-store";
 import { toast } from "sonner";
 
 export default function SettingsPage() {
   return (
     <PageContainer>
-      <PageHeader title="设置" description="账户、记忆、回复风格与连接器" />
+      <PageHeader title="设置" description="账户、界面、记忆、回复风格与连接器" />
       <Tabs defaultValue="account">
-        <TabsList>
+        <TabsList className="mb-1">
           <TabsTrigger value="account">账户</TabsTrigger>
           <TabsTrigger value="memory">记忆</TabsTrigger>
           <TabsTrigger value="styles">回复风格</TabsTrigger>
@@ -71,6 +78,7 @@ export default function SettingsPage() {
 
 function AccountTab() {
   const queryClient = useQueryClient();
+  const { messageRailEnabled, setMessageRailEnabled } = useUiStore();
   const { data: user } = useQuery({
     queryKey: ["current-user"],
     queryFn: () => getDataService().getCurrentUser(),
@@ -78,26 +86,40 @@ function AccountTab() {
   const [name, setName] = React.useState("");
 
   React.useEffect(() => {
-    if (user) setName(user.name);
+    if (user) Promise.resolve().then(() => setName(user.name));
   }, [user]);
 
   if (!user) return null;
 
   const save = async () => {
-    await getDataService().updateProfile({ name });
-    queryClient.invalidateQueries({ queryKey: ["current-user"] });
-    toast.success("已保存");
+    const cleanName = name.trim();
+    if (!cleanName) return;
+    const optimistic = optimisticPatchRecords<User>(
+      queryClient,
+      [["current-user"]],
+      user.id,
+      { name: cleanName }
+    );
+    try {
+      const saved = await getDataService().updateProfile({ name: cleanName });
+      optimistic.reconcile(saved);
+      toast.success("已保存");
+    } catch (error) {
+      optimistic.rollback();
+      setName(user.name);
+      toast.error(error instanceof Error ? error.message : "保存失败");
+    }
   };
 
   return (
     <div className="space-y-4">
-      <Card className="flex items-center gap-4 p-5">
+      <Card className="flex flex-wrap items-center gap-4 p-5">
         <Avatar name={user.name} src={user.avatarUrl} className="size-14 text-xl" />
-        <div className="flex-1">
-          <p className="font-medium">{user.name}</p>
-          <p className="text-sm text-muted-foreground">{user.email}</p>
+        <div className="min-w-0 flex-1">
+          <p className="truncate font-medium">{user.name}</p>
+          <p className="truncate text-sm text-muted-foreground">{user.email}</p>
         </div>
-        {user.role === "admin" && <Badge>管理员</Badge>}
+        {user.role === "admin" && <Badge className="shrink-0">管理员</Badge>}
       </Card>
 
       <Card className="space-y-4 p-5">
@@ -105,8 +127,12 @@ function AccountTab() {
           <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
             昵称
           </label>
-          <div className="flex gap-2">
-            <Input value={name} onChange={(e) => setName(e.target.value)} />
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="min-w-0 flex-1"
+            />
             <Button onClick={save} disabled={!name.trim() || name === user.name}>
               保存
             </Button>
@@ -122,6 +148,23 @@ function AccountTab() {
           >
             修改密码
           </Button>
+        </div>
+      </Card>
+
+      <Card className="space-y-3 p-5">
+        <p className="text-sm font-medium">界面</p>
+        <div className="flex items-center justify-between gap-4 rounded-lg border bg-muted/25 px-3 py-2.5">
+          <div className="min-w-0">
+            <p className="text-sm font-medium">聊天消息导航条</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              在聊天页右侧显示消息导航，点击可跳转到对应用户消息。
+            </p>
+          </div>
+          <Switch
+            checked={messageRailEnabled}
+            onCheckedChange={setMessageRailEnabled}
+            aria-label="启用聊天消息导航条"
+          />
         </div>
       </Card>
 
@@ -149,22 +192,60 @@ function AccountTab() {
 function MemoryTab() {
   const queryClient = useQueryClient();
   const [newMemory, setNewMemory] = React.useState("");
+  const [deleteTarget, setDeleteTarget] = React.useState<MemoryEntry | null>(null);
+  const [deleting, setDeleting] = React.useState(false);
   const { data: memories = [] } = useQuery({
     queryKey: ["memories"],
     queryFn: () => getDataService().listMemories(),
   });
 
   const add = async () => {
-    if (!newMemory.trim()) return;
-    await getDataService().saveMemory({ content: newMemory.trim() });
-    queryClient.invalidateQueries({ queryKey: ["memories"] });
+    const content = newMemory.trim();
+    if (!content) return;
+    const now = new Date().toISOString();
+    const temporary: MemoryEntry = {
+      id: `optimistic-memory-${clientRandomUUID()}`,
+      content,
+      createdAt: now,
+      updatedAt: now,
+      clientMutationState: "pending",
+    };
+    const optimistic = optimisticInsertRecord<MemoryEntry>(
+      queryClient,
+      [["memories"]],
+      temporary
+    );
     setNewMemory("");
-    toast.success("记忆已添加");
+    try {
+      const saved = await getDataService().saveMemory({ content });
+      optimistic.reconcile(saved);
+      toast.success("记忆已添加");
+    } catch (error) {
+      optimistic.rollback();
+      setNewMemory(content);
+      toast.error(error instanceof Error ? error.message : "记忆添加失败");
+    }
   };
 
-  const remove = async (id: string) => {
-    await getDataService().deleteMemory(id);
-    queryClient.invalidateQueries({ queryKey: ["memories"] });
+  const remove = async () => {
+    if (!deleteTarget || deleting) return;
+    setDeleting(true);
+    const target = deleteTarget;
+    const optimistic = optimisticRemoveRecord<MemoryEntry>(
+      queryClient,
+      [["memories"]],
+      target.id
+    );
+    setDeleteTarget(null);
+    try {
+      await getDataService().deleteMemory(target.id);
+      toast.success("记忆已删除");
+    } catch (e) {
+      optimistic.rollback();
+      toast.error(e instanceof Error ? e.message : "删除失败");
+    } finally {
+      setDeleting(false);
+    }
   };
 
   return (
@@ -172,12 +253,13 @@ function MemoryTab() {
       <p className="text-sm text-muted-foreground">
         模型会在对话中自动记录关于你的偏好与事实，也会在新对话中回忆相关内容。你可以随时删除任何一条。
       </p>
-      <div className="flex gap-2">
+      <div className="flex flex-col gap-2 sm:flex-row">
         <Input
           value={newMemory}
           onChange={(e) => setNewMemory(e.target.value)}
           placeholder="手动添加一条记忆，例如：我偏好简洁的回答"
           onKeyDown={(e) => e.key === "Enter" && add()}
+          className="min-w-0 flex-1"
         />
         <Button onClick={add} disabled={!newMemory.trim()}>
           <PlusIcon /> 添加
@@ -198,10 +280,13 @@ function MemoryTab() {
                 <p className="text-sm">{m.content}</p>
                 <p className="mt-0.5 text-xs text-muted-foreground">
                   {formatRelativeTime(m.updatedAt)}
+                  {m.clientMutationState === "pending" && " · 保存中…"}
                 </p>
               </div>
               <button
-                onClick={() => remove(m.id)}
+                type="button"
+                aria-label={`删除记忆「${m.content.slice(0, 32)}」`}
+                onClick={() => setDeleteTarget(m)}
                 className="rounded-md p-1.5 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
               >
                 <Trash2Icon className="size-4" />
@@ -210,6 +295,16 @@ function MemoryTab() {
           ))}
         </div>
       )}
+      <DeleteConfirmDialog
+        open={!!deleteTarget}
+        title="删除记忆"
+        description={`将删除这条记忆：「${deleteTarget?.content ?? ""}」。此操作不可撤销。`}
+        deleting={deleting}
+        onOpenChange={(open) => {
+          if (!open && !deleting) setDeleteTarget(null);
+        }}
+        onConfirm={remove}
+      />
     </div>
   );
 }
@@ -218,46 +313,111 @@ function MemoryTab() {
 
 function StylesTab() {
   const queryClient = useQueryClient();
+  const { defaultReplyStyleId, setDefaultReplyStyleId } = useUiStore();
   const [editorOpen, setEditorOpen] = React.useState(false);
   const [form, setForm] = React.useState({ name: "", description: "", prompt: "" });
+  const [deleteTarget, setDeleteTarget] = React.useState<ChatStyle | null>(null);
+  const [deleting, setDeleting] = React.useState(false);
   const { data: styles = [] } = useQuery({
     queryKey: ["styles"],
     queryFn: () => getDataService().listStyles(),
   });
+  const effectiveDefaultStyleId =
+    styles.find((style) => style.id === defaultReplyStyleId)?.id ??
+    styles.find((style) => style.id === "style-normal")?.id ??
+    styles[0]?.id ??
+    "";
 
   const save = async () => {
-    await getDataService().saveStyle(form);
-    queryClient.invalidateQueries({ queryKey: ["styles"] });
+    const temporary: ChatStyle = {
+      id: `optimistic-style-${clientRandomUUID()}`,
+      name: form.name.trim(),
+      description: form.description.trim(),
+      prompt: form.prompt,
+      builtIn: false,
+      clientMutationState: "pending",
+    };
+    const optimistic = optimisticInsertRecord<ChatStyle>(
+      queryClient,
+      [["styles"]],
+      temporary
+    );
     setEditorOpen(false);
     setForm({ name: "", description: "", prompt: "" });
-    toast.success("风格已创建");
+    try {
+      const saved = await getDataService().saveStyle(form);
+      optimistic.reconcile(saved);
+      toast.success("风格已创建");
+    } catch (error) {
+      optimistic.rollback();
+      toast.error(error instanceof Error ? error.message : "风格创建失败");
+    }
   };
 
-  const remove = async (id: string) => {
-    await getDataService().deleteStyle(id);
-    queryClient.invalidateQueries({ queryKey: ["styles"] });
+  const remove = async () => {
+    if (!deleteTarget || deleting) return;
+    setDeleting(true);
+    const target = deleteTarget;
+    const optimistic = optimisticRemoveRecord<ChatStyle>(
+      queryClient,
+      [["styles"]],
+      target.id
+    );
+    setDeleteTarget(null);
+    try {
+      await getDataService().deleteStyle(target.id);
+      toast.success("风格已删除");
+    } catch (e) {
+      optimistic.rollback();
+      toast.error(e instanceof Error ? e.message : "删除失败");
+    } finally {
+      setDeleting(false);
+    }
   };
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <p className="text-sm text-muted-foreground">
-          风格决定回复的语气与详略，可在输入框随时切换。
+          风格决定回复的语气与详略，新对话会使用你选择的默认风格。
         </p>
-        <Button size="sm" onClick={() => setEditorOpen(true)}>
+        <Button size="sm" onClick={() => setEditorOpen(true)} className="self-start">
           <PlusIcon /> 自定义风格
         </Button>
       </div>
+      {styles.length > 0 && (
+        <Card className="space-y-2 p-4">
+          <label className="text-sm font-medium">默认回复风格</label>
+          <Select
+            value={effectiveDefaultStyleId}
+            onValueChange={setDefaultReplyStyleId}
+            options={styles.map((style) => ({
+              value: style.id,
+              label: style.name,
+            }))}
+            className="max-w-xs"
+          />
+        </Card>
+      )}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {styles.map((s) => (
           <Card key={s.id} className="group p-4">
             <div className="flex items-start justify-between">
-              <h3 className="text-sm font-medium">{s.name}</h3>
+              <h3 className="text-sm font-medium">
+                {s.name}
+                {s.clientMutationState === "pending" && (
+                  <span className="ml-2 text-xs font-normal text-muted-foreground">
+                    保存中…
+                  </span>
+                )}
+              </h3>
               {s.builtIn ? (
                 <Badge variant="outline">内置</Badge>
               ) : (
                 <button
-                  onClick={() => remove(s.id)}
+                  type="button"
+                  aria-label={`删除回复风格「${s.name}」`}
+                  onClick={() => setDeleteTarget(s)}
                   className="rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
                 >
                   <Trash2Icon className="size-3.5" />
@@ -302,6 +462,16 @@ function StylesTab() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <DeleteConfirmDialog
+        open={!!deleteTarget}
+        title="删除回复风格"
+        description={`将删除回复风格「${deleteTarget?.name ?? ""}」。此操作不可撤销。`}
+        deleting={deleting}
+        onOpenChange={(open) => {
+          if (!open && !deleting) setDeleteTarget(null);
+        }}
+        onConfirm={remove}
+      />
     </div>
   );
 }
@@ -312,6 +482,8 @@ function McpTab() {
   const queryClient = useQueryClient();
   const [addOpen, setAddOpen] = React.useState(false);
   const [testing, setTesting] = React.useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = React.useState<McpServer | null>(null);
+  const [deleting, setDeleting] = React.useState(false);
   const [form, setForm] = React.useState({
     name: "",
     url: "",
@@ -324,11 +496,37 @@ function McpTab() {
   });
 
   const add = async () => {
-    await getDataService().saveMcpServer({ ...form, scope: "user" });
-    queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+    const temporary: McpServer = {
+      id: `optimistic-mcp-${clientRandomUUID()}`,
+      scope: "user",
+      name: form.name.trim(),
+      url: form.url.trim(),
+      transport: form.transport,
+      enabled: false,
+      status: "unknown",
+      tools: [],
+      clientMutationState: "pending",
+    };
+    const optimistic = optimisticInsertRecord<McpServer>(
+      queryClient,
+      [["mcp-servers", "user"]],
+      temporary
+    );
     setAddOpen(false);
     setForm({ name: "", url: "", transport: "streamable-http" });
-    toast.success("MCP 服务器已添加");
+    try {
+      const saved = await getDataService().saveMcpServer({
+        ...form,
+        name: form.name.trim(),
+        url: form.url.trim(),
+        scope: "user",
+      });
+      optimistic.reconcile(saved);
+      toast.success("MCP 服务器已添加");
+    } catch (error) {
+      optimistic.rollback();
+      toast.error(error instanceof Error ? error.message : "添加失败");
+    }
   };
 
   const test = async (id: string) => {
@@ -340,23 +538,58 @@ function McpTab() {
     else toast.error(result.error ?? "连接失败");
   };
 
-  const remove = async (id: string) => {
-    await getDataService().deleteMcpServer(id);
-    queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+  const remove = async () => {
+    if (!deleteTarget || deleting) return;
+    setDeleting(true);
+    const target = deleteTarget;
+    const optimistic = optimisticRemoveRecord<McpServer>(
+      queryClient,
+      [["mcp-servers"]],
+      target.id
+    );
+    setDeleteTarget(null);
+    try {
+      await getDataService().deleteMcpServer(target.id);
+      toast.success("MCP 服务器已删除");
+    } catch (e) {
+      optimistic.rollback();
+      toast.error(e instanceof Error ? e.message : "删除失败");
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const toggle = async (server: McpServer) => {
-    await getDataService().saveMcpServer({ ...server, enabled: !server.enabled });
-    queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+    const enabled = !server.enabled;
+    const optimistic = optimisticPatchRecords<McpServer>(
+      queryClient,
+      [["mcp-servers"]],
+      server.id,
+      { enabled }
+    );
+    try {
+      const saved = await getDataService().saveMcpServer({
+        id: server.id,
+        name: server.name,
+        url: server.url,
+        transport: server.transport,
+        scope: server.scope,
+        enabled,
+      });
+      optimistic.reconcile(saved);
+    } catch (error) {
+      optimistic.rollback();
+      toast.error(error instanceof Error ? error.message : "保存失败");
+    }
   };
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <p className="text-sm text-muted-foreground">
           添加你自己的 MCP 服务器，其工具仅对你可用，可在对话工具面板中启停。
         </p>
-        <Button size="sm" onClick={() => setAddOpen(true)}>
+        <Button size="sm" onClick={() => setAddOpen(true)} className="self-start">
           <PlusIcon /> 添加服务器
         </Button>
       </div>
@@ -371,36 +604,49 @@ function McpTab() {
         <div className="space-y-2">
           {servers.map((s) => (
             <Card key={s.id} className="group p-4">
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3">
                 <PlugIcon className="size-4 shrink-0 text-primary" />
-                <div className="min-w-0 flex-1">
+                <div className="min-w-0 flex-1 basis-48">
                   <p className="flex items-center gap-2 text-sm font-medium">
                     {s.name}
+                    {s.clientMutationState === "pending" && (
+                      <span className="text-xs font-normal text-muted-foreground">
+                        添加中…
+                      </span>
+                    )}
                     {s.status === "connected" && (
                       <CheckCircle2Icon className="size-3.5 text-success" />
                     )}
                   </p>
                   <p className="truncate text-xs text-muted-foreground">{s.url}</p>
                 </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => test(s.id)}
-                  disabled={testing === s.id}
-                >
-                  {testing === s.id ? (
-                    <Loader2Icon className="animate-spin" />
-                  ) : (
-                    "测试连接"
-                  )}
-                </Button>
-                <Switch checked={s.enabled} onCheckedChange={() => toggle(s)} />
-                <button
-                  onClick={() => remove(s.id)}
-                  className="rounded-md p-1.5 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
-                >
-                  <Trash2Icon className="size-4" />
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => test(s.id)}
+                    disabled={testing === s.id}
+                  >
+                    {testing === s.id ? (
+                      <Loader2Icon className="animate-spin" />
+                    ) : (
+                      "测试连接"
+                    )}
+                  </Button>
+                  <Switch
+                    checked={s.enabled}
+                    onCheckedChange={() => toggle(s)}
+                    aria-label={`${s.enabled ? "停用" : "启用"} MCP 服务器「${s.name}」`}
+                  />
+                  <button
+                    type="button"
+                    aria-label={`删除 MCP 服务器「${s.name}」`}
+                    onClick={() => setDeleteTarget(s)}
+                    className="rounded-md p-1.5 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
+                  >
+                    <Trash2Icon className="size-4" />
+                  </button>
+                </div>
               </div>
               {s.tools.length > 0 && (
                 <div className="mt-2.5 flex flex-wrap gap-1.5 pl-7">
@@ -453,6 +699,54 @@ function McpTab() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <DeleteConfirmDialog
+        open={!!deleteTarget}
+        title="删除 MCP 服务器"
+        description={`将删除 MCP 服务器「${deleteTarget?.name ?? ""}」。此操作不可撤销。`}
+        deleting={deleting}
+        onOpenChange={(open) => {
+          if (!open && !deleting) setDeleteTarget(null);
+        }}
+        onConfirm={remove}
+      />
     </div>
+  );
+}
+
+function DeleteConfirmDialog({
+  open,
+  title,
+  description,
+  deleting,
+  onOpenChange,
+  onConfirm,
+}: {
+  open: boolean;
+  title: string;
+  description: string;
+  deleting: boolean;
+  onOpenChange: (open: boolean) => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent aria-describedby="settings-delete-description">
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription id="settings-delete-description">
+            {description}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="ghost" disabled={deleting} onClick={() => onOpenChange(false)}>
+            取消
+          </Button>
+          <Button variant="destructive" disabled={deleting} onClick={onConfirm}>
+            {deleting ? <Loader2Icon className="animate-spin" /> : <Trash2Icon />}
+            删除
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

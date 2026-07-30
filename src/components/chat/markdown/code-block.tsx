@@ -10,6 +10,8 @@ import {
   XIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { copyTextToClipboard } from "@/lib/clipboard";
+import { CopyFallbackDialog } from "@/components/ui/copy-fallback-dialog";
 import { codeToHtml } from "shiki";
 import { useTheme } from "next-themes";
 
@@ -18,13 +20,16 @@ const COLLAPSE_THRESHOLD = 24; // 行数超过则可折叠
 export function CodeBlock({
   language,
   code,
+  showRunButton = true,
 }: {
   language: string;
   code: string;
+  showRunButton?: boolean;
 }) {
   const { resolvedTheme } = useTheme();
   const [html, setHtml] = React.useState<string | null>(null);
   const [copied, setCopied] = React.useState(false);
+  const [manualCopyText, setManualCopyText] = React.useState<string | null>(null);
   const lines = code.split("\n").length;
   const collapsible = lines > COLLAPSE_THRESHOLD;
   const [collapsed, setCollapsed] = React.useState(collapsible);
@@ -53,13 +58,18 @@ export function CodeBlock({
   }, [code, language, resolvedTheme]);
 
   const copy = async () => {
-    await navigator.clipboard.writeText(code);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    try {
+      await copyTextToClipboard(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setManualCopyText(code);
+    }
   };
 
   const lang = language.toLowerCase();
-  const runnable = ["python", "py", "javascript", "js", "html"].includes(lang);
+  const runnable =
+    showRunButton && ["python", "py", "javascript", "js", "html"].includes(lang);
   const [running, setRunning] = React.useState(false);
   const [output, setOutput] = React.useState<string | null>(null);
   const [showHtmlPreview, setShowHtmlPreview] = React.useState(false);
@@ -180,6 +190,10 @@ export function CodeBlock({
           {collapsed ? `展开全部 ${lines} 行` : "收起"}
         </button>
       )}
+      <CopyFallbackDialog
+        text={manualCopyText}
+        onClose={() => setManualCopyText(null)}
+      />
     </div>
   );
 }

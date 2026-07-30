@@ -17,6 +17,14 @@
 /.next/
 /out/
 
+# runtime media
+/public/generated/
+/public/uploads/
+/data/uploads/
+/data/media/
+/data/kb-docs/
+/data/skills/imported/
+
 # production
 /build
 

@@ -1,14 +1,33 @@
 import type { schema } from "@/lib/server/db";
-import type { Skill, ToolName } from "@/lib/types";
+import type {
+  Skill,
+  SkillResourceRef,
+  SkillScriptPolicy,
+  ToolName,
+} from "@/lib/types";
 
 export function skillToUi(s: typeof schema.skills.$inferSelect): Skill {
   return {
     id: s.id,
     ownerId: s.ownerId,
     name: s.name,
+    slug: s.slug ?? undefined,
     emoji: s.emoji,
     description: s.description,
     systemPrompt: s.systemPrompt,
+    kind: s.kind ?? "prompt",
+    version: s.version ?? "1.0.0",
+    source: s.source ?? "user",
+    license: s.license ?? undefined,
+    compatibility: s.compatibility ?? undefined,
+    allowedTools: s.allowedTools ?? [],
+    packageDigest: s.packageDigest ?? undefined,
+    manifest: (s.manifest ?? {}) as Record<string, unknown>,
+    packagePath: s.packagePath ?? undefined,
+    requiredTools: (s.requiredTools ?? []) as ToolName[],
+    resourceRefs: (s.resourceRefs ?? []) as SkillResourceRef[],
+    scriptPolicy: (s.scriptPolicy ?? { enabled: false }) as SkillScriptPolicy,
+    reviewStatus: s.reviewStatus ?? "approved",
     greeting: s.greeting ?? undefined,
     defaultModelId: s.defaultModelId ?? undefined,
     enabledTools: s.enabledTools as ToolName[],

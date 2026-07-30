@@ -1,3 +1,5 @@
+import { unlink } from "node:fs/promises";
+import path from "node:path";
 import { and, eq } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 import { requireSession } from "@/lib/server/auth";
@@ -23,11 +25,33 @@ export async function DELETE(
       )
     );
   if (!kb) return Response.json({ error: "不存在" }, { status: 404 });
-  // 联合条件：文档必须属于该知识库（防跨库越权删除）
+
+  const [doc] = await db
+    .select({
+      id: schema.kbDocuments.id,
+      storagePath: schema.kbDocuments.storagePath,
+    })
+    .from(schema.kbDocuments)
+    .where(
+      and(
+        eq(schema.kbDocuments.id, docId),
+        eq(schema.kbDocuments.knowledgeBaseId, id)
+      )
+    )
+    .limit(1);
+  if (!doc) return Response.json({ error: "不存在" }, { status: 404 });
+
   await db
     .delete(schema.kbDocuments)
     .where(
-      and(eq(schema.kbDocuments.id, docId), eq(schema.kbDocuments.knowledgeBaseId, id))
+      and(
+        eq(schema.kbDocuments.id, docId),
+        eq(schema.kbDocuments.knowledgeBaseId, id)
+      )
     );
+
+  if (doc.storagePath && !doc.storagePath.includes("..")) {
+    await unlink(path.join(process.cwd(), doc.storagePath)).catch(() => undefined);
+  }
   return Response.json({ ok: true });
 }

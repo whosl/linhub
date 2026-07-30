@@ -1,18 +1,36 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { db, schema } from "./db";
+import { ensureSkillRuntimeReady } from "./skill-runtime";
+import { UNLIMITED_QUOTA_CENTS } from "@/lib/billing-plan";
 
 let seeded = false;
+let seedInFlight: Promise<void> | null = null;
 
 /** 幂等初始化：内置风格、默认供应商与模型、全局设置、默认套餐 */
 export async function ensureSeeded() {
+  await ensureSettingsColumns();
+  await ensureSkillRuntimeReady();
   if (seeded) return;
-  seeded = true;
+  if (seedInFlight) return seedInFlight;
 
+  seedInFlight = seedDatabase().finally(() => {
+    seedInFlight = null;
+  });
+  return seedInFlight;
+}
+
+async function seedDatabase() {
+  await ensureSettingsColumns();
+  await ensureSkillRuntimeReady();
   const [existingSettings] = await db
     .select({ id: schema.settings.id })
     .from(schema.settings)
     .limit(1);
-  if (existingSettings) return;
+  if (existingSettings) {
+    await ensureFamilyPassPlan();
+    seeded = true;
+    return;
+  }
 
   await db.transaction(async (tx) => {
     await tx.insert(schema.settings).values({ id: "global" }).onConflictDoNothing();
@@ -34,6 +52,7 @@ export async function ensureSeeded() {
       { id: "pv-zhipu", kind: "zhipu" as const, name: "智谱 GLM" },
       { id: "pv-deepseek", kind: "deepseek" as const, name: "DeepSeek" },
       { id: "pv-xiaomi", kind: "xiaomi" as const, name: "Xiaomi MiMo" },
+      { id: "pv-xiaomi-token-plan", kind: "xiaomi-token-plan" as const, name: "Xiaomi MiMo Token Plan" },
     ];
     await tx.insert(schema.providers).values(providers).onConflictDoNothing();
 
@@ -146,9 +165,44 @@ export async function ensureSeeded() {
           modelTier: "pro" as const,
           features: ["全部模型优先响应", "每月 ¥120 额度", "用户级 MCP", "Artifacts 分享", "优先客服"],
         },
+        {
+          id: "plan-family-pass",
+          name: "Family Pass",
+          description: "家庭与亲友专属通行证，不限制月度额度",
+          priceCentsPerMonth: 0,
+          monthlyQuotaCents: UNLIMITED_QUOTA_CENTS,
+          modelTier: "pro" as const,
+          features: ["全部模型", "无限月度额度", "图像生成", "知识库 RAG", "Artifacts 分享"],
+          enabled: false,
+        },
       ])
       .onConflictDoNothing();
   });
+  await ensureFamilyPassPlan();
+  seeded = true;
+}
+
+async function ensureFamilyPassPlan() {
+  await db
+    .insert(schema.plans)
+    .values({
+      id: "plan-family-pass",
+      name: "Family Pass",
+      description: "家庭与亲友专属通行证，不限制月度额度",
+      priceCentsPerMonth: 0,
+      monthlyQuotaCents: UNLIMITED_QUOTA_CENTS,
+      modelTier: "pro",
+      features: ["全部模型", "无限月度额度", "图像生成", "知识库 RAG", "Artifacts 分享"],
+      enabled: false,
+    })
+    .onConflictDoNothing();
+}
+
+async function ensureSettingsColumns() {
+  await db.execute(sql`
+    alter table if exists settings
+      add column if not exists tool_router_model_id text
+  `);
 }
 
 /** 供应商是否已配置密钥（决定聊天走真实模型还是提示配置） */

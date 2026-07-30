@@ -1,16 +1,33 @@
 import { NextRequest } from "next/server";
 import { requireSession } from "@/lib/server/auth";
-import { getMimoConfig } from "@/lib/server/voice";
+import { BillingError } from "@/lib/server/billing";
+import {
+  engineResource,
+  withAtomicBilling,
+} from "@/lib/server/billing/capabilities";
+import { rateLimit } from "@/lib/server/rate-limit";
+import { getTtsConfig } from "@/lib/server/engine-config";
+import { formatUpstreamError } from "@/lib/server/upstream-error";
 
 export const maxDuration = 120;
+const TTS_TIMEOUT_MS = 45_000;
 
-/** MiMo TTS：文本合成语音，直接透传音频流（OpenAI 兼容 /audio/speech） */
+/**
+ * MiMo TTS（mimo-v2.5-tts）。
+ * 小米 TTS 走 /chat/completions 端点（非 OpenAI 标准 /audio/speech），
+ * 认证用 api-key 头（非 Bearer），文本放 assistant 消息，风格指令放 user 消息。
+ * 返回 JSON 含 choices[0].message.audio.data（base64），这里解出来透传二进制流。
+ */
 export async function POST(req: NextRequest) {
+  let session;
   try {
-    await requireSession();
+    session = await requireSession();
   } catch {
     return Response.json({ error: "请先登录" }, { status: 401 });
   }
+
+  const limited = rateLimit(`voice-tts:${session.user.id}`, 10, 60_000);
+  if (limited) return limited;
 
   const { text } = (await req.json()) as { text?: string };
   if (!text?.trim()) {
@@ -18,34 +35,79 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const { apiKey, baseURL, voice } = await getMimoConfig();
-    const res = await fetch(`${baseURL}/audio/speech`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+    const audioBytes = await withAtomicBilling(
+      session.user.id,
+      {
+        capability: "tts",
+        resource: engineResource("tts"),
+        units: { requestCount: 1 },
       },
-      body: JSON.stringify({
-        model: "mimo-audio-tts",
-        input: text.slice(0, 4000),
-        voice,
-        response_format: "mp3",
-      }),
-    });
-    if (!res.ok) {
-      const err = await res.text();
-      return Response.json(
-        { error: `TTS 失败（${res.status}）: ${err.slice(0, 200)}` },
-        { status: 502 }
-      );
-    }
-    return new Response(res.body, {
-      headers: { "Content-Type": "audio/mpeg" },
+      async () => {
+        const { apiKey, baseURL, model, voice } = await getTtsConfig();
+        const res = await fetch(`${baseURL}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "api-key": apiKey,
+          },
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: "user", content: "" },
+              { role: "assistant", content: text.slice(0, 4000) },
+            ],
+            audio: {
+              format: "mp3",
+              voice: voice || "冰糖",
+            },
+          }),
+          signal: AbortSignal.timeout(TTS_TIMEOUT_MS),
+        });
+
+        if (!res.ok) {
+          throw new Error(await formatUpstreamError(res, "TTS 服务不可用"));
+        }
+
+        const data = (await res.json()) as {
+          choices?: { message?: { audio?: { data?: string } } }[];
+        };
+        const audioB64 = data.choices?.[0]?.message?.audio?.data;
+        if (!audioB64) throw new Error("TTS 未返回音频数据");
+        return Buffer.from(audioB64, "base64");
+      }
+    );
+
+    return new Response(audioBytes, {
+      headers: {
+        "Content-Type": "audio/mpeg",
+        "Content-Length": String(audioBytes.length),
+      },
     });
   } catch (e) {
+    if (e instanceof BillingError) {
+      return Response.json({ error: e.message }, { status: 402 });
+    }
     return Response.json(
-      { error: e instanceof Error ? e.message : "TTS 失败" },
-      { status: 500 }
+      {
+        error: isTimeoutError(e)
+          ? "TTS 服务响应超时，请稍后重试"
+          : e instanceof Error
+            ? e.message
+            : "TTS 失败",
+      },
+      { status: isTimeoutError(e) ? 504 : 500 }
     );
   }
+}
+
+function isTimeoutError(e: unknown) {
+  if (!e || typeof e !== "object") return false;
+  const maybeError = e as { name?: unknown; message?: unknown };
+  const name = typeof maybeError.name === "string" ? maybeError.name : "";
+  const message = typeof maybeError.message === "string" ? maybeError.message : "";
+  return (
+    name === "TimeoutError" ||
+    name === "AbortError" ||
+    /timeout|aborted/i.test(message)
+  );
 }

@@ -2,12 +2,15 @@ import { NextRequest } from "next/server";
 import { desc, eq } from "drizzle-orm";
 import { db, schema } from "@/lib/server/db";
 import { requireSession } from "@/lib/server/auth";
+import { ensureSeeded } from "@/lib/server/seed";
+import { resolveSkillVisibility } from "@/lib/server/skills/publish-policy";
 import { skillToUi } from "./util";
 import type { Skill } from "@/lib/types";
 
 const uid = () => crypto.randomUUID().replace(/-/g, "").slice(0, 12);
 
 export async function GET(req: NextRequest) {
+  await ensureSeeded();
   let session;
   try {
     session = await requireSession();
@@ -31,16 +34,34 @@ export async function GET(req: NextRequest) {
   return Response.json(rows.map(skillToUi));
 }
 
-/** 创建/更新 Skill；visibility=pending 表示提交广场审核 */
+/** 创建/更新 Skill；shareToMarket 控制是否提交广场（非管理员忽略客户端 visibility） */
 export async function POST(req: NextRequest) {
+  await ensureSeeded();
   let session;
   try {
     session = await requireSession();
   } catch {
     return Response.json({ error: "请先登录" }, { status: 401 });
   }
-  const body = (await req.json()) as Partial<Skill> & { name: string };
+  const body = (await req.json()) as Partial<Skill> & {
+    name: string;
+    shareToMarket?: boolean;
+  };
   if (!body.name?.trim()) return Response.json({ error: "名称不能为空" }, { status: 400 });
+
+  const isAdmin = session.user.role === "admin";
+  const shareToMarket =
+    typeof body.shareToMarket === "boolean"
+      ? body.shareToMarket
+      : body.visibility === "public" || body.visibility === "pending";
+
+  // 非管理员：忽略客户端 visibility，一律走发布策略
+  const visibility =
+    isAdmin && body.visibility && typeof body.shareToMarket !== "boolean"
+      ? body.visibility
+      : await resolveSkillVisibility({ shareToMarket, isAdmin });
+  const reviewStatus: "pending" | "approved" =
+    visibility === "pending" ? "pending" : "approved";
 
   const values = {
     name: body.name,
@@ -51,7 +72,9 @@ export async function POST(req: NextRequest) {
     defaultModelId: body.defaultModelId,
     enabledTools: (body.enabledTools ?? []) as string[],
     knowledgeBaseIds: body.knowledgeBaseIds ?? [],
-    visibility: body.visibility ?? ("private" as const),
+    visibility,
+    reviewStatus,
+    publishedAt: visibility === "public" ? new Date() : null,
   };
 
   if (body.id) {

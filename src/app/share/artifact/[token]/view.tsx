@@ -4,7 +4,10 @@ import * as React from "react";
 import { CodeIcon, EyeIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Artifact } from "@/lib/types";
-import { ArtifactPreview } from "@/components/artifacts/artifact-panel";
+import {
+  ArtifactPreview,
+  getArtifactCodeLanguage,
+} from "@/components/artifacts/artifact-panel";
 import { CodeBlock } from "@/components/chat/markdown/code-block";
 
 /** 只读分享页 */
@@ -56,8 +59,9 @@ export function SharedArtifactView({ artifact }: { artifact: Artifact }) {
         ) : (
           <div className="p-4 [&>div]:my-0">
             <CodeBlock
-              language={artifact.language ?? "text"}
+              language={getArtifactCodeLanguage(artifact)}
               code={current.content}
+              showRunButton={artifact.kind !== "html"}
             />
           </div>
         )}

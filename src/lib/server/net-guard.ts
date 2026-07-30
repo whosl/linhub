@@ -17,9 +17,8 @@ export async function assertSafeUrl(rawUrl: string): Promise<void> {
     throw new Error("仅支持 http/https 协议");
   }
 
-  const allowLocal =
-    process.env.NODE_ENV !== "production" ||
-    process.env.ALLOW_LOCAL_MCP === "true";
+  // 生产环境一律禁止本机/内网，即使 ALLOW_LOCAL_MCP=true
+  const allowLocal = process.env.NODE_ENV !== "production";
 
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
   if (isLocalHostname(hostname)) {

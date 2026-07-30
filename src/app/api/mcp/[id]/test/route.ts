@@ -5,6 +5,18 @@ import { decryptSecret } from "@/lib/server/crypto";
 
 export const maxDuration = 60;
 
+function formatMcpTestError(e: unknown) {
+  const message = e instanceof Error ? e.message : String(e ?? "");
+  if (
+    /fetch failed|network|ECONN|ENOTFOUND|EHOSTUNREACH|ETIMEDOUT|timeout|AbortError/i.test(
+      message
+    )
+  ) {
+    return "无法连接 MCP 服务器，请确认服务正在运行且 URL/传输方式正确";
+  }
+  return message || "连接失败";
+}
+
 /** 测试 MCP 连接：拉取工具列表并落库 */
 export async function POST(
   _req: Request,
@@ -25,7 +37,12 @@ export async function POST(
   if (server.scope === "user" && server.ownerId !== session.user.id) {
     return Response.json({ error: "无权限" }, { status: 403 });
   }
+  if (server.scope === "global" && session.user.role !== "admin") {
+    return Response.json({ error: "无权限" }, { status: 403 });
+  }
 
+  let client: { tools: () => Promise<Record<string, unknown>>; close: () => Promise<void> } | null =
+    null;
   try {
     // SSRF 防护：禁止指向内网/元数据地址
     const { assertSafeUrl } = await import("@/lib/server/net-guard");
@@ -34,15 +51,20 @@ export async function POST(
     const headers = server.headersEncrypted
       ? (JSON.parse(decryptSecret(server.headersEncrypted)) as Record<string, string>)
       : undefined;
-    const client = await createMCPClient({
-      transport: { type: "sse", url: server.url, headers },
+    // I6: 按存储的 transport 列选择传输方式（DB 枚举 'streamable-http' → 客户端 'http'），
+    // 之前两处都硬编码 'sse'，导致该列实际失效。
+    client = await createMCPClient({
+      transport: {
+        type: server.transport === "streamable-http" ? "http" : "sse",
+        url: server.url,
+        headers,
+      },
     });
     const toolSet = await client.tools();
     const tools = Object.entries(toolSet).map(([name, t]) => ({
       name,
       description: (t as { description?: string }).description,
     }));
-    await client.close();
     await db
       .update(schema.mcpServers)
       .set({ status: "connected", tools })
@@ -56,7 +78,9 @@ export async function POST(
     return Response.json({
       ok: false,
       tools: [],
-      error: e instanceof Error ? e.message : "连接失败",
+      error: formatMcpTestError(e),
     });
+  } finally {
+    await client?.close().catch(() => {});
   }
 }

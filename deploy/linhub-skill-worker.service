@@ -1,0 +1,23 @@
+[Unit]
+Description=LinHub durable Skill worker
+After=network-online.target postgresql.service linhub.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/LinHub
+EnvironmentFile=/home/ubuntu/LinHub/.env.production
+Environment=LINHUB_INTERNAL_URL=http://127.0.0.1:3006
+ExecStart=/usr/bin/node /home/ubuntu/LinHub/scripts/skill-worker.mjs
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/LinHub/data
+
+[Install]
+WantedBy=multi-user.target

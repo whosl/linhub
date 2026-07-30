@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "skill-data-analyst",
+  "display": {
+    "name": "数据分析师",
+    "emoji": "📊"
+  },
+  "routing": {
+    "positiveTriggers": ["分析表格", "数据分析", "数据质量", "制作图表", "清洗数据", "指标趋势"],
+    "negativeTriggers": ["普通算术", "没有数据的闲聊", "纯联网调研"]
+  },
+  "capabilities": {
+    "required": ["spreadsheet.read", "sandbox.run", "artifact.create"],
+    "optional": ["search.cn", "search.global", "read.web"],
+    "requiredTools": ["start_data_analysis", "analyze_spreadsheet", "run_code", "create_artifact"]
+  },
+  "workflow": {
+    "stages": ["读取数据", "质量检查", "沙盒分析", "外部数据补充", "生成报告"],
+    "supportsCancel": true,
+    "supportsRetry": true,
+    "supportsResume": true
+  }
+}
