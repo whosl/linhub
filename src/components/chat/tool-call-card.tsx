@@ -42,6 +42,7 @@ const TOOL_META: Record<string, { icon: React.ElementType; verb: string; label: 
   edit_image: { icon: ImageIcon, verb: "编辑图片", label: () => "编辑图片" },
   analyze_image: { icon: ScanEyeIcon, verb: "识别图片", label: () => "识别图片" },
   run_code: { icon: CodeIcon, verb: "运行代码", label: () => "运行代码" },
+  start_code_lab: { icon: CodeIcon, verb: "运行代码", label: (a) => String(a.taskName ?? "启动 Code Lab") },
   save_memory: { icon: SparklesIcon, verb: "记录", label: () => "记住了这一点" },
   search_memory: { icon: SparklesIcon, verb: "回忆", label: () => "回忆相关记忆" },
   search_knowledge: { icon: BookOpenIcon, verb: "检索", label: (a) => `检索知识库「${a.query ?? ""}」` },

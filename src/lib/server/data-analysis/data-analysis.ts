@@ -17,6 +17,11 @@ import {
 } from "@/lib/server/research/provider-policy";
 import { runCodeSandbox } from "@/lib/server/code-sandbox";
 import {
+  codeSandboxLimits,
+  codeSandboxPolicySummary,
+  resolveCodeSandboxPolicy,
+} from "@/lib/server/code-sandbox-policy";
+import {
   isSkillRunCancellationRequested,
   updateSkillRun,
   upsertSkillRunStep,
@@ -37,6 +42,7 @@ export async function executeDataAnalysisRun(run: typeof schema.skillRuns.$infer
   }
   await assertCanSpend(run.ownerId);
   const resolved = await resolveModel(modelId);
+  const sandboxPolicy = await resolveCodeSandboxPolicy(run.ownerId);
   const controller = new AbortController();
   const cancellationTimer = setInterval(() => {
     void isSkillRunCancellationRequested(run.id).then((requested) => {
@@ -89,6 +95,7 @@ export async function executeDataAnalysisRun(run: typeof schema.skillRuns.$infer
     const sandbox = await runCodeSandbox({
       language: "python",
       code: profileCode,
+      signal: controller.signal,
       inputFiles: [
         {
           path: "dataset.json",
@@ -97,11 +104,8 @@ export async function executeDataAnalysisRun(run: typeof schema.skillRuns.$infer
         { path: "report-template.html", content: template },
       ],
       limits: {
-        timeoutMs: 60_000,
-        memoryMb: 512,
-        outputBytes: 32 * 1024 * 1024,
-        outputFiles: 20,
-        inputBytes: 64 * 1024 * 1024,
+        ...codeSandboxLimits(sandboxPolicy, 120),
+        outputFiles: Math.min(sandboxPolicy.limits.outputFiles, 100),
       },
     });
     if (sandbox.timedOut) throw new Error("数据分析沙盒运行超时");
@@ -273,7 +277,12 @@ export async function executeDataAnalysisRun(run: typeof schema.skillRuns.$infer
       status: "completed",
       stage: "数据分析已完成",
       progress: 100,
-      result: { attachments: persisted, sourceCount, reportPreview: report.slice(0, 2_000) },
+      result: {
+        attachments: persisted,
+        sourceCount,
+        reportPreview: report.slice(0, 2_000),
+        sandboxPolicy: codeSandboxPolicySummary(sandboxPolicy),
+      },
       error: null,
     });
   } finally {

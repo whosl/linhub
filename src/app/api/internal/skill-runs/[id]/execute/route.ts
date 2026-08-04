@@ -13,7 +13,7 @@ import {
 } from "@/lib/server/skill-runs";
 import { runParallelSubagents, type SubagentTask } from "@/lib/server/subagents";
 
-export const maxDuration = 300;
+export const maxDuration = 360;
 
 export async function POST(
   request: Request,
@@ -48,6 +48,11 @@ export async function POST(
       await executePptStudioRun(run);
     } else if (run.kind === "subagent-batch") {
       await executeSubagentBatch(run);
+    } else if (run.kind === "code-lab") {
+      const { executeCodeLabRun } = await import(
+        "@/lib/server/code-lab/code-lab"
+      );
+      await executeCodeLabRun(run);
     } else {
       throw new Error(`尚未注册 Skill 执行器：${run.kind}`);
     }

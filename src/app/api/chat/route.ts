@@ -2641,7 +2641,18 @@ LinHub 工具状态（回答工具能力或开关问题时必须以此为准）�
     system +=
       "\n\n联网搜索规则：优先用少量高质量来源完成核查；一旦已有足够证据，必须停止继续调用搜索/读取工具并直接给出最终回答。";
   }
-  if (codeRunnerEnabled) Object.assign(tools, buildCodeTools(userId));
+  if (codeRunnerEnabled) {
+    Object.assign(
+      tools,
+      buildCodeTools(userId, {
+        conversationId,
+        messageId: assistantId,
+        modelId: effectiveModelId,
+      })
+    );
+    system +=
+      "\n\n代码沙盒规则：普通执行、验证和小文件处理使用 run_code，默认 30 秒；处理数据或压缩包时主动设为 120 秒。只有预计超过 120 秒、较大压缩包/数据集或用户需要可刷新恢复的进度卡时才使用 start_code_lab。压缩文件先校验成员路径、文件数和解压后总大小，解压到 /tmp；交付文件必须写入 /workspace/output。";
+  }
   if (enabledBuiltins.spreadsheet) Object.assign(tools, buildSpreadsheetTools(userId));
   if (imageGenerationEnabled)
     Object.assign(

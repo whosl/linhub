@@ -34,6 +34,7 @@ export type SandboxInputFile =
 
 export interface CodeSandboxLimits {
   timeoutMs?: number;
+  tmpBytes?: number;
   memoryMb?: number;
   cpus?: number;
   pids?: number;
@@ -50,6 +51,7 @@ export interface RunCodeSandboxOptions {
   inputFiles?: SandboxInputFile[];
   env?: Record<string, string>;
   limits?: CodeSandboxLimits;
+  signal?: AbortSignal;
 }
 
 export interface SandboxOutputFile {
@@ -104,6 +106,17 @@ const RESERVED_ENV_KEYS = new Set([
   "TMPDIR",
   "LINHUB_INPUT_DIR",
   "LINHUB_OUTPUT_DIR",
+  "LINHUB_TMP_LIMIT_BYTES",
+  "LINHUB_INPUT_LIMIT_BYTES",
+  "LINHUB_OUTPUT_LIMIT_BYTES",
+  "OMP_NUM_THREADS",
+  "OPENBLAS_NUM_THREADS",
+  "MKL_NUM_THREADS",
+  "NUMEXPR_NUM_THREADS",
+  "POLARS_MAX_THREADS",
+  "RAYON_NUM_THREADS",
+  "VECLIB_MAXIMUM_THREADS",
+  "BLIS_NUM_THREADS",
 ]);
 const RUNNER_SCRIPT = `#!/bin/sh
 set +e
@@ -118,6 +131,7 @@ done
 
 interface NormalizedLimits {
   timeoutMs: number;
+  tmpBytes: number;
   memoryMb: number;
   cpus: number;
   pids: number;
@@ -187,6 +201,7 @@ export async function assertCodeSandboxAvailable(): Promise<void> {
 export async function runCodeSandbox(
   options: RunCodeSandboxOptions
 ): Promise<CodeSandboxResult> {
+  throwIfAborted(options.signal);
   try {
     return await runCodeSandboxAttempt(options);
   } catch (error) {
@@ -201,6 +216,7 @@ export async function runCodeSandbox(
 async function runCodeSandboxAttempt(
   options: RunCodeSandboxOptions
 ): Promise<CodeSandboxResult> {
+  throwIfAborted(options.signal);
   validateOptions(options);
   const limits = normalizeLimits(options.limits);
   const startedAt = Date.now();
@@ -228,11 +244,19 @@ async function runCodeSandboxAttempt(
       throw new Error("创建 runsc 沙盒失败：Docker 未返回有效容器 ID。");
     }
 
-    attached = startAttachedContainer(
+    // 先独立启动，再订阅已有日志和后续日志。`docker start --attach` 与高并发
+    // 初始化的 gVisor 容器偶发会在状态轮询同时发生时让 attach 客户端以 2
+    // 退出，即使容器本身仍健康；拆开生命周期后不会丢失启动阶段输出。
+    const startResult = await runCommand(
       docker,
-      containerId,
-      limits.stdoutStderrBytes
+      ["start", containerId],
+      60_000,
+      64 * 1024
     );
+    if (startResult.code !== 0) {
+      throw new Error(`启动 runsc 沙盒失败：${cleanDockerError(startResult.stderr)}`);
+    }
+    attached = followContainerLogs(docker, containerId, limits.stdoutStderrBytes);
 
     const deadline = Date.now() + limits.timeoutMs;
     let exitCode: number | null = null;
@@ -241,6 +265,7 @@ async function runCodeSandboxAttempt(
     let infrastructureFailure: string | undefined;
 
     while (exitCode === null) {
+      throwIfAborted(options.signal);
       if (attached.limitExceeded) {
         stdoutStderrLimitExceeded = true;
         break;
@@ -259,7 +284,7 @@ async function runCodeSandboxAttempt(
       const attachmentState = await settledValue(attached.completion);
       if (attachmentState) {
         infrastructureFailure =
-          `runsc 容器在返回执行状态前退出（Docker 退出码 ${attachmentState.code ?? "null"}）`;
+          `runsc 日志订阅在返回执行状态前退出（Docker 退出码 ${attachmentState.code ?? "null"}）`;
         break;
       }
       await delay(100);
@@ -273,6 +298,7 @@ async function runCodeSandboxAttempt(
 
     // gVisor 的运行时 tmpfs 不会出现在 Docker archive（docker cp）视图中。
     // 正常结束后必须通过 runsc 内部的 docker exec 只读取回，超时/输出超限则不发布半成品。
+    throwIfAborted(options.signal);
     const collected = timedOut || stdoutStderrLimitExceeded
       ? { files: [] as SandboxOutputFile[], exceeded: false }
       : await collectContainerOutputFiles(
@@ -312,7 +338,7 @@ function isRetryableSandboxInfrastructureError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return (
     /container [a-f0-9]+ is not running/iu.test(error.message) ||
-    error.message.includes("runsc 容器在返回执行状态前退出")
+    error.message.includes("runsc 日志订阅在返回执行状态前退出")
   );
 }
 
@@ -323,6 +349,9 @@ function dockerCreateArgs(
 ): string[] {
   const image = configuredImage(options.language);
   const codeMount = dockerMount(workspace.codeDir, "/workspace", true);
+  // NumPy/OpenBLAS/Polars 默认按宿主逻辑 CPU 数创建线程，既会绕过套餐 CPU
+  // 配额造成无效调度，也可能挤满 pids cgroup。统一绑定到本次容器的 CPU 额度。
+  const computeThreads = Math.max(1, Math.floor(limits.cpus));
   const args = [
     "create",
     "--runtime=runsc",
@@ -347,11 +376,22 @@ function dockerCreateArgs(
     "--tmpfs",
     `/linhub-status:rw,noexec,nosuid,nodev,size=64k,uid=${SANDBOX_UID},gid=${SANDBOX_GID},mode=0700`,
     "--tmpfs",
-    `/tmp:rw,noexec,nosuid,nodev,size=64m,uid=${SANDBOX_UID},gid=${SANDBOX_GID},mode=1777`,
+    `/tmp:rw,noexec,nosuid,nodev,size=${limits.tmpBytes},uid=${SANDBOX_UID},gid=${SANDBOX_GID},mode=1777`,
     "--env=HOME=/tmp",
     "--env=TMPDIR=/tmp",
     "--env=LINHUB_INPUT_DIR=/workspace/input",
     "--env=LINHUB_OUTPUT_DIR=/workspace/output",
+    `--env=LINHUB_TMP_LIMIT_BYTES=${limits.tmpBytes}`,
+    `--env=LINHUB_INPUT_LIMIT_BYTES=${limits.inputBytes}`,
+    `--env=LINHUB_OUTPUT_LIMIT_BYTES=${limits.outputBytes}`,
+    `--env=OMP_NUM_THREADS=${computeThreads}`,
+    `--env=OPENBLAS_NUM_THREADS=${computeThreads}`,
+    `--env=MKL_NUM_THREADS=${computeThreads}`,
+    `--env=NUMEXPR_NUM_THREADS=${computeThreads}`,
+    `--env=POLARS_MAX_THREADS=${computeThreads}`,
+    `--env=RAYON_NUM_THREADS=${computeThreads}`,
+    `--env=VECLIB_MAXIMUM_THREADS=${computeThreads}`,
+    `--env=BLIS_NUM_THREADS=${computeThreads}`,
     "--env=LANG=C.UTF-8",
   ];
 
@@ -521,13 +561,14 @@ async function collectContainerOutputFiles(
   return { files, exceeded };
 }
 
-function startAttachedContainer(
+function followContainerLogs(
   docker: string,
   containerId: string,
   byteLimit: number
 ): AttachedProcess {
-  // child_process 只启动 Docker CLI；用户代码始终由 runsc 容器执行。
-  const child = spawn(docker, ["start", "--attach", containerId], {
+  // child_process 只订阅 Docker 日志；用户代码始终由 runsc 容器执行。
+  // --follow 会先返回容器启动以来的已有日志，因此启动和订阅之间没有输出窗口。
+  const child = spawn(docker, ["logs", "--follow", containerId], {
     shell: false,
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -729,7 +770,13 @@ function validateOptions(options: RunCodeSandboxOptions): void {
 function normalizeLimits(limits: CodeSandboxLimits = {}): NormalizedLimits {
   const maximums = {
     timeoutMs: envInteger("LINHUB_SANDBOX_MAX_TIMEOUT_MS", 300_000, 1_000, 3_600_000),
-    memoryMb: envInteger("LINHUB_SANDBOX_MAX_MEMORY_MB", 1_024, 64, 16_384),
+    tmpBytes: envInteger(
+      "LINHUB_SANDBOX_MAX_TMP_BYTES",
+      1024 * 1024 * 1024,
+      1024 * 1024,
+      4 * 1024 * 1024 * 1024
+    ),
+    memoryMb: envInteger("LINHUB_SANDBOX_MAX_MEMORY_MB", 2_048, 64, 16_384),
     cpus: envNumber("LINHUB_SANDBOX_MAX_CPUS", 4, 0.1, 64),
     pids: envInteger("LINHUB_SANDBOX_MAX_PIDS", 256, 8, 4_096),
     stdoutStderrBytes: envInteger(
@@ -740,20 +787,23 @@ function normalizeLimits(limits: CodeSandboxLimits = {}): NormalizedLimits {
     ),
     outputBytes: envInteger(
       "LINHUB_SANDBOX_MAX_OUTPUT_BYTES",
-      64 * 1024 * 1024,
+      512 * 1024 * 1024,
       1_024,
       1024 * 1024 * 1024
     ),
     outputFiles: envInteger("LINHUB_SANDBOX_MAX_OUTPUT_FILES", 1_000, 1, 100_000),
     inputBytes: envInteger(
       "LINHUB_SANDBOX_MAX_INPUT_BYTES",
-      64 * 1024 * 1024,
+      512 * 1024 * 1024,
       1_024,
       1024 * 1024 * 1024
     ),
   };
   return {
     timeoutMs: bounded(limits.timeoutMs ?? 30_000, 100, maximums.timeoutMs),
+    tmpBytes: Math.round(
+      bounded(limits.tmpBytes ?? 64 * 1024 * 1024, 1024 * 1024, maximums.tmpBytes)
+    ),
     memoryMb: bounded(limits.memoryMb ?? 256, 32, maximums.memoryMb),
     cpus: bounded(limits.cpus ?? 1, 0.1, maximums.cpus),
     pids: Math.round(bounded(limits.pids ?? 64, 8, maximums.pids)),
@@ -768,6 +818,13 @@ function normalizeLimits(limits: CodeSandboxLimits = {}): NormalizedLimits {
       bounded(limits.inputBytes ?? 16 * 1024 * 1024, 1_024, maximums.inputBytes)
     ),
   };
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  const error = new Error("代码沙盒已停止");
+  error.name = "AbortError";
+  throw error;
 }
 
 function configuredImage(language: SandboxLanguage): string {

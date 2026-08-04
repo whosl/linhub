@@ -255,6 +255,9 @@ function applyRuleRouting(
   const hasSheet = attachments.some((part) =>
     /\.(csv|tsv|xlsx|xls)$/iu.test(part.name)
   );
+  const hasArchive = attachments.some((part) =>
+    /\.(zip|tar|tgz|tar\.gz|gz)$/iu.test(part.name)
+  );
 
   if (requested.webSearch && isWebDirectedQuery(text)) {
     enabledBuiltins.webSearch = true;
@@ -263,6 +266,16 @@ function applyRuleRouting(
   if (requested.codeRunner && isCodeExecutionDirectedQuery(text)) {
     enabledBuiltins.codeRunner = true;
     reasons.push("用户请求需要运行或验证代码。");
+  }
+  if (
+    requested.codeRunner &&
+    !enabledBuiltins.codeRunner &&
+    (hasArchive || /(?:解压|压缩包|归档文件).{0,24}(?:处理|分析|读取|检查|数据|文件)?/iu.test(text))
+  ) {
+    enabledBuiltins.codeRunner = true;
+    const codeSkill = skillCandidates.find((skill) => skill.id === "skill-code-lab");
+    if (codeSkill) selectedSkillIds.add(codeSkill.id);
+    reasons.push("用户请求解压并处理归档文件，需要隔离代码沙盒。");
   }
   if (requested.imageGeneration && isImageGenerationDirectedQuery(text)) {
     enabledBuiltins.imageGeneration = true;

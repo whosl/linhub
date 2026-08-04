@@ -31,12 +31,21 @@ import {
   localAttachmentPath,
 } from "@/lib/server/pptx";
 import { openMediaStream } from "@/lib/server/media";
-import { persistGeneratedAttachment } from "@/lib/server/generated-attachment";
 import {
   runCodeSandbox,
   type SandboxInputFile,
   type SandboxLanguage,
 } from "@/lib/server/code-sandbox";
+import {
+  codeSandboxInputName,
+  loadOwnedCodeSandboxInput,
+  persistCodeSandboxOutputs,
+} from "@/lib/server/code-sandbox-files";
+import {
+  codeSandboxLimits,
+  codeSandboxPolicySummary,
+  resolveCodeSandboxPolicy,
+} from "@/lib/server/code-sandbox-policy";
 import {
   inspectDashiLayouts,
   queryDashiLayouts,
@@ -1072,11 +1081,14 @@ async function runJavaScriptSnippet(code: string): Promise<string> {
   return output.slice(0, CODE_OUTPUT_MAX_LENGTH);
 }
 
-export function buildCodeTools(userId: string): ToolSet {
-  return {
+export function buildCodeTools(
+  userId: string,
+  context?: { conversationId: string; messageId: string; modelId: string }
+): ToolSet {
+  const tools: ToolSet = {
     run_code: tool({
       description:
-        "在 gVisor 隔离沙盒中运行 Python、Node.js 或 Bash。沙盒无网络、非 root、根文件系统只读，并限制时间、内存、CPU、进程、输出大小；输入附件位于 /workspace/input，需交付的文件必须写入 /workspace/output。适用于执行、验证、调试代码和基于附件生成文件；不要用联网搜索冒充运行结果。",
+        "在 gVisor 隔离沙盒中运行最长 120 秒的 Python、Node.js 或 Bash。Python 已预装 pandas、NumPy、PyArrow、OpenPyXL、Polars、DuckDB、SciPy、scikit-learn 和绘图库。沙盒无网络、非 root、根文件系统只读；输入附件位于 /workspace/input，解压和中间文件写入 /tmp，需交付的文件必须写入 /workspace/output。预计超过 120 秒时改用 start_code_lab。",
       inputSchema: z.object({
         language: z
           .enum(["python", "node", "javascript", "js", "bash"])
@@ -1107,16 +1119,17 @@ export function buildCodeTools(userId: string): ToolSet {
           .min(1)
           .max(120)
           .optional()
-          .describe("运行超时，默认 30 秒"),
+          .describe("运行超时；普通代码默认 30 秒，数据或压缩包处理建议 120 秒"),
       }),
       execute: async ({ language, code, args, inputs, timeoutSeconds }) => {
+        const policy = await resolveCodeSandboxPolicy(userId);
         const sandboxLanguage: SandboxLanguage =
           language === "python" || language === "bash" ? language : "node";
         const inputFiles: SandboxInputFile[] = [];
         const usedPaths = new Set<string>();
         for (const input of inputs ?? []) {
-          const loaded = await loadOwnedSandboxInput(userId, input.attachmentId);
-          let targetPath = input.path?.trim() || sandboxInputName(loaded.name);
+          const loaded = await loadOwnedCodeSandboxInput(userId, input.attachmentId);
+          let targetPath = input.path?.trim() || codeSandboxInputName(loaded.name);
           if (usedPaths.has(targetPath)) {
             targetPath = `${input.attachmentId}-${targetPath}`;
           }
@@ -1129,29 +1142,22 @@ export function buildCodeTools(userId: string): ToolSet {
           code,
           args,
           inputFiles,
-          limits: { timeoutMs: (timeoutSeconds ?? 30) * 1_000 },
+          limits: codeSandboxLimits(
+            policy,
+            Math.min(
+              timeoutSeconds ?? policy.defaultTimeoutSeconds,
+              policy.maxSyncTimeoutSeconds
+            )
+          ),
         });
         const stdout = truncateSandboxConsole(result.stdout);
         const stderr = truncateSandboxConsole(result.stderr);
-        const attachments = [];
-        for (const output of result.outputFiles) {
-          const attachment = await persistGeneratedAttachment({
-            ownerId: userId,
-            name: output.path,
-            mimeType: sandboxOutputMimeType(output.path),
-            bytes: output.data,
-          });
-          attachments.push({
-            id: attachment.id,
-            name: attachment.name,
-            mimeType: attachment.mimeType,
-            size: attachment.sizeBytes,
-            url: attachment.url,
-          });
-        }
+        const attachments = await persistCodeSandboxOutputs(userId, result.outputFiles);
+        const policySummary = codeSandboxPolicySummary(policy);
 
         const summary = [
           `语言：${sandboxLanguage}`,
+          `环境：${policySummary.label} · /tmp ${policySummary.tmpMiB} MiB · 内存 ${policySummary.memoryMiB} MiB`,
           `退出码：${result.exitCode ?? "无"}`,
           `耗时：${result.durationMs} ms`,
           result.timedOut ? "状态：运行超时" : undefined,
@@ -1172,10 +1178,75 @@ export function buildCodeTools(userId: string): ToolSet {
           stdoutStderrLimitExceeded: result.stdoutStderrLimitExceeded,
           outputLimitExceeded: result.outputLimitExceeded,
           consolePreviewTruncated: stdout.truncated || stderr.truncated,
+          sandboxPolicy: policySummary,
         };
       },
     }),
   };
+
+  if (context) {
+    Object.assign(tools, {
+      start_code_lab: tool({
+        description:
+          "启动可刷新恢复的后台 Code Lab。仅用于预计超过 120 秒、较大压缩包/数据集、需要进度和停止能力的代码任务；短任务继续使用 run_code。任务最长 300 秒，完成后会生成附件和简短回执。",
+        inputSchema: z.object({
+          language: z.enum(["python", "node", "javascript", "js", "bash"]),
+          code: z.string().max(1_000_000).describe("要在后台沙盒执行的完整代码"),
+          args: z.array(z.string().max(4_096)).max(32).optional(),
+          inputs: z
+            .array(
+              z.object({
+                attachmentId: z.string(),
+                path: z.string().max(240).optional(),
+              })
+            )
+            .max(32)
+            .optional(),
+          timeoutSeconds: z
+            .number()
+            .int()
+            .min(121)
+            .max(300)
+            .optional()
+            .describe("后台运行上限，默认 300 秒"),
+          taskName: z.string().min(2).max(80).optional().describe("任务卡标题"),
+        }),
+        execute: async ({
+          language,
+          code,
+          args,
+          inputs,
+          timeoutSeconds,
+          taskName,
+        }) => {
+          const { createSkillRun } = await import("@/lib/server/skill-runs");
+          const run = await createSkillRun({
+            ownerId: userId,
+            conversationId: context.conversationId,
+            messageId: context.messageId,
+            kind: "code-lab",
+            skillName: taskName?.trim() || "Code Lab",
+            payload: {
+              language,
+              code,
+              args,
+              inputs,
+              timeoutSeconds: timeoutSeconds ?? 300,
+              modelId: context.modelId,
+            },
+          });
+          if (!run) throw new Error("Code Lab 后台任务创建失败");
+          return {
+            text: "Code Lab 已在后台启动，可在任务卡查看进度、停止运行，并在完成后下载输出文件。",
+            skillRunId: run.id,
+            skillName: run.skillName,
+          };
+        },
+      }),
+    });
+  }
+
+  return tools;
 }
 
 function truncateSandboxConsole(value: string) {
@@ -1186,60 +1257,6 @@ function truncateSandboxConsole(value: string) {
     text: `${value.slice(0, SANDBOX_CONSOLE_PREVIEW_MAX_LENGTH)}\n…（控制台输出已截断）`,
     truncated: true,
   };
-}
-
-async function loadOwnedSandboxInput(userId: string, attachmentId: string) {
-  const media = await openMediaStream(attachmentId, userId);
-  if (media) return { name: media.row.name, buffer: media.buffer };
-
-  const [attachment] = await db
-    .select({
-      name: schema.attachments.name,
-      storagePath: schema.attachments.storagePath,
-    })
-    .from(schema.attachments)
-    .where(
-      and(
-        eq(schema.attachments.id, attachmentId),
-        eq(schema.attachments.ownerId, userId)
-      )
-    )
-    .limit(1);
-  if (!attachment) throw new Error("输入附件不存在或无权访问");
-
-  if (attachment.storagePath.startsWith("/api/media/")) {
-    const mediaId = attachment.storagePath.replace(/^\/api\/media\//u, "");
-    const storedMedia = await openMediaStream(mediaId, userId);
-    if (storedMedia) return { name: attachment.name, buffer: storedMedia.buffer };
-  }
-  const filePath = localAttachmentPath(attachment.storagePath);
-  if (!filePath) throw new Error("输入附件文件不可读取");
-  const { readFile } = await import("node:fs/promises");
-  return { name: attachment.name, buffer: await readFile(filePath) };
-}
-
-function sandboxInputName(value: string) {
-  const name = value.replace(/\\/gu, "/").split("/").pop()?.trim() || "input.bin";
-  return name.replace(/[\u0000\n\r,]/gu, "-").slice(0, 200) || "input.bin";
-}
-
-function sandboxOutputMimeType(name: string) {
-  const extension = name.slice(name.lastIndexOf(".")).toLowerCase();
-  const byExtension: Record<string, string> = {
-    ".csv": "text/csv",
-    ".html": "text/html",
-    ".json": "application/json",
-    ".md": "text/markdown",
-    ".pdf": "application/pdf",
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".svg": "image/svg+xml",
-    ".txt": "text/plain",
-    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ".zip": "application/zip",
-  };
-  return byExtension[extension] ?? "application/octet-stream";
 }
 
 // ---------- 图像生成 / 编辑（gpt-image-2） ----------

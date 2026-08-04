@@ -34,7 +34,7 @@ while (!stopping) {
       )
       update skill_runs r
       set status = 'running', stage = 'Worker 已接收', lease_owner = ${workerId},
-          lease_expires_at = now() + interval '6 minutes',
+          lease_expires_at = now() + interval '7 minutes',
           started_at = coalesce(started_at, now()), updated_at = now()
       from candidate
       where r.id = candidate.id
@@ -49,7 +49,7 @@ while (!stopping) {
       {
         method: "POST",
         headers: { Authorization: `Bearer ${workerSecret}` },
-        signal: AbortSignal.timeout(330_000),
+        signal: AbortSignal.timeout(390_000),
       }
     );
     if (!response.ok) {
