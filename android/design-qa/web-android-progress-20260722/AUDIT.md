@@ -11,7 +11,7 @@
 3. Android 原实现每 1.25 秒或 5 秒请求一次完整任务快照，慢于 Web EventSource 且产生额外连接开销。当前改为 `/api/skill-runs/[id]/events` 单条可取消 SSE：snapshot 即时发布，run-event/ping 不触发多余重组；断流先 GET 补尾，再按 0.75–10 秒退避重连。设备合同 3/3 通过。
 4. Debug APK 已显式绑定 `https://xiaolin.wenzhuolin.xyz/`，使用 Android Debug v2 签名并安装启动；不能把它当作商店 Release。正式 keystore、正式 `assetlinks.json` 指纹和系统自动 App Link 验证仍缺外部输入。
 5. “所有功能且快于 Web”的最终结论仍缺三类强证据：真实支付成功/取消/失败闭环、生产 Skill worker 的受控测试账号闭环、固定真机上与 Web 同账号同数据的交替性能 trace。AVD 和静态映射不能替代这些验收。
-6. Android 工程已在 `763430d` 纳入 Git；本轮 Skill Run 同步与 SSE 优化仍是未提交工作区。`v_kimi/`、`webui-v2/` 与 `tmp/v_kimi/` 属于既有无关未跟踪目录，本轮未修改。
+6. Android 工程已在 `763430d` 纳入 Git；本轮 Skill Run 同步与 SSE 优化仍是未提交工作区。
 
 ## Traceability Matrix
 
