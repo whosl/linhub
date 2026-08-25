@@ -36,6 +36,7 @@ import { cn } from "@/lib/utils";
 import { sanitizeAssistantText, sanitizeReasoningText } from "@/lib/chat-text";
 import { useUiStore } from "@/stores/ui-store";
 import { toast } from "sonner";
+import { LinHubOrb } from "@/components/ui/linhub-orb";
 import {
   modelSupportsThinking,
   resolveModelThinkingEffort,
@@ -1026,6 +1027,7 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
               </>
             ) : (
               <>
+                <LinHubOrb className="mb-4" />
                 <h1 className="mb-8 text-center font-serif text-3xl text-foreground/90">
                   {pendingSkill
                     ? `${pendingSkill.emoji} ${pendingSkill.name}`

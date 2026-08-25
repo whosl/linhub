@@ -317,6 +317,7 @@ export function MediaPreviewPanel({
 
   return (
     <motion.aside
+      data-sidebar-swipe-ignore
       role="dialog"
       aria-modal="true"
       aria-label={`预览文件「${asset.name}」`}

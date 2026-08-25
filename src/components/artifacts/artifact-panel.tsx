@@ -192,6 +192,7 @@ export function ArtifactPanel({
 
   return (
     <motion.div
+      data-sidebar-swipe-ignore
       initial={isDesktop ? { opacity: 0, x: 48 } : { opacity: 0, y: 56 }}
       animate={{ opacity: 1, x: 0, y: 0 }}
       exit={isDesktop ? { opacity: 0, x: 48 } : { opacity: 0, y: 56 }}

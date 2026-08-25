@@ -28,7 +28,7 @@ const alwaysRevalidateHeader = {
 
 const nextConfig: NextConfig = {
   // 允许通过 Lighthouse 的 Tailscale 地址访问 dev server 与 HMR。
-  allowedDevOrigins: ["100.100.13.55"],
+  allowedDevOrigins: ["100.100.13.55", "127.0.0.1", "localhost"],
   // pdf-parse/pdfjs 在 Node 环境会相对自身模块加载 pdf.worker.mjs。
   // 若被 Next/Turbopack 打进 server chunk，相对路径会错误地落到 .next/**/chunks。
   serverExternalPackages: ["pdf-parse", "pdfjs-dist"],
