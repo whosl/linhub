@@ -655,6 +655,8 @@ export class MockDataService implements DataService {
     // Mock 模式的生成只存在于当前 async generator；真实 API 才需要跨页面续接。
   }
 
+  disconnectChatStream() {}
+
   async *regenerate(
     conversationId: string,
     assistantMessageId: string,

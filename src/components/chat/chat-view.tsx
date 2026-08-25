@@ -559,7 +559,7 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
   // I11: 新会话首条响应进行中标记，用于显示停止按钮
   const isStartingNew = useChatStore((s) => s.isStartingNew);
   const startError = useChatStore((s) => s.startError);
-  const { ensureSession, send, retrySend, stop, regenerate, switchBranch, setFeedback, clearRedirect, replaceMessageImage } =
+  const { ensureSession, reconnect, send, retrySend, stop, regenerate, switchBranch, setFeedback, clearRedirect, replaceMessageImage } =
     useChatStore();
 
   React.useEffect(() => {
@@ -575,6 +575,22 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
   React.useEffect(() => {
     if (conversationId) void ensureSession(conversationId);
   }, [conversationId, ensureSession]);
+
+  React.useEffect(() => {
+    if (!conversationId) return;
+    const reconnectIfReady = () => {
+      if (document.visibilityState !== "visible" || navigator.onLine === false) return;
+      reconnect(conversationId);
+    };
+    document.addEventListener("visibilitychange", reconnectIfReady);
+    window.addEventListener("pageshow", reconnectIfReady);
+    window.addEventListener("online", reconnectIfReady);
+    return () => {
+      document.removeEventListener("visibilitychange", reconnectIfReady);
+      window.removeEventListener("pageshow", reconnectIfReady);
+      window.removeEventListener("online", reconnectIfReady);
+    };
+  }, [conversationId, reconnect]);
 
   React.useEffect(() => {
     if (!conversationId || !artifactPartsKey) return;

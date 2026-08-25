@@ -75,6 +75,8 @@ export interface DataService {
   // ---- 聊天（流式） ----
   sendMessage(input: SendMessageInput): AsyncIterable<StreamEvent>;
   streamConversation(conversationId: string): AsyncIterable<StreamEvent>;
+  /** 只关闭当前浏览器的流订阅，不停止服务端后台生成。 */
+  disconnectChatStream(conversationId: string): void;
   stopGeneration(conversationId?: string): Promise<void>;
   regenerate(
     conversationId: string,

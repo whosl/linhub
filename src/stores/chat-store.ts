@@ -4,6 +4,7 @@ import { create } from "zustand";
 import { getDataService } from "@/lib/data";
 import { replaceMessageImageParts } from "@/lib/message-image";
 import { clientRandomUUID } from "@/lib/client-id";
+import { isChatStreamTransportError } from "@/lib/data/chat-stream-transport";
 import type {
   Message,
   MessagePart,
@@ -14,8 +15,68 @@ import type {
 // I10: ensureSession 并发去重，按 conversationId 复用 in-flight promise
 const ensureSessionInflight = new Map<string, Promise<void>>();
 const resumeSessionInflight = new Map<string, Promise<void>>();
+const CHAT_STREAM_WAKE_EVENT = "linhub:chat-stream-wake";
+const RECONNECT_DELAYS_MS = [500, 1_500, 3_000, 5_000] as const;
 const optimisticId = (prefix: "c" | "msg" | "cg") =>
   `${prefix}-${clientRandomUUID().replace(/-/g, "").slice(0, 16)}`;
+
+function wakeChatStreamWaiters() {
+  window.dispatchEvent(new Event(CHAT_STREAM_WAKE_EVENT));
+}
+
+/** 后台/离线时不空转；回到前台或恢复网络后立即给续接一次机会。 */
+function waitForReconnectOpportunity(
+  attempt: number,
+  isCurrent: () => boolean
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let wasWaitingForPage = false;
+    const isReady = () =>
+      document.visibilityState === "visible" && navigator.onLine !== false;
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onWake);
+      window.removeEventListener("pageshow", onWake);
+      window.removeEventListener("online", onWake);
+      window.removeEventListener(CHAT_STREAM_WAKE_EVENT, onWake);
+    };
+    const finish = (value: boolean) => {
+      cleanup();
+      resolve(value);
+    };
+    const trySchedule = () => {
+      if (!isCurrent()) {
+        finish(false);
+        return;
+      }
+      if (!isReady()) {
+        wasWaitingForPage = true;
+        return;
+      }
+      if (timer) return;
+      const delay = wasWaitingForPage
+        ? 0
+        : RECONNECT_DELAYS_MS[Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)];
+      timer = setTimeout(() => {
+        timer = undefined;
+        if (!isCurrent()) {
+          finish(false);
+        } else if (isReady()) {
+          finish(true);
+        } else {
+          wasWaitingForPage = true;
+        }
+      }, delay);
+    };
+    const onWake = () => trySchedule();
+    document.addEventListener("visibilitychange", onWake);
+    window.addEventListener("pageshow", onWake);
+    window.addEventListener("online", onWake);
+    window.addEventListener(CHAT_STREAM_WAKE_EVENT, onWake);
+    trySchedule();
+  });
+}
 
 export interface ChatSession {
   conversationId: string;
@@ -39,6 +100,8 @@ interface ChatState {
   startError?: string;
   ensureSession: (conversationId: string) => Promise<void>;
   resume: (conversationId: string) => Promise<void>;
+  /** 页面恢复可见时丢弃可能已僵死的订阅，并连接后台任务。 */
+  reconnect: (conversationId: string) => void;
   send: (input: SendMessageInput) => Promise<void>;
   retrySend: (conversationId: string, userMessageId: string) => Promise<void>;
   stop: (conversationId?: string) => Promise<void>;
@@ -168,13 +231,45 @@ export const useChatStore = create<ChatState>((set, get) => {
   // 本标签页已经通过 POST/regenerate 持有同一任务的流时，不再额外 GET resume。
   // 否则新会话跳转后 ensureSession 会订阅同一个内存任务，delta 被应用两次。
   const localOwnedStreams = new Set<string>();
+  const unacknowledgedLocalStreams = new Set<string>();
   // 删除/重置会话时递增版本，旧异步流或加载 promise 只能写回同版本的会话。
   const sessionVersions = new Map<string, number>();
   const failedSendInputs = new Map<string, SendMessageInput>();
+  // 显式停止或开始下一次生成时递增；旧流即使稍后恢复也不能再写回或自动续接。
+  const generationEpochs = new Map<string, number>();
+  let newConversationEpoch = 0;
+  let startingConversationClientId: string | undefined;
   const sessionVersion = (conversationId: string) =>
     sessionVersions.get(conversationId) ?? 0;
   const bumpSessionVersion = (conversationId: string) => {
     sessionVersions.set(conversationId, sessionVersion(conversationId) + 1);
+  };
+  const generationEpoch = (conversationId: string) =>
+    generationEpochs.get(conversationId) ?? 0;
+  const beginGeneration = (conversationId: string) => {
+    const next = generationEpoch(conversationId) + 1;
+    generationEpochs.set(conversationId, next);
+    wakeChatStreamWaiters();
+    return next;
+  };
+  const invalidateGeneration = (conversationId: string) => {
+    generationEpochs.set(conversationId, generationEpoch(conversationId) + 1);
+    wakeChatStreamWaiters();
+  };
+  const requestResume = (conversationId: string) => {
+    const inflight = resumeSessionInflight.get(conversationId);
+    if (!inflight) {
+      void get().resume(conversationId);
+      return;
+    }
+    void inflight.then(() => {
+      if (
+        get().sessions[conversationId]?.status === "streaming" &&
+        !localOwnedStreams.has(conversationId)
+      ) {
+        void get().resume(conversationId);
+      }
+    });
   };
 
   /** 把 sessions 裁剪到 MAX_SESSIONS 以内，优先丢弃非流式的已加载会话 */
@@ -629,9 +724,11 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     removeSession: (conversationId) => {
       bumpSessionVersion(conversationId);
+      invalidateGeneration(conversationId);
       ensureSessionInflight.delete(conversationId);
       resumeSessionInflight.delete(conversationId);
       localOwnedStreams.delete(conversationId);
+      unacknowledgedLocalStreams.delete(conversationId);
       set((state) => {
         if (!state.sessions[conversationId]) return state;
         const sessions = { ...state.sessions };
@@ -644,7 +741,11 @@ export const useChatStore = create<ChatState>((set, get) => {
       const existing = get().sessions[conversationId];
       if (existing?.loaded) {
         // 重新进入已加载会话时也尝试一次续接，捕捉其他标签页刚启动的生成。
-        if (!localOwnedStreams.has(conversationId)) void get().resume(conversationId);
+        if (existing.status === "streaming") {
+          get().reconnect(conversationId);
+        } else if (!localOwnedStreams.has(conversationId)) {
+          void get().resume(conversationId);
+        }
         return;
       }
       // I10: 去重——并发调用复用同一个 in-flight promise，
@@ -705,46 +806,100 @@ export const useChatStore = create<ChatState>((set, get) => {
       const existing = resumeSessionInflight.get(conversationId);
       if (existing) return existing;
       const expectedVersion = sessionVersion(conversationId);
+      const expectedGeneration = generationEpoch(conversationId);
+      const isCurrent = () =>
+        sessionVersion(conversationId) === expectedVersion &&
+        generationEpoch(conversationId) === expectedGeneration;
       const p = (async () => {
+        let reconnectAttempt = 0;
         try {
-          for await (const event of getDataService().streamConversation(conversationId)) {
-            if (sessionVersion(conversationId) !== expectedVersion) break;
-            applyEvent(conversationId, event, expectedVersion);
+          while (isCurrent()) {
+            let transportInterrupted = false;
+            try {
+              for await (const event of getDataService().streamConversation(conversationId)) {
+                if (!isCurrent()) break;
+                reconnectAttempt = 0;
+                applyEvent(conversationId, event, expectedVersion);
+              }
+            } catch (error) {
+              if (isChatStreamTransportError(error)) {
+                transportInterrupted = true;
+              } else {
+                applyEvent(
+                  conversationId,
+                  {
+                    type: "error",
+                    message: error instanceof Error ? error.message : "续接对话失败",
+                  },
+                  expectedVersion
+                );
+              }
+            }
+            if (!isCurrent()) break;
+
+            // 每次订阅结束后都以 DB 为准，补齐断线期间错过的完整快照和最终状态。
+            try {
+              const [conversation, messages] = await Promise.all([
+                getDataService().getConversation(conversationId),
+                getDataService().listMessages(conversationId),
+              ]);
+              if (!isCurrent()) break;
+              const streamingMessage = messages.find(
+                (m) => m.role === "assistant" && m.status === "streaming"
+              );
+              updateSession(conversationId, (s) => ({
+                ...s,
+                messages: mergeLoadedMessages(s.messages, messages),
+                status: streamingMessage ? "streaming" : "idle",
+                streamingMessageId: streamingMessage?.id,
+                loaded: true,
+                loadError: undefined,
+                streamError: undefined,
+                currentLeafId: resolveCurrentLeafAfterReload(
+                  s.currentLeafId,
+                  conversation?.currentLeafId,
+                  messages
+                ),
+              }), expectedVersion);
+            } catch {
+              // 临时网络错误不覆盖当前可见内容，下面按流式状态决定是否重连。
+              transportInterrupted = true;
+            }
+
+            if (!isCurrent()) break;
+            const stillStreaming =
+              get().sessions[conversationId]?.status === "streaming";
+            if (!stillStreaming) break;
+            const shouldReconnect = await waitForReconnectOpportunity(
+              reconnectAttempt,
+              isCurrent
+            );
+            if (!shouldReconnect) break;
+            reconnectAttempt = transportInterrupted
+              ? reconnectAttempt + 1
+              : Math.max(1, reconnectAttempt);
           }
         } finally {
           resumeSessionInflight.delete(conversationId);
-          if (sessionVersion(conversationId) !== expectedVersion) return;
-          // 流结束后拉一次最终状态，补齐刷新/跨浏览器期间可能错过的最后一批落库内容。
-          try {
-            const [conversation, messages] = await Promise.all([
-              getDataService().getConversation(conversationId),
-              getDataService().listMessages(conversationId),
-            ]);
-            if (sessionVersion(conversationId) !== expectedVersion) return;
-            const streamingMessage = messages.find(
-              (m) => m.role === "assistant" && m.status === "streaming"
-            );
-            updateSession(conversationId, (s) => ({
-              ...s,
-              messages: mergeLoadedMessages(s.messages, messages),
-              status: streamingMessage ? "streaming" : "idle",
-              streamingMessageId: streamingMessage?.id,
-              loaded: true,
-              loadError: undefined,
-              streamError: undefined,
-              currentLeafId: resolveCurrentLeafAfterReload(
-                s.currentLeafId,
-                conversation?.currentLeafId,
-                messages
-              ),
-            }), expectedVersion);
-          } catch {
-            // 续接失败不覆盖当前可见内容。
-          }
         }
       })();
       resumeSessionInflight.set(conversationId, p);
       return p;
+    },
+
+    reconnect: (conversationId) => {
+      const session = get().sessions[conversationId];
+      if (session?.status !== "streaming") return;
+      // 首次 POST/重新生成尚未得到服务端确认时，先关闭可能僵死的 POST；
+      // 原发送流程会用相同幂等 ID 重试，不能在这里提前改走 GET。
+      if (unacknowledgedLocalStreams.has(conversationId)) {
+        getDataService().disconnectChatStream(conversationId);
+        wakeChatStreamWaiters();
+        return;
+      }
+      getDataService().disconnectChatStream(conversationId);
+      localOwnedStreams.delete(conversationId);
+      requestResume(conversationId);
     },
 
     send: async (input) => {
@@ -765,63 +920,115 @@ export const useChatStore = create<ChatState>((set, get) => {
       let expectedVersion = sessionVersion(conversationId);
       let accepted = false;
       let terminal = false;
+      let reconnectAttempt = 0;
+      let shouldResume = false;
+      const expectedNewConversationEpoch = newConversationEpoch;
+      const expectedGeneration = beginGeneration(conversationId);
+      const isCurrent = () =>
+        sessionVersion(conversationId) === expectedVersion &&
+        generationEpoch(conversationId) === expectedGeneration &&
+        (!isNewConversation || newConversationEpoch === expectedNewConversationEpoch);
       localOwnedStreams.add(conversationId);
+      unacknowledgedLocalStreams.add(conversationId);
+      if (isNewConversation) startingConversationClientId = conversationId;
       try {
-        for await (const event of getDataService().sendMessage(input)) {
-          if (event.type === "conversation-created") {
-            conversationId = event.conversation.id;
-            expectedVersion = sessionVersion(conversationId);
-            localOwnedStreams.add(conversationId);
-            set((state) => ({
-              sessions: {
-                ...state.sessions,
-                [conversationId!]: {
-                  ...(state.sessions[conversationId!] ?? emptySession(conversationId!)),
-                  loaded: true,
-                },
-              },
-              pendingRedirect: conversationId,
-            }));
-            continue;
+        while (isCurrent() && !terminal) {
+          let transportInterrupted = false;
+          try {
+            for await (const event of getDataService().sendMessage(input)) {
+              reconnectAttempt = 0;
+              if (event.type === "conversation-created") {
+                const previousConversationId = conversationId;
+                conversationId = event.conversation.id;
+                if (isNewConversation) startingConversationClientId = conversationId;
+                expectedVersion = sessionVersion(conversationId);
+                if (conversationId !== previousConversationId) {
+                  generationEpochs.set(conversationId, expectedGeneration);
+                  localOwnedStreams.delete(previousConversationId);
+                  unacknowledgedLocalStreams.delete(previousConversationId);
+                }
+                localOwnedStreams.add(conversationId);
+                if (!accepted) unacknowledgedLocalStreams.add(conversationId);
+                set((state) => ({
+                  sessions: {
+                    ...state.sessions,
+                    [conversationId!]: {
+                      ...(state.sessions[conversationId!] ?? emptySession(conversationId!)),
+                      loaded: true,
+                    },
+                  },
+                  pendingRedirect: conversationId,
+                }));
+                continue;
+              }
+              if (
+                event.type === "user-message" &&
+                event.message.id === optimistic.userMessageId
+              ) {
+                accepted = true;
+                unacknowledgedLocalStreams.delete(conversationId);
+              }
+              if (event.type === "done" || event.type === "error") terminal = true;
+              if (event.type === "error") {
+                if (isNewConversation) set({ startError: event.message });
+                failOptimisticSend(
+                  conversationId,
+                  optimistic.userMessageId,
+                  optimistic.assistantMessageId,
+                  event.message,
+                  accepted
+                );
+              }
+              if (!isCurrent()) break;
+              applyEvent(conversationId, event, expectedVersion);
+            }
+          } catch (error) {
+            if (isChatStreamTransportError(error)) {
+              transportInterrupted = true;
+            } else {
+              const message = error instanceof Error ? error.message : "发送失败";
+              failOptimisticSend(
+                conversationId,
+                optimistic.userMessageId,
+                optimistic.assistantMessageId,
+                message,
+                accepted
+              );
+              terminal = true;
+            }
           }
-          if (event.type === "user-message" && event.message.id === optimistic.userMessageId) {
-            accepted = true;
+
+          if (terminal || !isCurrent()) break;
+          if (accepted) {
+            // POST 已被服务端确认，后续只需 GET 订阅后台任务，不能重复提交生成。
+            shouldResume = true;
+            break;
           }
-          if (event.type === "done" || event.type === "error") terminal = true;
-          if (event.type === "error") {
-            if (isNewConversation) set({ startError: event.message });
-            failOptimisticSend(
-              conversationId,
-              optimistic.userMessageId,
-              optimistic.assistantMessageId,
-              event.message,
-              accepted
-            );
-          }
-          if (sessionVersion(conversationId) !== expectedVersion) break;
-          applyEvent(conversationId, event, expectedVersion);
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "连接中断";
-        failOptimisticSend(
-          conversationId,
-          optimistic.userMessageId,
-          optimistic.assistantMessageId,
-          message,
-          accepted
-        );
-      } finally {
-        if (!terminal && !accepted) {
-          failOptimisticSend(
-            conversationId,
-            optimistic.userMessageId,
-            optimistic.assistantMessageId,
-            "连接中断，请重试",
-            false
+          // 尚未收到 user-message 时无法确认 POST 是否到达；复用同一组 client* ID
+          // 重试，服务端会幂等地返回既有任务或只创建一次。
+          const shouldRetry = await waitForReconnectOpportunity(
+            reconnectAttempt,
+            isCurrent
           );
+          if (!shouldRetry) break;
+          reconnectAttempt = transportInterrupted
+            ? reconnectAttempt + 1
+            : Math.max(1, reconnectAttempt);
         }
+      } finally {
         localOwnedStreams.delete(conversationId);
+        unacknowledgedLocalStreams.delete(conversationId);
+        if (startingConversationClientId === conversationId) {
+          startingConversationClientId = undefined;
+        }
         if (isNewConversation) set({ isStartingNew: false });
+        if (
+          shouldResume &&
+          isCurrent() &&
+          get().sessions[conversationId]?.status === "streaming"
+        ) {
+          requestResume(conversationId);
+        }
       }
     },
 
@@ -842,6 +1049,8 @@ export const useChatStore = create<ChatState>((set, get) => {
       // 这里主动把状态重置回 idle，并把进行中的消息标记为 stopped。
       // 新会话首条消息（conversationId 未知）由 send 的 finally 清 isStartingNew，无需处理。
       if (conversationId) {
+        invalidateGeneration(conversationId);
+        unacknowledgedLocalStreams.delete(conversationId);
         updateSession(conversationId, (s) => ({
           ...s,
           status: "idle",
@@ -852,6 +1061,24 @@ export const useChatStore = create<ChatState>((set, get) => {
           ),
         }));
       } else {
+        newConversationEpoch += 1;
+        if (startingConversationClientId) {
+          const startingId = startingConversationClientId;
+          invalidateGeneration(startingId);
+          unacknowledgedLocalStreams.delete(startingId);
+          updateSession(startingId, (s) => ({
+            ...s,
+            status: "idle",
+            streamingMessageId: undefined,
+            streamError: undefined,
+            messages: s.messages.map((message) =>
+              message.id === s.streamingMessageId
+                ? { ...message, status: "stopped" }
+                : message
+            ),
+          }));
+        }
+        wakeChatStreamWaiters();
         set({ startError: undefined });
       }
       await getDataService().stopGeneration(conversationId);
@@ -885,39 +1112,75 @@ export const useChatStore = create<ChatState>((set, get) => {
         messages: upsertMessage(session.messages, optimisticAssistant),
       }));
       localOwnedStreams.add(conversationId);
+      unacknowledgedLocalStreams.add(conversationId);
       const expectedVersion = sessionVersion(conversationId);
+      const expectedGeneration = beginGeneration(conversationId);
+      const isCurrent = () =>
+        sessionVersion(conversationId) === expectedVersion &&
+        generationEpoch(conversationId) === expectedGeneration;
       let terminal = false;
+      let acknowledged = false;
+      let reconnectAttempt = 0;
+      let shouldResume = false;
       try {
-        for await (const event of getDataService().regenerate(
-          conversationId,
-          assistantMessageId,
-          modelId,
-          { clientGenerationId, clientAssistantMessageId }
-        )) {
-          if (event.type === "done" || event.type === "error") terminal = true;
-          if (sessionVersion(conversationId) !== expectedVersion) break;
-          applyEvent(conversationId, event, expectedVersion);
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "连接中断";
-        applyEvent(
-          conversationId,
-          { type: "error", messageId: clientAssistantMessageId, message },
-          expectedVersion
-        );
-      } finally {
-        if (!terminal) {
-          applyEvent(
-            conversationId,
-            {
-              type: "error",
-              messageId: clientAssistantMessageId,
-              message: "连接中断，请重新生成",
-            },
-            expectedVersion
+        while (isCurrent() && !terminal) {
+          let transportInterrupted = false;
+          try {
+            for await (const event of getDataService().regenerate(
+              conversationId,
+              assistantMessageId,
+              modelId,
+              { clientGenerationId, clientAssistantMessageId }
+            )) {
+              reconnectAttempt = 0;
+              if (event.type !== "ping") {
+                acknowledged = true;
+                unacknowledgedLocalStreams.delete(conversationId);
+              }
+              if (event.type === "done" || event.type === "error") terminal = true;
+              if (!isCurrent()) break;
+              applyEvent(conversationId, event, expectedVersion);
+            }
+          } catch (error) {
+            if (isChatStreamTransportError(error)) {
+              transportInterrupted = true;
+            } else {
+              applyEvent(
+                conversationId,
+                {
+                  type: "error",
+                  messageId: clientAssistantMessageId,
+                  message: error instanceof Error ? error.message : "重新生成失败",
+                },
+                expectedVersion
+              );
+              terminal = true;
+            }
+          }
+          if (terminal || !isCurrent()) break;
+          if (acknowledged) {
+            shouldResume = true;
+            break;
+          }
+          const shouldRetry = await waitForReconnectOpportunity(
+            reconnectAttempt,
+            isCurrent
           );
+          if (!shouldRetry) break;
+          reconnectAttempt = transportInterrupted
+            ? reconnectAttempt + 1
+            : Math.max(1, reconnectAttempt);
         }
+      } finally {
         localOwnedStreams.delete(conversationId);
+        unacknowledgedLocalStreams.delete(conversationId);
+        if (
+          shouldResume &&
+          isCurrent() &&
+          get().sessions[conversationId]?.status === "streaming"
+        ) {
+          requestResume(conversationId);
+        }
       }
     },
 

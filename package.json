@@ -14,6 +14,7 @@
     "verify:image-edit-idempotency": "node scripts/verify-image-edit-idempotency.mjs",
     "verify:image-edit-route": "node scripts/verify-image-edit-route.mjs",
     "verify:optimistic-query": "node --experimental-strip-types scripts/verify-optimistic-query.mjs",
+    "verify:chat-stream-resilience": "node --experimental-strip-types scripts/verify-chat-stream-resilience.mjs",
     "verify:android-parity": "node android/tools/verify-web-android-parity.mjs",
     "verify:android-delivery": "node android/tools/verify-android-delivery.mjs"
   },

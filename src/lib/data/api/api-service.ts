@@ -29,6 +29,7 @@ import type {
   User,
 } from "@/lib/types";
 import { getMockDataService } from "@/lib/data/mock/mock-service";
+import { ChatStreamTransportError } from "@/lib/data/chat-stream-transport";
 
 async function fetchJson<T>(
   url: string,
@@ -142,6 +143,7 @@ export class ApiDataService implements DataService {
   private mock = getMockDataService();
   private abortControllers = new Map<string, Set<AbortController>>();
   private startingConversationId: string | null = null;
+  private startingClientConversationId: string | null = null;
   private startingGenerationId: string | null = null;
 
   private addAbortController(key: string, controller: AbortController) {
@@ -255,6 +257,7 @@ export class ApiDataService implements DataService {
       this.addAbortController(input.conversationId, controller);
     } else {
       this.addAbortController(sentinel, controller);
+      this.startingClientConversationId = payload.clientConversationId ?? null;
       this.startingGenerationId = clientGenerationId;
     }
     try {
@@ -276,15 +279,15 @@ export class ApiDataService implements DataService {
       }
     } catch (e) {
       if (!controller.signal.aborted) {
-        yield {
-          type: "error",
-          message: e instanceof Error ? e.message : "连接中断",
-        };
+        throw new ChatStreamTransportError(
+          e instanceof Error ? e.message : "聊天流连接中断"
+        );
       }
     } finally {
       this.removeAbortController(activeKey, controller);
       if (isNew) this.removeAbortController(sentinel, controller);
       if (isNew) this.startingConversationId = null;
+      if (isNew) this.startingClientConversationId = null;
       if (isNew && this.startingGenerationId === clientGenerationId) {
         this.startingGenerationId = null;
       }
@@ -302,22 +305,31 @@ export class ApiDataService implements DataService {
       yield* streamNdjson(res, controller.signal);
     } catch (e) {
       if (!controller.signal.aborted) {
-        yield {
-          type: "error",
-          message: e instanceof Error ? e.message : "连接中断",
-        };
+        throw new ChatStreamTransportError(
+          e instanceof Error ? e.message : "聊天流连接中断"
+        );
       }
     } finally {
       this.removeAbortController(conversationId, controller);
     }
   }
 
+  disconnectChatStream(conversationId: string) {
+    this.abortControllersForKey(conversationId);
+  }
+
   async stopGeneration(conversationId?: string) {
     // I11: conversationId 为空时停止新会话的 in-flight 流
+    const isStartingConversation =
+      !conversationId ||
+      conversationId === this.startingConversationId ||
+      conversationId === this.startingClientConversationId;
     const key = conversationId ?? this.startingConversationId ?? "__new_conversation__";
-    const serverConversationId = conversationId ?? this.startingConversationId;
+    const serverConversationId = isStartingConversation
+      ? this.startingConversationId
+      : conversationId;
     this.abortControllersForKey(key);
-    if (!conversationId) {
+    if (isStartingConversation) {
       this.abortControllersForKey("__new_conversation__");
     }
     try {
@@ -337,8 +349,9 @@ export class ApiDataService implements DataService {
     } catch (e) {
       console.warn("停止服务端生成失败，已先在本地停止流", e);
     }
-    if (!conversationId) {
+    if (isStartingConversation) {
       this.startingConversationId = null;
+      this.startingClientConversationId = null;
       this.startingGenerationId = null;
     }
   }
@@ -374,10 +387,9 @@ export class ApiDataService implements DataService {
       yield* streamNdjson(res, controller.signal);
     } catch (e) {
       if (!controller.signal.aborted) {
-        yield {
-          type: "error",
-          message: e instanceof Error ? e.message : "连接中断",
-        };
+        throw new ChatStreamTransportError(
+          e instanceof Error ? e.message : "聊天流连接中断"
+        );
       }
     } finally {
       this.removeAbortController(conversationId, controller);
