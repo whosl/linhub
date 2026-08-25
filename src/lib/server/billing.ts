@@ -146,7 +146,8 @@ export async function recordUsage(
           )
         )
         .orderBy(desc(schema.subscriptions.expiresAt))
-        .limit(1);
+        .limit(1)
+        .for("update", { of: schema.subscriptions });
       if (sub) {
         if (isUnlimitedQuota(sub.quota)) {
           await tx
@@ -191,7 +192,7 @@ export async function recordUsage(
           description: `${record.displayName} ${capability}消费`,
         });
       }
-    }, { isolationLevel: "serializable" });
+    }, { isolationLevel: "read committed" });
 
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
@@ -235,7 +236,8 @@ export async function reserveSpend(
           )
         )
         .orderBy(desc(schema.subscriptions.expiresAt))
-        .limit(1);
+        .limit(1)
+        .for("update", { of: schema.subscriptions });
 
       if (sub) {
         if (isUnlimitedQuota(sub.quota)) {
@@ -289,7 +291,7 @@ export async function reserveSpend(
         balanceCents,
         subscriptionId,
       };
-    }, { isolationLevel: "serializable" });
+    }, { isolationLevel: "read committed" });
 
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
