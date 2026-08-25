@@ -145,7 +145,11 @@ async function generateSubagentText(options: GenerateTextInput) {
   let lastError: unknown;
   for (let attempt = 1; attempt <= SUBAGENT_MODEL_ATTEMPTS; attempt += 1) {
     try {
-      return await generateText(options);
+      return await generateText({
+        ...options,
+        // 子任务只调用联网/MCP 工具；单个失联网页不能拖住整个研究 Run。
+        timeout: options.timeout ?? { toolMs: 45_000 },
+      });
     } catch (error) {
       lastError = error;
       const retryable = attempt < SUBAGENT_MODEL_ATTEMPTS && isRetryableSubagentError(error);

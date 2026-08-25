@@ -1262,6 +1262,7 @@ function truncateSandboxConsole(value: string) {
 // ---------- 图像生成 / 编辑（gpt-image-2） ----------
 
 class RetryableImageError extends Error {}
+class UnsupportedImageResponseFormatError extends Error {}
 
 const REMOTE_IMAGE_MAX_BYTES = 12 * 1024 * 1024;
 const REMOTE_IMAGE_DOWNLOAD_TIMEOUT_MS = 30_000;
@@ -1282,6 +1283,35 @@ function imageExtensionFromContentType(contentType: string | null): string | nul
   if (type === "image/png") return ".png";
   if (type === "image/jpeg" || type === "image/jpg") return ".jpg";
   if (type === "image/webp") return ".webp";
+  return null;
+}
+
+function imageExtensionFromBytes(buffer: Buffer): string | null {
+  if (
+    buffer.length >= 8 &&
+    buffer
+      .subarray(0, 8)
+      .equals(
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+      )
+  ) {
+    return ".png";
+  }
+  if (
+    buffer.length >= 3 &&
+    buffer[0] === 0xff &&
+    buffer[1] === 0xd8 &&
+    buffer[2] === 0xff
+  ) {
+    return ".jpg";
+  }
+  if (
+    buffer.length >= 12 &&
+    buffer.subarray(0, 4).toString("ascii") === "RIFF" &&
+    buffer.subarray(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return ".webp";
+  }
   return null;
 }
 
@@ -1557,6 +1587,8 @@ export function buildImageTools(
   onImage: (url: string) => void,
   origin?: string
 ): ToolSet {
+  let imageGenerationFailure: string | null = null;
+
   return {
     generate_image: tool({
       description:
@@ -1566,6 +1598,12 @@ export function buildImageTools(
         size: z.enum(["1024x1024", "1536x1024", "1024x1536"]).optional(),
       }),
       execute: async ({ prompt, size }) => {
+        if (imageGenerationFailure) {
+          return {
+            images: [],
+            text: `本轮生图通道已经失败，不再重复请求。请直接向用户说明失败原因，不要再次调用生图工具。失败原因：${imageGenerationFailure}`,
+          };
+        }
         const imgConfig = await getImageGenConfig();
         const { apiKey, baseURL, model, record } = imgConfig;
         if (!record) throw new Error("管理员尚未配置图像计费模型");
@@ -1583,7 +1621,7 @@ export function buildImageTools(
             : null;
 
         // 网关偶发返回空 200/5xx，封装请求 + 重试一次；超时不重试，避免用户等到数分钟后才看到失败。
-        const doGenerate = async () => {
+        const doGenerate = async (preferBase64: boolean) => {
           const res = await fetch(`${baseURL}/images/generations`, {
             method: "POST",
             headers: {
@@ -1595,6 +1633,7 @@ export function buildImageTools(
               prompt,
               size: size ?? "1024x1024",
               n: 1,
+              ...(preferBase64 ? { response_format: "b64_json" } : {}),
             }),
             signal: AbortSignal.timeout(120_000),
           }).catch((e) => {
@@ -1609,6 +1648,15 @@ export function buildImageTools(
           });
           if (!res.ok) {
             const message = await formatUpstreamError(res, "生图失败");
+            if (
+              preferBase64 &&
+              (res.status === 400 || res.status === 422) &&
+              /response[_ -]?format|b64[_ -]?json|unknown field|extra(?:s)? forbidden|unsupported/i.test(
+                message
+              )
+            ) {
+              throw new UnsupportedImageResponseFormatError(message);
+            }
             if (res.status === 408 || res.status === 504) {
               throw new Error("生图请求超时，请稍后重试");
             }
@@ -1636,14 +1684,24 @@ export function buildImageTools(
           }
         };
 
-        try {
-          let data: unknown;
+        const generateWithRetry = async (preferBase64: boolean) => {
           try {
-            data = await doGenerate();
+            return await doGenerate(preferBase64);
           } catch (e) {
             if (!isRetryableImageError(e)) throw e;
             // 仅对网络/限流/5xx/网关空响应等瞬时错误重试一次。
-            data = await doGenerate();
+            return doGenerate(preferBase64);
+          }
+        };
+
+        try {
+          let data: unknown;
+          try {
+            data = await generateWithRetry(true);
+          } catch (e) {
+            if (!(e instanceof UnsupportedImageResponseFormatError)) throw e;
+            // 老网关不认识 response_format 时回退到原始请求结构。
+            data = await generateWithRetry(false);
           }
           const item = getFirstGeneratedImage(data);
           if (item.b64_json) {
@@ -1675,6 +1733,14 @@ export function buildImageTools(
           onImage(url);
           return { images: [url], text: "图片已生成并展示给用户" };
         } catch (e) {
+          const message = e instanceof Error ? e.message : "未知错误";
+          if (
+            /下载生图结果|网络异常|请求超时|上游返回空响应|网关异常/i.test(
+              message
+            )
+          ) {
+            imageGenerationFailure = message;
+          }
           if (reservation) {
             await abortAtomicSpend(userId, reservation, "image").catch((err) =>
               console.error("[billing] 生图失败退款异常", err)
@@ -1774,13 +1840,15 @@ export async function saveGeneratedImage(
   id?: string
 ): Promise<string> {
   const { persistMedia } = await import("@/lib/server/media");
+  const bytes = Buffer.from(b64, "base64");
+  const ext = imageExtensionFromBytes(bytes) ?? ".png";
   const asset = await persistMedia({
     ownerId: userId,
-    bytes: Buffer.from(b64, "base64"),
-    mimeType: "image/png",
-    name: `${kind}.png`,
+    bytes,
+    mimeType: mimeFromImageExtension(ext),
+    name: `${kind}${ext}`,
     kind,
-    ext: ".png",
+    ext,
     sourceTool: kind === "edited" ? "edit_image" : "generate_image",
     id,
   });

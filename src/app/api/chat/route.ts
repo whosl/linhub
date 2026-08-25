@@ -87,10 +87,21 @@ import {
 export const maxDuration = 1800;
 
 const uid = () => crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-const MAX_TOOL_STEPS = 200;
+// 普通聊天的工具循环必须有硬上限；深度调研/数据分析走独立的 Skill Run。
+const MAX_TOOL_STEPS = 40;
 const RESUME_POLL_MS = 750;
 const RESUME_STALE_MS = 120_000;
 const STREAM_HEARTBEAT_MS = 15_000;
+const DEFAULT_TOOL_TIMEOUT_MS = 45_000;
+const CHAT_TOTAL_TIMEOUT_MS = 29 * 60_000;
+const LONG_RUNNING_TOOL_TIMEOUTS = {
+  run_codeMs: 120_000,
+  start_code_labMs: 1_200_000,
+  generate_imageMs: 120_000,
+  edit_imageMs: 120_000,
+  pptx_create_deckMs: 180_000,
+  dashi_render_deckMs: 600_000,
+} as const;
 const MEDIA_URL_PATTERN = /^\/api\/media\/([A-Za-z0-9._-]+)$/;
 const CLIENT_ENTITY_ID_PATTERN = /^(?:c|msg)-[a-f0-9]{16}$/;
 
@@ -753,6 +764,19 @@ function upsertToolPart(parts: MessagePart[], part: ToolCallPart) {
   }
 }
 
+function settleRunningToolParts(parts: MessagePart[], message: string) {
+  return parts.map((part) =>
+    part.type === "tool-call" && part.state === "running"
+      ? {
+          ...part,
+          state: "error" as const,
+          inputPreview: undefined,
+          errorMessage: message,
+        }
+      : part
+  );
+}
+
 function snapshotCoversProjection(
   snapshot: UiMessage,
   projection: {
@@ -961,7 +985,10 @@ async function stopStreamingAssistants(
 
   await db.transaction(async (tx) => {
     for (const row of rows) {
-      const parts = row.parts as MessagePart[];
+      const parts = settleRunningToolParts(
+        row.parts as MessagePart[],
+        "生成已停止，可重新生成。"
+      );
       await tx
         .update(schema.messages)
         .set({
@@ -1005,7 +1032,10 @@ async function stopStaleStreamingAssistant(
         status: "stopped",
         parts:
           message.parts.length > 0
-            ? message.parts
+            ? settleRunningToolParts(
+                message.parts,
+                "工具长时间没有返回，生成已中断，可重新生成。"
+              )
             : [{ type: "text", text: "⚠️ 生成已中断，可重新生成。" }],
       })
       .where(
@@ -2827,6 +2857,13 @@ ${mcpSummary}
           ...(Object.keys(providerOptions).length > 0
             ? { providerOptions }
             : {}),
+          // MCP/联网工具不能无限等待；长任务按工具单独放宽，避免 Code Lab/PPT 被
+          // 普通 WebReader 的超时预算误杀。
+          timeout: {
+            totalMs: CHAT_TOTAL_TIMEOUT_MS,
+            toolMs: DEFAULT_TOOL_TIMEOUT_MS,
+            tools: LONG_RUNNING_TOOL_TIMEOUTS,
+          },
         });
         streamResult = result;
 
@@ -3269,6 +3306,14 @@ ${mcpSummary}
       });
       await persistPartial(true);
     }
+  }
+
+  if (status === "stopped" || status === "error") {
+    const settled = settleRunningToolParts(
+      parts,
+      status === "stopped" ? "生成已停止，可重新生成。" : "工具调用随生成失败而中断。"
+    );
+    parts.splice(0, parts.length, ...settled);
   }
 
   await db
