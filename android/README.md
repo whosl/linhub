@@ -1,6 +1,6 @@
 # LinHub Android
 
-原生 Jetpack Compose 客户端。Next.js 应用继续作为统一后端，Android 通过 HTTPS、Bearer 会话和 NDJSON 流复用现有业务能力。
+Jetpack Compose 承载的 WebView 系统壳。LinHub 的业务界面、登录态和会话状态由生产 Web 统一提供，Android 只负责 App Links、系统返回、文件选择、下载和录音权限。移动端侧栏手势由网页统一识别：全屏向右滑可呼出，并排除输入、预览及横向滚动区域，避免原生与网页重复触发。这样 Web 发布后 Android 会立即获得同一套对话、Skills 与 Artifacts 体验，不再维护第二套聊天协议。
 
 ## 工具链
 
@@ -11,7 +11,7 @@
 
 ## 本地服务
 
-Android 模拟器的 Debug 默认访问 `http://10.0.2.2:3000/`，明文流量仅对白名单中的模拟器宿主地址开放。真机必须使用 HTTPS 后端：
+Debug 与 Release 默认都访问 `https://lin.wenzhuolin.xyz/`。如需连接本机开发服务，可显式覆盖 Debug 地址；明文流量仅对白名单中的模拟器宿主地址开放：
 
 ```bash
 ./gradlew :app:assembleDebug -PLINHUB_DEBUG_BASE_URL=https://dev.example.com/
@@ -24,7 +24,7 @@ Android 模拟器的 Debug 默认访问 `http://10.0.2.2:3000/`，明文流量�
 
 ```bash
 ./gradlew :app:assembleDebug \
-  -PLINHUB_DEBUG_BASE_URL=https://xiaolin.wenzhuolin.xyz/
+  -PLINHUB_DEBUG_BASE_URL=https://lin.wenzhuolin.xyz/
 ```
 
 切回本机后端时，重新使用下方 `http://127.0.0.1:3000/` 参数构建并恢复 `adb reverse` 即可。
@@ -58,7 +58,7 @@ adb -s emulator-5554 shell dumpsys SurfaceFlinger | grep 'GLES:'
 SwiftShader 仅用于隔离模拟器图形驱动崩溃。它是 CPU 软件渲染，会把正常抽屉动画放大成数百毫秒长帧，
 不能用来判断 App 的动画性能。
 
-Release 必须指定 HTTPS 地址，否则构建产物只会指向不可用的占位域名：
+Release 默认使用生产站点，也可在私有部署时显式覆盖为另一个规范 HTTPS 地址：
 
 ```bash
 ./gradlew :app:bundleRelease -PLINHUB_BASE_URL=https://your-linhub.example/
@@ -86,6 +86,8 @@ npm run verify:android-delivery
 ```
 
 ## 性能基准
+
+> 以下原生 Compose 性能基准与功能漂移记录仅为旧客户端实现保留；当前 WebView 壳的业务性能应使用 Web/CDP 和真机 WebView 指标验收。
 
 `benchmark` 是使用 Debug 签名、Release 优化和独立 application id 的测试变体。它只在
 `BuildConfig.BENCHMARK_ENABLED=true` 时注入确定性的假用户数据，不读取真实令牌、Room 数据或网络。

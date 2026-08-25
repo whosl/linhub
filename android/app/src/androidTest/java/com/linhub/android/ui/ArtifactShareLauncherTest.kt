@@ -62,6 +62,6 @@ class ArtifactShareLauncherTest {
     }
 
     private companion object {
-        const val SHARE_URL = "https://xiaolin.wenzhuolin.xyz/share/artifact/share-e2e"
+        const val SHARE_URL = "https://lin.wenzhuolin.xyz/share/artifact/share-e2e"
     }
 }

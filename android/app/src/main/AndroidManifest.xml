@@ -30,8 +30,7 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data
                     android:scheme="${linhubAppLinkScheme}"
-                    android:host="${linhubAppLinkHost}"
-                    android:pathPrefix="/share/artifact/" />
+                    android:host="${linhubAppLinkHost}" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />

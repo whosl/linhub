@@ -89,8 +89,8 @@ if (suppliedReleaseSigningInputs !in setOf(0, releaseSigningInputs.size)) {
     )
 }
 val releaseSigningReady = suppliedReleaseSigningInputs == releaseSigningInputs.size
-val configuredVersionCode = releaseInput("LINHUB_VERSION_CODE").orElse("1").get().toInt()
-val configuredVersionName = releaseInput("LINHUB_VERSION_NAME").orElse("0.1.0").get()
+val configuredVersionCode = releaseInput("LINHUB_VERSION_CODE").orElse("3").get().toInt()
+val configuredVersionName = releaseInput("LINHUB_VERSION_NAME").orElse("0.2.1").get()
 require(configuredVersionCode > 0) { "LINHUB_VERSION_CODE 必须为正整数" }
 require(configuredVersionName.isNotBlank()) { "LINHUB_VERSION_NAME 不能为空" }
 
@@ -99,13 +99,13 @@ android {
     compileSdk = 37
 
     val debugBaseUrl = providers.gradleProperty("LINHUB_DEBUG_BASE_URL")
-        .orElse("http://10.0.2.2:3000/")
+        .orElse("https://lin.wenzhuolin.xyz/")
         .get()
     val profileBaseUrl = providers.gradleProperty("LINHUB_PROFILE_BASE_URL")
         .orElse("http://10.0.2.2:3001/")
         .get()
     val releaseBaseUrl = releaseInput("LINHUB_BASE_URL")
-        .orElse("https://xiaolin.wenzhuolin.xyz/")
+        .orElse("https://lin.wenzhuolin.xyz/")
         .get()
     val debugBaseUri = URI(debugBaseUrl)
     val profileBaseUri = URI(profileBaseUrl)

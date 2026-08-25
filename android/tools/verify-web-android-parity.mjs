@@ -10,6 +10,11 @@ const androidApiPath =
   "android/app/src/main/java/com/linhub/android/core/network/LinHubApi.kt";
 const destinationPath =
   "android/app/src/main/java/com/linhub/android/ui/LinHubViewModel.kt";
+const androidEntryPath =
+  "android/app/src/main/java/com/linhub/android/MainActivity.kt";
+const androidBuildPath = "android/app/build.gradle.kts";
+const webShellPath = "src/app/(app)/layout.tsx";
+const webOrbPath = "src/components/ui/linhub-orb.tsx";
 
 const webToAndroid = {
   getCurrentUser: "currentUser",
@@ -295,6 +300,55 @@ async function listNamedFiles(directory, fileName) {
   }
   await visit(directory);
   return result.sort();
+}
+
+// WebView 壳直接运行同一份 Next.js 应用，不再需要把每个 DataService 方法和页面
+// 人工重写到 Kotlin。此模式校验真正的壳层边界：固定生产源、同源导航、系统能力、
+// 网页全屏侧滑策略，以及新对话品牌动画。下方旧校验保留给仍使用原生 UI 的分支。
+const [androidEntry, androidBuild, webShell, webOrb] = await Promise.all([
+  read(androidEntryPath),
+  read(androidBuildPath),
+  read(webShellPath),
+  read(webOrbPath),
+]);
+if (androidEntry.includes("LinHubWebShell")) {
+  const shellRequirements = [
+    [androidEntry, "WebView(context)", "WebView 主容器"],
+    [androidEntry, "javaScriptEnabled = true", "JavaScript"],
+    [androidEntry, "domStorageEnabled = true", "DOM Storage"],
+    [androidEntry, "onShowFileChooser", "文件选择"],
+    [androidEntry, "setDownloadListener", "系统下载"],
+    [androidEntry, "BlobDownloadBridge", "Blob 文件下载"],
+    [androidEntry, "RESOURCE_AUDIO_CAPTURE", "录音权限"],
+    [androidEntry, "CookieManager", "Cookie 会话"],
+    [androidEntry, "isFirstParty", "同源导航策略"],
+    [androidBuild, 'orElse("https://lin.wenzhuolin.xyz/")', "生产 Base URL"],
+    [webShell, "SIDEBAR_SWIPE_MIN_DISTANCE_PX", "网页全屏侧滑距离锁"],
+    [webShell, "SIDEBAR_SWIPE_BLOCKED_SELECTOR", "网页侧滑冲突排除"],
+    [webOrb, "export function LinHubOrb", "新对话眼球"],
+  ];
+  for (const [source, marker, capability] of shellRequirements) {
+    if (!source.includes(marker)) fail(`WebView 壳缺少${capability}`);
+  }
+  const productionBaseOccurrences = androidBuild.match(
+    /orElse\("https:\/\/lin\.wenzhuolin\.xyz\/"\)/g,
+  )?.length ?? 0;
+  if (productionBaseOccurrences < 2) {
+    fail("Debug 与 Release 没有同时默认绑定 https://lin.wenzhuolin.xyz/");
+  }
+  console.log(
+    JSON.stringify(
+      {
+        architecture: "webview-shell",
+        productionBaseUrl: "https://lin.wenzhuolin.xyz/",
+        shellCapabilities: shellRequirements.length,
+        status: "passed",
+      },
+      null,
+      2,
+    ),
+  );
+  process.exit(0);
 }
 
 const [webService, androidApi, destinations] = await Promise.all([
